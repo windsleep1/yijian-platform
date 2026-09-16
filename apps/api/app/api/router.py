@@ -1,0 +1,32 @@
+"""路由汇总。新增模块只需在这里注册一行。"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from app.api.v1 import (
+    admin_audit,
+    admin_chapters,
+    admin_questions,
+    admin_rbac,
+    admin_users,
+    auth,
+    health,
+)
+
+api_router = APIRouter()
+
+api_router.include_router(health.router)
+api_router.include_router(auth.router)
+api_router.include_router(admin_users.router)
+api_router.include_router(admin_rbac.router)      # Batch 3：/admin/roles, /admin/permissions
+api_router.include_router(admin_audit.router)     # Batch 3：/admin/audit-logs
+api_router.include_router(admin_questions.router)  # Batch 4：/admin/questions CRUD + 批量删除
+api_router.include_router(admin_chapters.router)   # Batch 4：/admin/chapters/tree
+
+# 后续批次在此追加：
+#   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点
+#   api_router.include_router(practice.router)      # 刷题
+#   api_router.include_router(exams.router)         # 模考
+
+__all__ = ["api_router"]

@@ -1,0 +1,23 @@
+<!-- shadcn/ui 配置。版本锁 v3 的 tailwind。
+     本项目没有用 `npx shadcn@latest add`，组件是按官方 v3 结构手写进 src/components/ui 的，
+     这份配置主要是给"以后想再 add 组件"时用（aliases 必须与 tsconfig paths 一致）。 -->
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "tailwind.config.ts",
+    "css": "src/app/globals.css",
+    "baseColor": "slate",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  }
+}

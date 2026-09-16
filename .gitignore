@@ -1,0 +1,59 @@
+# 环境变量与密钥
+.env
+.env.*
+# 放行 env 模板本身（.env.example / .env.local.example 等），但 .env / .env.local 真身一律忽略
+!.env*.example
+deploy/.env
+
+# 密钥与证书（绝不入库）
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+known_hosts
+
+# 生成的种子数据（可复现，不入库）
+data/
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+.DS_Store
+Thumbs.db
+
+# 备份
+backup/
+*.dump
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
