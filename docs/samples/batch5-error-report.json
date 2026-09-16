@@ -1,0 +1,361 @@
+{
+  "_note": "Batch 5 验收标准 ① 的错误报告样例；对应文件 batch5-wrong-file.csv",
+  "_request": "POST /api/v1/admin/imports/375604249976901632/validate",
+  "batch_id": "375604249976901632",
+  "response": {
+    "code": 0,
+    "message": "校验完成，未写入任何题目",
+    "data": {
+      "id": "375604249976901632",
+      "batch_no": "IMP-20260916173031-01633",
+      "file_name": "wrong-100.csv",
+      "file_type": "csv",
+      "file_hash": "bdc34f58a628cf966244158c091827f48845bc72f1ded2c29a4df2468c1e2c8a",
+      "file_size": 34597,
+      "subject_id": null,
+      "subject_code": null,
+      "subject_name": null,
+      "source_type": "self",
+      "license_note": null,
+      "mode": "insert",
+      "status": "done",
+      "auto_publish": false,
+      "total_rows": 100,
+      "success_rows": 98,
+      "failed_rows": 2,
+      "duplicate_rows": 0,
+      "updated_rows": 0,
+      "error_report": {
+        "total_errors": 2,
+        "truncated": false,
+        "errors": [
+          {
+            "row_no": 57,
+            "field": "answer",
+            "message": "答案 D 不在选项中（本题选项：A、B、C）"
+          },
+          {
+            "row_no": 100,
+            "field": "chapter_code",
+            "message": "章节编码不存在：SW-SZ 下没有 SZ-99"
+          }
+        ]
+      },
+      "operator_id": "375228939615866880",
+      "operator_name": "超级管理员",
+      "started_at": "2026-09-16T09:30:31.614361Z",
+      "finished_at": "2026-09-16T09:30:31.619887Z",
+      "rollback_at": null,
+      "rollback_by": null,
+      "created_at": "2026-09-16T09:30:31.579874Z",
+      "can_execute": true,
+      "can_publish": true,
+      "can_rollback": true,
+      "rows": [
+        {
+          "row_no": 1,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 2,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 3,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 4,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 5,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 6,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 7,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 8,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 9,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 10,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 11,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 12,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 13,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 14,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 15,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 16,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 17,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 18,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 19,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 20,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 21,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 22,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 23,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 24,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 25,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 26,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 27,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 28,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 29,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 30,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 31,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 32,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 33,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 34,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 35,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 36,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 37,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 38,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 39,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 40,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 41,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 42,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 43,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 44,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 45,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 46,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 47,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 48,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 49,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        },
+        {
+          "row_no": 50,
+          "action": "insert",
+          "message": "",
+          "question_id": null
+        }
+      ],
+      "row_page": 1,
+      "row_page_size": 50,
+      "row_total": 100
+    }
+  }
+}

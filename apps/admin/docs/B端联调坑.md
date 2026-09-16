@@ -770,7 +770,7 @@ export function landingPath(perms): string | null { return MODULE_ENTRIES.find((
 
 ---
 
-## 21. 雪花 ID 在**请求方向**同样会丢精度（坑 1 的补完）★（Batch 4 验收实测）
+## 21. 雪花 ID 在**请求方向**同样会丢精度（坑 1 的补完）★（Batch 4 验收实测，✅ Batch 5 Pass 0 已修）
 
 **现象**
 
@@ -846,6 +846,73 @@ batchDelete.mutateAsync({ ids: selected.map(Number) });
 
 **教训**：ID 必须**全程**以字符串传递——从后端出参，到前端 state，到请求体。
 任何一个环节 `Number()` 一下，整条链路就断了；而且断得**静默**。
+
+### ✅ Batch 5 Pass 0：已修（附一个重要更正）
+
+写批量导入之前，先把这条彻底钉死。修的过程中**推翻了一个前提**，值得记下来：
+
+> **更正**：这条坑**不是生成器坏了**。
+> 用真实生成器实测（`tools/local-verify/probe-snowflake-batch.py`）：
+> 连续生成 6000 个 ID，`len(set(ids)) == 6000`、严格单调递增 —— Python 侧从没重复过。
+> 塌缩只发生在 `float64` 那一刻。旧标题说"批量导入必踩"是对的，
+> 但"踩"的是**传输层**，不是生成器。
+
+所以在 `apps/api/app/core/idgen.py` 里把它拆成**两个不变量**分开治：
+
+| 不变量 | 归属 | 内容 |
+|---|---|---|
+| **A. 唯一性** | `idgen.py` 负责 | 同一毫秒 seq 取满 4096 个后**换毫秒**，绝不把 seq 回绕成 0 复用 |
+| **B. 传输** | 调用方负责 | ID 跨进程/跨语言**必须走字符串**，禁止 `Number()` / `float()` |
+
+**修法一（不变量 A）**：`next_id()` 的 seq 分配从
+`(seq + 1) & MAX_SEQUENCE` 之后才判断换毫秒，改成**先判容量、再决定是否换毫秒**：
+
+```python
+if ts == self._last_ts:
+    if self._sequence >= MAX_SEQUENCE:      # 容量先判
+        ts = self._wait_next_ms(self._last_ts)   # 换毫秒
+        self._sequence = 0                       # 归零，不是回绕
+    else:
+        self._sequence += 1
+else:
+    self._sequence = 0
+```
+
+旧写法虽然也换毫秒，但"先回绕、后换毫秒"把正确性藏在赋值顺序里，极易被后人改坏。
+同时新增 **`next_ids(count)`** 批量预分配（导入管道用），内置
+`len(set(out)) == count` 断言 —— 模块注释里"批量导入时预先分配 ID"那句话，
+到这一批才真正有了实现。
+
+**修法二（不变量 B）**：`idgen.py` 新增三个显式守卫，让"想把 ID 变成数字"这件事**当场报错**：
+
+- `is_float_safe(v)` —— `float(v) == v` 才是可靠判据（注意 `2^53` 本身**可以**精确表示，
+  不可表示的是 `2^53+1`，所以安全上限是 `2^53-1`）；
+- `assert_float_safe(v)` —— 失败即抛 `ValueError`，提示改用字符串；
+- `float_loss_report(ids)` —— 量化"这批 ID 如果走了 float64 会烂成什么样"。
+
+**实测数据（新增探针 `probe-snowflake-batch.py`）**：
+
+```
+连续生成 6000 个：distinct = 6000                     # A 通过
+6000 个 ID -> float64 后只剩 98 个不同值（塌缩率 98.4%）  # B 的代价
+同一毫秒内 4095 个 ID -> float64 后只剩 65 个
+冻结同一毫秒连取 4100 个：distinct = 4100，跨 2 个毫秒    # 不变量 A 的边界
+```
+
+还有个**反直觉**的点，顺手记下：`seq=0` 的 ID（低 22 位 = 4096，是 64 的倍数）
+**恰好落在 float64 网格上、是无损的**；失真的是 `seq=1..63`。
+这就是"手点新建（总在 seq=0）永远测不出来、批量导入（必然 seq>0）必踩"的根因。
+
+**守卫测试位置（回归防线）**
+
+- `apps/api/tests/test_idgen.py` —— **15 个用例**，纯单元、不依赖 DB/API：
+  - `TestUniqueness::test_连续生成5000个不重复`（验收要求）
+  - `TestUniqueness::test_高频连续生成也不重复`（验收要求，`sleep(0)` 抖动 + 12000 个）
+  - `TestUniqueness::test_同毫秒seq取满后换毫秒而不是回绕`（冻结时钟的边界）
+  - `TestUniqueness::test_并发调用不重复`（8 线程 × 500）
+  - `TestTransportGuard::test_雪花ID的float安全性取决于seq`（把上面的反直觉点钉住）
+- `tools/local-verify/probe-snowflake-batch.py` —— 可独立跑的体检探针，
+  输出 A/B 两类的实测数字，供评审与文档引用。
 
 ---
 
@@ -957,6 +1024,280 @@ tests/conftest.py:55: AssertionError
 **教训**：**先怀疑状态，再怀疑代码。** 同一个套件"刚才还绿、现在红了"，
 八成是**有状态的东西**（限流计数、缓存、软删除数据、端口占用）在起作用 ——
 坑 17 是端口，坑 21 的 `skipped` 是软删除数据，这条是限流计数。
+
+**Batch 5 补充：一个**不用重启也能跑多遍**的绕法**
+
+上面的"临时解法"是重启 API。但如果你只是在**自己新写的用例**里需要注册用户，
+可以让这个用例把限流桶**隔到自己的假 IP 上** —— 服务端 `trust_proxy_headers=true`
+时，客户端 IP 以 `X-Forwarded-For` 首个地址为准（`deps.client_ip`）：
+
+```python
+# apps/api/tests/test_admin_v5.py::fresh_user
+ip = f"203.0.113.{random.randint(2, 250)}"          # TEST-NET-3 段，不会被路由
+h = {"X-Forwarded-For": ip}
+client.post(f"{API}/auth/sms/send", json={"phone": phone, "scene": "register"}, headers=h)
+client.post(f"{API}/auth/register", headers=h, json={...})
+```
+
+这样每个用例 1 次发送/注册，各占一个桶，**不会去抢整个套件共用的那份 20 次额度**。
+注意：这只对"你自己写的用例"有效；`test_smoke.py` 用的 `conftest.send_code` 不带这个头，
+全量跑很多遍依然会撞上限 —— 真正一劳永逸的还是上面那条"根治（建议）"。
+
+**落点**：`apps/api/tests/test_admin_v5.py::fresh_user`
+
+---
+
+## 24. 含错的文件照样写库：`validate` 报 2 行错，`execute` 却写了 98 行 ★（Batch 5 验收实测）
+
+**现象**
+
+按验收标准 ① 造了一份"100 行里第 57 行答案不在选项、第 100 行章节编码不存在"的文件：
+
+```
+校验结果 total=100 success=98 failed=2 total_errors=2
+    row_no=57   field=answer       答案 D 不在选项中（本题选项：A、B、C）
+    row_no=100  field=chapter_code 章节编码不存在：SW-SZ 下没有 SZ-99
+```
+
+校验报告完全正确。接着调 `execute` —— **它把通过的 98 行全写进库了**。
+而验收标准 ① 的原文是"精确报出行号+字段+原因，**不写入**"。
+
+**根因（两处文档打架，代码跟着歪）**
+
+`docs/07` §4.4 的示例里写着"执行（只导 insert，**跳过错行**）"，
+读起来像是"execute 天然会跳过错误行、把好的导进去"。于是实现就顺着这个语义走：
+execute 只挑 `action IN ('insert','update')` 的行写，错误行本来就不在集合里。
+
+但验收标准① 要的是"错误文件 → 不写入"，要求 3 又写着"**整批成功或整批失败**"。
+两条要求合起来的唯一自洽读法是：**有错行就不许执行**。
+
+**修法：默认严格，跳过错行必须显式 opt-in**
+
+```python
+# import_service.execute_batch
+if batch["failed_rows"] > 0 and not allow_partial:
+    raise conflict(f"本批次有 {batch['failed_rows']} 行未通过校验。按「整批成功或整批失败」"
+                   "的约定，不会写入任何数据。请修正后重新上传；"
+                   "若确认只导入通过的行，请在 execute 时传 \"allow_partial\": true。", 40901)
+```
+
+`ImportExecuteIn.allow_partial` 默认 `false`。这样：
+- 验收① 成立（默认一行不写）；
+- `docs/07` §4.4 的能力也没丢（想要就显式要）—— **不是简化，是把默认值从"宽松"拧成"严格"**。
+
+**落点**：`apps/api/app/services/import_service.py::execute_batch`、
+`apps/api/app/schemas/admin_import.py::ImportExecuteIn`
+
+**测试位置**：`apps/api/tests/test_admin_v5.py::test_wrong_file_reports_row_and_field_and_writes_nothing`
+（同一批次：先断言默认 40901 + 题量不变，再断言 `allow_partial=true` 写入 98 行、回滚后回到基线）
+
+**教训**：当两份文档对同一行为各说各话时，**取"更严"的那条**并写成默认值，
+把"更松"的那条降级成显式开关。默认值选松，等于把事故当默认。
+
+---
+
+## 25. 上传的原文从没落盘：`execute` 永远"原文件已不可用" ★（Batch 5 自审发现）
+
+**现象**
+
+`import_service` 里明明有这段：
+
+```python
+# 上传的原始文件：进程内暂存（本批不做对象存储）
+_FILE_STORE: dict[int, bytes] = {}
+
+async def _read_batch_file(batch_id: int) -> bytes | None:
+    return _FILE_STORE.get(batch_id)
+```
+
+但 `grep -n _FILE_STORE` 的结果只有**定义**和**读取**两处 ——
+`create_batch` 里**根本没有写入**。也就是说 `_read_batch_file()` 恒返回 `None`，
+`execute` 必然抛"批次原始文件已不可用"。
+
+**为什么会写成这样（值得记的思维陷阱）**
+
+`execute` 需要"重新解析原文件"才能拿到完整 payload ——
+因为 `import_items.raw` 是**瘦身过的**（超长文本截断到 200 字），不足以重建题目内容。
+这个设计是对的，但它把"原文必须持久化"变成了一条**隐性依赖**；
+而写 `create_batch` 时注意力都在"解析 + 建批次 + 存行"上，
+"存原文"这件事只留下了一个**看起来很完整的空容器**。
+`compileall` 过、OpenAPI 生成正常、`import` 不报错 —— 只有真跑一次才会炸。
+
+**修法：落盘 + 原子替换；顺手把进程内存这个坑也填了**
+
+```python
+_IMPORT_FILE_DIR = Path(tempfile.gettempdir()) / "yijian-import-files"
+
+def store_batch_file(batch_id: int, file_type: str, content: bytes) -> None:
+    _IMPORT_FILE_DIR.mkdir(parents=True, exist_ok=True)
+    target = _batch_file_path(batch_id, file_type)
+    tmp = target.with_name(target.name + ".part")
+    tmp.write_bytes(content)
+    os.replace(tmp, target)          # 原子替换：不会读到半截文件
+
+async def _read_batch_file(batch_id: int, file_type: str) -> bytes | None:
+    ...                              # asyncio.to_thread 读盘，避免阻塞事件循环
+```
+
+**为什么不继续用进程内 dict**：`execute` 与 `upload` 可能落在**不同 worker**，
+进程重启 / `--reload` 一改代码就丢。任何一个发生，都会在 execute 时表现为
+"上传明明成功了却读不到原文"。落盘后这些都不成立；生产换对象存储（`import_batches.file_url`）时
+接口形状不用动。
+
+另外把"先确认原文还在"提到**翻状态之前** —— 否则会留下一个 `status='importing'`
+却必然失败的批次（这种半截状态最难排查）。
+
+**落点**：`apps/api/app/services/import_service.py`（`_IMPORT_FILE_DIR` / `store_batch_file` /
+`_read_batch_file` / `execute_batch` 的前置检查）
+
+**测试位置**：任何一条走完 `upload → validate → execute` 的用例都会覆盖
+（`test_full_pipeline_execute_publish_rollback` 等）；另见 `import-sim-bank.py` 的 6000 行全量。
+
+**教训**：**"定义了一个容器" ≠ "往里写过东西"**。
+`grep` 一个变量名，看清它出现在"写"还是"只出现在读" —— 这是最便宜的自审。
+
+---
+
+## 26. `execute` 允许覆盖 `mode` → 校验与执行分裂；且 `done` 分不清"待执行/已执行" ★（Batch 5 自审发现）
+
+**现象一：mode 覆盖**
+
+初版 `ImportExecuteIn` 有个 `mode` 字段（"不传则用批次创建时的设置"）。问题在于：
+**校验阶段**已经按 `batch.mode` 把每行判成 `insert / update / duplicate` 落进 `import_items`，
+**执行阶段**若按另一个 mode 重算 payload，就会出现"校验说 update、执行按 insert 写"。
+这种 bug **只在数据里看得出来**，接口全部 200。
+
+**修法**：删掉 execute 的 mode 覆盖。mode 在**上传时定死**，要换就重新上传（重新校验）。
+`execute` 重算 payload 时一律沿用 `batch["mode"]`，与校验阶段同源。
+
+**现象二：`done` 是三个意思**
+
+`import_batches.status` 的枚举是
+`pending / parsing / validating / importing / done / failed / rolled_back`，
+**没有独立的"已执行"态** —— 于是 `done` 同时表示"校验完待执行"和"已经导完了"。
+结果：同一批可以 `execute` 两次。危害是**静默**的：
+
+- `insert` 模式重跑：全部命中为 `duplicate` → 0 命中 → `success_rows` 被重写成 **0**（统计被打烂）；
+- `upsert` 模式重跑：6000 道题 `version` **再顶一轮**。
+
+**修法**：不动 schema（改 CHECK 要重建库，会牵动 Batch 2/3/4 数据），
+改用"本批是否已有 `content_change_logs(action IN ('create','update'))`"来判定"已执行"：
+
+```python
+if await _executed_batch_ids(db, [batch_id]):
+    raise conflict("该批次已经执行过导入，不能重复执行。要重导请新建批次；要撤销请调用 /rollback。", 40901)
+```
+
+`can_execute` 也据此计算 —— 这样列表页的按钮状态与接口行为**永远一致**
+（不会出现"按钮亮着、点了 409"）。
+
+**落点**：`apps/api/app/services/import_service.py`（`_executed_batch_ids` / `_capabilities`）、
+`apps/api/app/schemas/admin_import.py::ImportExecuteIn`
+
+**测试位置**：`test_execute_twice_and_rollback_twice_are_rejected`、`test_rollback_restores_upserted_questions`
+
+---
+
+## 27. 校验拦得住业务规则，拦不住**列宽** —— 于是它成了"中途异常"的最佳构造 ★（Batch 5 验收实测）
+
+**现象**
+
+要验"执行中途某行异常 → 整批回滚"（验收④），最自然的构造是：
+**让某一行能过校验、却写不进库**。`validate_row` 只做业务规则（必填/枚举/外键/题型-选项一致性/
+答案合法性/合规红线），**不做长度上限**；而 `questions.source_name` 是 `VARCHAR(160)`。
+于是：
+
+```python
+rows.append(row(source_type="authorized",
+                source_name="授权来源" * 50,      # 200 字 > 160
+                source_license="HT-2026-0001"))
+```
+
+→ 校验 `success=6 failed=0`（全过！），`execute` 时 PG 报 `value too long for type character varying(160)`，
+整批回滚、`status='failed'`、题量不变。
+
+**这不是 bug，是分工**：validate 管业务规则，列宽这类结构性约束由 DB 兜底。
+但**必须写下来**，否则下一个人会以为"校验通过 = 一定能写进库"。
+另外要清楚：`_write_rows` 的"每 500 行一批"是**同一事务内的分批写**，不是分批提交 ——
+所以第 6 行炸了，前 5 行也一起回滚（这正是验收④要的）。
+
+**落点**：`apps/api/app/services/import_service.py::_write_rows`、`validate_row`、
+`db/schema.sql`（`questions.source_name VARCHAR(160)`）
+
+**测试位置**：`test_mid_import_failure_rolls_back_everything`
+
+**教训**：**"校验通过"和"能落库"是两件事**。想验事务边界，就要故意用
+"能过业务校验、过不了 DB 约束"的数据 —— 而不是随便写一行错数据（那会被 validate 提前拦下，验不到 execute）。
+
+---
+
+## 28. Batch 1 的导出格式 ≠ Batch 5 的导入模板：直接喂进去会把 6000 道题的章节洗成 NULL ★（Batch 5 验收实测）
+
+**现象 / 风险**
+
+`data/seed/questions.csv` 是 Batch 1 的**导出**，看起来"列名几乎一样"，但差在三处：
+
+| 差异 | seed 导出 | 导入模板（`docs/07` §4.2） | 直接喂进管道的后果 |
+|---|---|---|---|
+| 章节 / 知识点 | `chapter_id` / `knowledge_point_id`（数字 ID） | `chapter_code` / `kp_code`（业务编码） | 两列都不认识 → **章节关系全丢（写成 NULL）** |
+| 评分点 | 无该列 | `answer_points`（`文本｜分值;;…`） | 352 道案例小问的评分点丢失 |
+| 案例分组 | 只有 `parent_id` | `case_group_id` | 小问找不到大题 → 校验直接报错 |
+
+在 upsert 模式下，"章节关系写成 NULL"= **把库里 6000 道题的章节洗掉**，属于数据事故。
+所以验收⑤ 专门写了一个转换器 `tools/local-verify/import-sim-bank.py`，
+从 `questions.json`（信息最全）重编成严格 24 列的模板文件。
+
+**第二个必须提前体检的点：`content_hash` 必须逐条对齐**
+
+6000 道 seed 题**已经在库里**。如果导入时重算的 `content_hash` 与库里的差一个字节：
+
+- `insert` 模式 → 全部 miss，插出 6000 道重复（题量翻倍）；
+- `upsert` 模式 → 全部 miss，走 insert 分支，同样是重复。
+
+所以转换后**先做 hash 对齐体检再灌库**。实测结果：
+
+```
+连续重算 6000 条 content_hash：ok=6000  bad=0        # 与 seed 存的完全一致
+```
+
+落成两条回归防线：
+
+- `test_seed_bank_mapping_matches_existing_rows`（不必开全量也能跑）：
+  取 300 道 seed 用 `insert` 模式跑 → 断言 **`duplicate=300`、`success=0`**。
+  「全部命中已有题」这一条同时证明**转换器没改坏内容** + **幂等在真实体量上成立**，
+  而且**一行都不写库**，可以天天跑。
+- `import-sim-bank.py --dry-run`：全量 6000 行的体检（约 12s），只上传+校验。
+
+**顺带记两条"重导会改什么"（都是可解释的规范化，不是静默篡改）**
+
+1. `multiple` 题的 `answer` 会补上 `"partial_credit": true` —— 对齐 `docs/03` §5.1 的权威定义
+   （seed 漏了这个键；`single`/`judge`/`case`/`case_sub` 与 seed 完全一致）。
+2. `analysis_points` 的整分值写成 `2` 而不是 `2.0` —— **jsonb 里 `2` 与 `2.0` 是两个不同的值**，
+   所以 `parse_answer_points()` 特意 `int(num) if num.is_integer()`，避免"重导同一份文件"产生无意义 diff。
+
+**落点**：`tools/local-verify/import-sim-bank.py`、`apps/api/tests/test_admin_v5.py`（两个 seed 用例）、
+`apps/api/app/services/import_service.py::parse_answer_points`
+
+**教训**：**"看起来列名一样"是最贵的错觉**。跨批次复用数据前，先把它和**当前**契约逐列对齐，
+再拿主键/指纹字段做**逐条**体检 —— 抽样 10 条对得上，不代表 6000 条对得上。
+
+---
+
+## 附：一条"新增导入管道"的检查清单
+
+照这个顺序做，上面 24~28 逐条都能提前避开：
+
+- [ ] **闸门**：文件类型/大小/编码在**上传**就拒，别等到解析（坑 24 的邻位：错误要早报）
+- [ ] **dry-run 必须零副作用**：`validate` 一行都不许写库，且要能被反复调用
+- [ ] **逐行错误**：`{row_no, field, message}`，`row_no` 是**文件里的数据行号**（不含表头）
+- [ ] **默认严格**：有错行 → 整体拒绝；"跳过错行"做成显式开关（坑 24）
+- [ ] **原文持久化**：`execute` 要重新解析原文，就先确认它**真的被写过**、且**能跨进程读到**（坑 25）
+- [ ] **mode 单一来源**：定在上传/校验，执行阶段不许改（坑 26）
+- [ ] **幂等靠指纹**：`content_hash` 由**服务端重算**，不信文件里带的（坑 28）
+- [ ] **事务边界**：分批写 ≠ 分批提交；`finally` 兜底整批回滚，`status='failed'`
+- [ ] **回滚留痕**：软删除 `insert`、还原 `update`、写 `content_change_logs(action='rollback')`
+- [ ] **合规红线**：`source_type != 'self'` 必须有 `source_name`（`authorized` 还要 `source_license`）
+- [ ] **数据范围**：复用 `scope_subject_ids()` 这**一个**事实源，别在导入里再写一套过滤
 
 ---
 

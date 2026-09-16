@@ -69,12 +69,13 @@ class ScopeViewer(Protocol):
     """数据范围过滤所需的调用者信息。
 
     刻意不依赖 `core.deps.CurrentUser`（那会引入 fastapi 依赖），
-    只声明钩子真正用得到的三个属性。
+    只声明钩子真正用得到的属性。
     """
 
     id: int
     roles: list[str]
     permissions: set[str]
+    scopes: list[dict]
 
 
 # ============================================================ 纯函数（可单测）
@@ -166,20 +167,68 @@ class QuestionQuery:
         return self
 
 
-def apply_data_scope(query: QuestionQuery, current_user: ScopeViewer) -> QuestionQuery:
-    """Batch 5 填入实现：按 `current_user` 的 `user_roles.scope_type / scope_id`
-    过滤可见的题目（例如「教研只看自己专业的题」）。
+def scope_subject_ids(current_user: ScopeViewer) -> set[int] | None:
+    """调用者可见的 `subject_id` 集合；`None` 表示**不限制**。
 
-    现在直接返回 query，**不做任何过滤**。
+    这是数据范围的**单一事实源**：列表查询（`apply_data_scope`）与
+    导入校验（`import_service`）都调它，避免两处各写一套过滤规则而慢慢漂移。
 
-    钩子的价值在于调用点已经固定：下一批实现时只需要在这里追加
-    `query.add("q.subject_id = ANY(...)", ...)`，`list_questions` 一行都不用改。
-    参数 `current_user` 现在就传进来了，实现时不必回头改函数签名。
+    读的是 `user_roles.scope_type / scope_id`（经 `CurrentUser.scopes` 传进来）：
+
+    | scope_type | 含义 | 本批处理 |
+    |---|---|---|
+    | `global` | 全站 | 返回 `None`（不限制） |
+    | `subject` | 限定科目，`scope_id = subjects.id` | 收进集合 |
+    | `professional` | 限定专业 | **暂未映射**，按"失败关闭"处理 |
+    | `course` | 限定课程 | **暂未映射**，按"失败关闭"处理 |
+
+    **为什么 professional 是"失败关闭"而不是"不限制"**：
+    数据范围是**合规属性**（教研不该看到/改动其它专业的题），
+    猜错方向宁可少放行。`subjects` 表里"专业"其实就是一个科目
+    （`category='professional'`, `professional='sz'` 之类），
+    所以眼下用 `subject` 范围就能精确表达"只能动自己专业的题"，
+    `professional` 的数值映射留到真正需要跨科目专业分组时再做。
+
+    多条范围取**并集**；只要有一条 `global`，就直接不限制。
     """
-    # TODO(Batch 5): 读 user_roles.scope_type / scope_id，按 global/subject/professional
-    #   /course 四种范围追加 WHERE 片段。
-    _ = current_user  # 目前刻意未使用
-    return query
+    scopes = list(getattr(current_user, "scopes", None) or [])
+    if not scopes:
+        # 没有任何范围记录 —— 实际上不可达：没有角色就没有权限，早就 403 了。
+        return None
+    if any((s.get("scope_type") or "").lower() == "global" for s in scopes):
+        return None
+
+    ids: set[int] = set()
+    for s in scopes:
+        if (s.get("scope_type") or "").lower() == "subject" and s.get("scope_id") is not None:
+            ids.add(int(s["scope_id"]))
+    if ids:
+        return ids
+    # 只挂了 professional / course 范围，本批还没有映射规则 → 收敛到空集（失败关闭）
+    return set()
+
+
+def apply_data_scope(query: QuestionQuery, current_user: ScopeViewer) -> QuestionQuery:
+    """按 `user_roles.scope_type / scope_id` 过滤可见题目。
+
+    Batch 4 起这个钩子就已经被 `list_questions` 调用，但一直原样返回；
+    **Batch 5 第一次真正生效**（导入管道同时复用 `scope_subject_ids`）。
+
+    生成的是 `q.subject_id = ANY(:scope_subject_ids)`，走
+    `idx_questions_filter` 的前导列 `subject_id`，不额外加索引。
+    """
+    allowed = scope_subject_ids(current_user)
+    if allowed is None:
+        return query
+    if not allowed:
+        # 失败关闭：没有任何可见科目 → 恒假。用 `= ANY('{}')` 表达空集，
+        # 比 `1 = 0` 更能说明"是范围为空，不是逻辑错误"。
+        return query.add("q.subject_id = ANY(CAST(:scope_subject_ids AS bigint[]))",
+                         scope_subject_ids=[])
+    return query.add(
+        "q.subject_id = ANY(CAST(:scope_subject_ids AS bigint[]))",
+        scope_subject_ids=sorted(allowed),
+    )
 
 
 # ============================================================ 内部查询工具
@@ -1130,6 +1179,7 @@ __all__ = [
     "ScopeViewer",
     "QuestionQuery",
     "apply_data_scope",
+    "scope_subject_ids",
     "content_hash",
     "derive_answer",
     "list_questions",

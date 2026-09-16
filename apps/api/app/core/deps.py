@@ -77,6 +77,15 @@ class CurrentUser:
         return self.privileges.permission_set
 
     @property
+    def scopes(self) -> list[dict]:
+        """数据范围（`user_roles.scope_type / scope_id`）。
+
+        透出成属性，是为了让 service 层的 `ScopeViewer` 协议能直接读到它 ——
+        service 不允许 import `core.deps`，只认结构（见 question_service 的分层注记）。
+        """
+        return self.privileges.scopes
+
+    @property
     def display_name(self) -> str:
         return self.user.nickname or self.user.phone or str(self.user.id)
 
