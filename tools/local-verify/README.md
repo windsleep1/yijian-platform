@@ -1,9 +1,10 @@
 # 本地验证（不依赖 Docker）
 
-> 用途：在没有 Docker 的机器上，用**真实 PostgreSQL** 把 Batch 2 的后端跑起来并验收。
+> 用途：在没有 Docker 的机器上，用**真实 PostgreSQL** 把后端跑起来并验收
+> （Batch 2 起引入，后续批次持续复用；覆盖认证 / RBAC / 题库 CRUD / 导入管道）。
 > Redis 用 `fakeredis` 顶替（只模拟命令行为，其余代码路径 100% 真实）。
 >
-> 已在 Windows + PostgreSQL 16.15 + Python 3.13 上实测通过：`6 passed`。
+> 已在 Windows + PostgreSQL 16.15 + Python 3.13 上实测通过：**`54 passed, 1 skipped`**（Batch 6 时点）。
 
 ---
 
@@ -68,7 +69,7 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 | `%TEMP%\yijian-api.log` | uvicorn 启动日志 + 每个请求的访问日志（由 `serve_fake_redis.py` 自己落盘） |
 | `%TEMP%\yijian-pytest.log` | pytest 完整输出（UTF-16，`Get-Content -Encoding Unicode` 读） |
 
-期望输出结尾：
+期望输出结尾（pytest 按文件名排序，`test_smoke.py` 在最后，所以摘要行跟在它后面）：
 
 ```
 tests/test_smoke.py::test_health PASSED
@@ -77,8 +78,12 @@ tests/test_smoke.py::test_password_login_refresh_logout PASSED
 tests/test_smoke.py::test_unauthorized_access PASSED
 tests/test_smoke.py::test_rbac_flow PASSED
 tests/test_smoke.py::test_rate_limit_on_sms PASSED
-============================== 6 passed in 1.99s ==============================
+===================== 54 passed, 1 skipped in 10.20s =====================
 ```
+
+> 前面还会有 `test_admin_v3.py`（8）、`test_admin_v4.py`（12）、`test_admin_v5.py`（14）、
+> `test_idgen.py`（15）。**当前全量是 `54 passed, 1 skipped`** ——
+> 那个 `1 skipped` 是 `test_admin_v5.py` 里的 6000 行全量导入用例，需环境变量显式开启才会跑。
 
 > **`test_rbac_flow` 必须是 `PASSED` 而不是 `SKIPPED`。**
 > 它是唯一真正打到 `PUT /admin/users/{id}/roles` 和 `ANY(CAST(:uids AS bigint[]))` 的用例。

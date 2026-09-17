@@ -32,8 +32,11 @@ logger = logging.getLogger("app")
 DESCRIPTION = """
 ### 一建通 · 一级建造师学习备考平台 后端 API
 
-**当前版本（Batch 3）交付范围**：Batch 2（认证 + RBAC + 分层骨架，10 个接口）
-+ Batch 3 管理后台接口（审计日志 / 角色列表 / 权限树 / 用户详情），共 **14 个接口**。
+**当前版本（Batch 6）交付范围**：Batch 2（认证 + RBAC + 分层骨架）
++ Batch 3（审计日志 / 角色列表 / 权限树 / 用户详情）
++ Batch 4（题库 CRUD / 章节树）
++ Batch 5（题库批量导入管道：上传 / 校验 / 执行 / 发布 / 回滚）
++ Batch 6（批次变更日志），共 **29 个接口**。
 
 **统一响应体**：`{ code, message, data, trace_id, server_time }`，`code=0` 表示成功。
 

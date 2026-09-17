@@ -1,5 +1,13 @@
 """
-ORM 模型（Batch 2 只覆盖认证与 RBAC 需要的表）。
+ORM 模型 —— **只映射认证 / RBAC / 审计这 8 张表**（Batch 2 引入，后续批次未扩充）。
+
+| 已映射（本文件） | 未映射（走原生 SQL） |
+|---|---|
+| `users` `user_profiles` `user_sessions` `roles` `permissions` `role_permissions` `user_roles` `audit_logs` | `questions` `chapters` `knowledge_points` `import_batches` `content_change_logs` `paper_rules` `exams` … |
+
+Batch 4 起的题库 / 导入服务**一律用 `text()` 原生 SQL**（`question_service.py` / `import_service.py`），
+不是漏写了 ORM —— 那些查询带大量动态筛选、窗口函数与批量 upsert，ORM 表达反而更长更难读。
+所以查表结构请以 `db/schema.sql` 为唯一真相，**不要**以为"models.py 里没有 = 库里没有"。
 
 表结构以 db/schema.sql 为准，本文件是它的 ORM 映射。
 字段名与列名一一对应，不做重命名，避免出现两套真相。

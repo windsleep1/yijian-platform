@@ -34,26 +34,39 @@ npm run dev                                       # 打开 http://localhost:3000
 | 批次 | 内容 | 状态 |
 |---|---|---|
 | **Batch 1** | 产品方案、信息架构、数据库设计（含可执行 DDL）、API 清单、技术选型、部署方案、题库合规规范 | ✅ 已交付 |
-| **Batch 2** | 后端认证 + RBAC + 分层骨架（FastAPI + PostgreSQL + Redis），**10 个接口**，`docker compose up` 一键起 | ✅ 已交付 |
+| **Batch 2** | 后端认证 + RBAC + 分层骨架（FastAPI + PostgreSQL + Redis），`docker compose up` 一键起 | ✅ 已交付 |
 | **Batch 3** | 管理后台 v0.1：Next.js 14 前端骨架 + 用户管理 / 审计日志（`apps/admin`） | ✅ 已交付 |
 | **Batch 4** | **题库 CRUD**：后端 7 个接口 + 前端 3 个页面（列表 / 新建 / 详情编辑）+ 版本历史 | ✅ 已交付 |
-| **Batch 5** | 题库导入流水线、组卷引擎、记忆曲线算法、小程序端、支付、数据看板、压测上线 | ⏳ 待启动 |
+| **Batch 5** | **题库批量导入管道**：后端 7 个接口（上传 / 校验 / 执行 / 发布 / 回滚）+ 雪花 ID 精度修复 | ✅ 已交付 |
+| **Batch 6** | **导入向导**：前端 4 页（批次列表 / 三步向导 / 批次详情 / 错误报告 CSV）+ 批次变更日志接口 | ✅ 已交付 |
+| **Batch 7** | **组卷引擎**：组卷规则 CRUD + 自动组卷 / 卷面校验 / 发布（版本锁定）+ 试卷管理前端 | 🚧 进行中 |
+
+> **交付序号与最初规划不同。** 原「Batch 5」把导入流水线、组卷引擎、记忆曲线、小程序端、
+> 支付、数据看板、压测打包在一批里；实际按依赖顺序拆成了
+> **Batch 5（导入管道）→ Batch 6（导入向导）→ Batch 7（组卷引擎）**。
+> 记忆曲线、小程序端、支付、数据看板仍未启动。
+>
+> 当前后端共 **29 个接口**，pytest 全量 **54 passed, 1 skipped**。
 
 **每一批都可以独立执行、独立验收。** Batch 2 起，后端本身就是可运行服务：
 `cd deploy && cp .env.example .env && docker compose up -d --build` → `http://localhost:8000/docs` 即可点开 Swagger 联调。
 
 - Batch 3 验收：`docs/09-Batch3-管理后台v0.1-方案与骨架.md`
 - Batch 4 验收：`docs/10-Batch4-题库CRUD-方案与验收.md`（含 13 张端到端截图与实测缺陷记录）
+- Batch 5 验收：`docs/11-Batch5-导入管道-方案与验收.md`
+- Batch 6 验收：`docs/12-Batch6-导入向导-方案与验收.md`（含 18 张截图与实测缺陷记录）
 
-### 界面速览（管理后台 · Batch 3 / 4）
+### 界面速览（管理后台 · Batch 3 – 6）
 
 | 题库列表（搜索 / 筛选 / 分页） | 新建题目（实时校验，未通过不给提交） |
 |:---:|:---:|
 | ![题库列表](apps/admin/docs/screenshots/batch4/01-questions-list.png) | ![新建题目](apps/admin/docs/screenshots/batch4/09-question-new-form.png) |
 | **科目 → 章节联动筛选** | **批量软删除（二次确认）** |
 | ![科目章节联动](apps/admin/docs/screenshots/batch4/02-filter-subject-chapter.png) | ![批量删除确认](apps/admin/docs/screenshots/batch4/07-batch-delete-confirm.png) |
-| **题目版本历史（只读快照）** | **更多截图** |
-| ![版本历史抽屉](apps/admin/docs/screenshots/batch4/13-version-history-drawer.png) | 共 13 张，全部见 `apps/admin/docs/screenshots/batch4/` |
+| **题目版本历史（只读快照）** | **导入向导：步骤条 + 具体数字** |
+| ![版本历史抽屉](apps/admin/docs/screenshots/batch4/13-version-history-drawer.png) | ![导入预览](apps/admin/docs/screenshots/batch6/04-preview.png) |
+| **回滚二次确认（复述"软删除 N 道" + 手输批次号）** | **更多截图** |
+| ![回滚确认](apps/admin/docs/screenshots/batch6/17-rollback-confirm.png) | Batch 4 共 13 张 / Batch 6 共 18 张，见 `apps/admin/docs/screenshots/` |
 
 ---
 
@@ -74,30 +87,40 @@ yijian-platform/
 │   ├─ 07-题库合规与导入规范.md         # 合规来源矩阵、导入/审核/版本/回滚流程
 │   ├─ 08-Batch2-验收报告.md           # Batch 2 交付范围、实测结果、验收命令
 │   ├─ 09-Batch3-管理后台v0.1-方案与骨架.md
-│   └─ 10-Batch4-题库CRUD-方案与验收.md # Batch 4 方案、6 个 B 端特征、验收证据与实测缺陷
+│   ├─ 10-Batch4-题库CRUD-方案与验收.md # Batch 4 方案、6 个 B 端特征、验收证据与实测缺陷
+│   ├─ 11-Batch5-导入管道-方案与验收.md # Batch 5 导入管道、data scope、雪花 ID 修复
+│   ├─ 12-Batch6-导入向导-方案与验收.md # Batch 6 导入向导、七项交互、18 张截图
+│   ├─ 13-Batch7-组卷引擎-方案与验收.md # Batch 7（进行中）
+│   └─ samples/                        # 验收用样例文件（错误报告 / 走查 CSV）
 ├─ apps/
-│   ├─ api/                           # ★ Batch 2 交付主体：FastAPI 后端
+│   ├─ api/                           # FastAPI 后端（Batch 2 起，逐批扩充）
 │   │   ├─ Dockerfile                 # python:3.12-slim，非 root 运行
 │   │   ├─ docker-entrypoint.sh       # 等依赖 → 建表 → 建超管 → 启动
 │   │   ├─ requirements.txt
-│   │   ├─ tests/                     # pytest（26 passed）：smoke + v3 + v4
+│   │   ├─ tests/                     # pytest（54 passed, 1 skipped）：smoke + v3 + v4 + v5 + idgen
 │   │   └─ app/
 │   │       ├─ main.py                # 应用入口（中间件 / 异常处理 / 路由挂载）
 │   │       ├─ cli.py                 # wait-db / wait-redis / init-db / seed-admin / seed-questions
-│   │       ├─ core/                  # 配置、安全、依赖、异常、统一响应、雪花 ID
-│   │       ├─ db/                    # 引擎与会话、Redis 单例、ORM 模型
+│   │       ├─ core/                  # 配置、安全、依赖、异常、统一响应、雪花 ID、数据范围
+│   │       ├─ db/                    # 引擎与会话、Redis 单例、ORM 模型（仅认证/RBAC/审计 8 表）
 │   │       ├─ schemas/               # 入参/出参模型（BigIntStr 统一 ID 序列化）
-│   │       ├─ services/              # 业务逻辑（auth / rbac / sms / user / audit / question）
-│   │       └─ api/v1/                # health / auth / admin_users / admin_chapters / admin_questions
-│   └─ admin/                         # ★ Batch 3+4 交付主体：管理后台（Next.js 14）
-│       ├─ src/app/(console)/         # questions（列表/new/[id]）/ users / audit-logs
-│       ├─ src/components/            # QuestionForm、QuestionVersionDrawer、DataTable、MarkdownPreview…
-│       ├─ src/hooks/                 # useQuestions、useTableState、useAuth
-│       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、question 领域逻辑
+│   │       ├─ services/              # 业务逻辑（auth / rbac / sms / user / audit / question / import）
+│   │       └─ api/v1/                # health / auth / admin_users / admin_rbac / admin_audit
+│   │                                 #   / admin_chapters / admin_questions / admin_imports（共 29 个接口）
+│   └─ admin/                         # 管理后台（Next.js 14，Batch 3–6）
+│       ├─ src/app/(console)/         # questions（列表/new/[id]）/ imports（列表/new/[id]）
+│       │                             #   / users / audit-logs
+│       ├─ src/components/            # QuestionForm、QuestionVersionDrawer、DataTable、
+│       │                             #   StepWizard、ErrorReportTable、RollbackDialog、MarkdownPreview…
+│       ├─ src/hooks/                 # useQuestions、useImports、useTableState、useAuth
+│       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
+│       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 23 条实战坑（现象 → 根因 → 解法 → 落点）
-│           └─ screenshots/batch4/     # Batch 4 端到端截图 13 张
-├─ tools/local-verify/                # 本地联调脚本：起服务 / 冒烟 / 回归探针
+│           ├─ B端联调坑.md            # 33 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
+│           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
+│           └─ screenshots/batch7/     # Batch 7（进行中）
+├─ tools/local-verify/                # 本地联调脚本：起服务 / 冒烟 / 回归探针 / 导入转换器
 ├─ db/
 │   ├─ schema.sql                     # 可直接执行的 PostgreSQL 建表脚本（64 表 + 3 视图 + 102 索引 + 基础数据）
 │   └─ seed/
@@ -137,16 +160,18 @@ curl http://localhost:8000/api/v1/health
 
 打开 **http://localhost:8000/docs** 就是可点的 Swagger。
 
-### 冒烟测试（10 个接口全链路）
+### 冒烟测试
 
 ```bash
 cd ../apps/api
 pip install -r requirements.txt
 ADMIN_INIT_PHONE=13800000000 ADMIN_INIT_PASSWORD=Admin@123456 pytest tests -v
+# 全量 54 passed, 1 skipped（1 skipped 是 6000 行导入用例，需环境变量显式开启）
 ```
 
-覆盖：注册 → `/me` → 密码登录 → 刷新令牌轮换（旧 token 立即失效）→ 登出 →
+`test_smoke.py` 覆盖认证主链路：注册 → `/me` → 密码登录 → 刷新令牌轮换（旧 token 立即失效）→ 登出 →
 学员访问管理端 403 → 超管改角色 → **权限缓存立即失效** → 短信限流。
+`test_admin_v3/v4/v5.py` + `test_idgen.py` 分别覆盖管理后台、题库 CRUD、导入管道与雪花 ID 精度。
 
 ### 手动点两个接口看看
 
@@ -162,9 +187,10 @@ curl -s -X POST http://localhost:8000/api/v1/auth/register \
   -d '{"phone":"13800000001","code":"<dev_code>","password":"Passw0rd123"}'
 ```
 
-> **接口总数刻意控制在 10 个**（`/health` + `/auth` 7 个 + `/admin/users` 2 个），
-> 正好是认证与 RBAC 的最小完整闭环，其余业务接口留给 Batch 4 扩展。
-> 详见 `docs/08-Batch2-验收报告.md`。
+> 这段演示的是 **Batch 2 当时的 10 个接口**（`/health` + `/auth` 7 个 + `/admin/users` 2 个）——
+> 认证与 RBAC 的最小完整闭环，详见 `docs/08-Batch2-验收报告.md`。
+> 后续批次在此基础上加了题库 CRUD（Batch 4）、章节树、导入管道（Batch 5）、变更日志（Batch 6），
+> **当前共 29 个接口**。
 
 ### 手动新建一道题（Batch 4 题库接口）
 
@@ -305,12 +331,18 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 
 ## 七、下一步
 
-Batch 1 ~ 4 已完成（题库 CRUD 闭环）。往下可以接着推：
+**Batch 1 ~ 6 已完成**（认证/RBAC → 管理后台 → 题库 CRUD → 导入管道 → 导入向导）。
+当前在做 **Batch 7 组卷引擎**。往下可以接着推：
 
-- **「继续 Batch 5」** → 题库导入流水线（批量导入 + 合规校验）、组卷引擎、记忆曲线算法
+- **Batch 7（进行中）** → 组卷规则 CRUD + 自动组卷 / 卷面校验 / 发布（版本锁定）+ 试卷管理前端
+- **记忆曲线** → 学员练习调度算法（依赖答题记录，需 C 端先落地）
 - **移动端骨架** → 学员侧页面：首页倒计时、章节练习、答题卡、错题本、模拟考试、成绩报告
 - **「调整方案」** → 告诉我哪里要改（比如要换 Spring Boot / 要加直播 / 要做多租户加盟商）
 
-> 已知遗留项见 `docs/10-Batch4-题库CRUD-方案与验收.md` §7，
-> 其中最值得先处理的是**批量导入**：它会同一毫秒连出多个雪花 ID，
-> 正是坑文档第 21 条那颗雷的触发条件 —— 导入功能落地前请先读那一条。
+> ⚠️ **批量导入落地前必读**：导入会在同一毫秒连出多个雪花 ID，
+> 正是坑文档第 21 条那颗雷的触发条件。**Batch 5 Pass 0 已修复**（生成端唯一 + 传输端全程字符串），
+> 回归手段见 `tools/local-verify/probe-snowflake-batch.py` 与 `apps/api/tests/test_idgen.py`（15 条）。
+> 后续任何"批量生成 ID"或"把 ID 拼进请求体"的新代码，都要再跑一次这两道防线。
+>
+> 其余已知遗留项见 `docs/10-Batch4-题库CRUD-方案与验收.md` §7 与
+> `docs/12-Batch6-导入向导-方案与验收.md` §8。

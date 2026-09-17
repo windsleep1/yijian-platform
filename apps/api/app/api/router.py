@@ -24,7 +24,8 @@ api_router.include_router(admin_rbac.router)      # Batch 3：/admin/roles, /adm
 api_router.include_router(admin_audit.router)     # Batch 3：/admin/audit-logs
 api_router.include_router(admin_questions.router)  # Batch 4：/admin/questions CRUD + 批量删除
 api_router.include_router(admin_chapters.router)   # Batch 4：/admin/chapters/tree
-api_router.include_router(admin_imports.router)    # Batch 5：/admin/imports 题库批量导入管道
+api_router.include_router(admin_imports.router)    # Batch 5：/admin/imports 题库批量导入管道（7 接口）
+                                                   # Batch 6：+ /admin/imports/{id}/changes 批次变更日志
 
 # 后续批次在此追加：
 #   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点

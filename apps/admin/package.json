@@ -2,7 +2,7 @@
   "name": "yijian-admin",
   "version": "0.1.0",
   "private": true,
-  "description": "一建通 · 管理后台 v0.1（Batch 3）",
+  "description": "一建通 · 管理后台 v0.1（Batch 6）",
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
