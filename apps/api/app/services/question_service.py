@@ -48,6 +48,7 @@ from app.schemas.admin_question import (
     QuestionListItem,
     QuestionOptionIn,
     QuestionOptionOut,
+    QuestionRestoreOut,
     QuestionUpdateIn,
     QuestionVersionItem,
     SubjectBrief,
@@ -950,6 +951,132 @@ async def soft_delete_question(
     )
     await db.commit()
     return QuestionDeleteOut(id=question_id, is_deleted=True, version=new_version)
+
+
+async def _assert_question_relations_ok(db: AsyncSession, row: dict[str, Any]) -> None:
+    """恢复前校验题目挂的**章节 / 知识点**还在不在。
+
+    为什么必须查：`questions.chapter_id` / `knowledge_point_id` 是**弱引用**
+    （只有 `REFERENCES`，没写 `ON DELETE` 行为；而且章节/知识点是**软删除**，
+    数据库层面根本不会拦）。所以章节被删掉后，题目仍然"挂"在一个已删除的节点上。
+
+    如果直接恢复，这道题就出现在了一个不存在的章节里 ——
+    按章节筛选时它既不属于任何章节、又占着列表的位置，是最难查的一类脏数据。
+    **宁可拒绝恢复并说清楚，也不静默恢复到悬空引用上。**
+
+    知识点还要额外看它**所属的章节**：`knowledge_points.chapter_id` 是必填的，
+    父章节没了，这个知识点同样是悬空的。
+    """
+    problems: list[str] = []
+
+    chapter_id = row.get("chapter_id")
+    if chapter_id:
+        r = (
+            await db.execute(
+                text("SELECT name, is_deleted FROM chapters WHERE id = :cid"),
+                {"cid": chapter_id},
+            )
+        ).mappings().first()
+        if r is None:
+            problems.append(f"章节已不存在（chapter_id={chapter_id}）")
+        elif r["is_deleted"]:
+            problems.append(f"章节「{r['name']}」已删除")
+
+    kp_id = row.get("knowledge_point_id")
+    if kp_id:
+        kp = (
+            await db.execute(
+                text(
+                    "SELECT k.name, k.is_deleted, k.chapter_id, c.name AS chapter_name, "
+                    "       c.is_deleted AS chapter_deleted, c.id AS chapter_exists "
+                    "FROM knowledge_points k "
+                    "LEFT JOIN chapters c ON c.id = k.chapter_id "
+                    "WHERE k.id = :kid"
+                ),
+                {"kid": kp_id},
+            )
+        ).mappings().first()
+        if kp is None:
+            problems.append(f"知识点已不存在（knowledge_point_id={kp_id}）")
+        else:
+            if kp["is_deleted"]:
+                problems.append(f"知识点「{kp['name']}」已删除")
+            if kp["chapter_exists"] is None:
+                problems.append(f"知识点「{kp['name']}」所属章节已不存在")
+            elif kp["chapter_deleted"]:
+                problems.append(f"知识点「{kp['name']}」所属章节「{kp['chapter_name']}」已删除")
+
+    if problems:
+        raise conflict(
+            "题目关联的数据已失效，拒绝恢复："
+            + "；".join(problems)
+            + "。请先恢复对应的章节/知识点，或把这道题的章节/知识点改到有效节点上再恢复。"
+            "（不会静默恢复到不存在的章节上）",
+            40901,
+        )
+
+
+async def restore_question(
+    db: AsyncSession,
+    *,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    question_id: int,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> QuestionRestoreOut:
+    """恢复被软删除的题目（与 `soft_delete_question` 对称）。
+
+    三条刻意的行为：
+
+    1. **幂等**：题目本来就没被删除 → 返回 `code=0` + `already_active=true`，
+       **不报错也不产生写入**。"目标状态已达成"不是失败 ——
+       否则前端重试、或批量恢复里混进一道没删的题，就得专门写容错。
+    2. **恢复前校验关联数据**（见 `_assert_question_relations_ok`）——
+       章节/知识点已失效时拒绝并说明原因。
+    3. **版本 +1**：恢复是一次内容变更，与删除对称，`version` 也要往前走，
+       否则乐观锁会出现"删除再恢复之后版本号回到旧值"的诡异现象。
+    """
+    row = await _load_question_row(db, question_id, for_update=True)
+    if row is None:
+        raise not_found("题目不存在", 40401)
+
+    if not row["is_deleted"]:
+        return QuestionRestoreOut(
+            id=question_id,
+            is_deleted=False,
+            version=row["version"],
+            already_active=True,
+            message="题目当前未被删除，无需恢复。",
+        )
+
+    await _assert_question_relations_ok(db, row)
+
+    new_version = row["version"] + 1
+    await db.execute(
+        text(
+            "UPDATE questions SET is_deleted = false, updated_by = :actor, "
+            "version = :ver WHERE id = :qid"
+        ),
+        {"actor": actor.id, "ver": new_version, "qid": question_id},
+    )
+    await _record_change(
+        db, entity_id=question_id, action="restore",
+        before={"is_deleted": True, "stem": row["stem"]},
+        after={"is_deleted": False},
+        change_log="恢复题目", operator_id=actor.id, ip=ip,
+    )
+    await write_audit(
+        db, actor_id=actor.id, actor_name=actor_name, action="question.restore",
+        module="question", entity_type="question", entity_id=question_id,
+        before={"is_deleted": True}, after={"is_deleted": False},
+        method="POST", path=f"/api/v1/admin/questions/{question_id}/restore",
+        ip=ip, user_agent=user_agent,
+    )
+    await db.commit()
+    return QuestionRestoreOut(
+        id=question_id, is_deleted=False, version=new_version, message="已恢复"
+    )
 
 
 async def batch_soft_delete(

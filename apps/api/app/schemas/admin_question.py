@@ -308,6 +308,21 @@ class QuestionDeleteOut(BaseModel):
     version: int = Field(..., description="软删除后的版本号（原 version + 1）")
 
 
+class QuestionRestoreOut(BaseModel):
+    """单题恢复结果（Batch 7 补，与软删除对称）。
+
+    **幂等**：题目本来就没被删除时，`already_active=true` 且 `version` 不变 ——
+    接口返回 `code=0` 而不是报错。批量/重试场景下，"目标状态已达成"不该算失败。
+    """
+
+    id: BigIntStr
+    is_deleted: bool = False
+    version: int = Field(..., description="恢复后的版本号（原 version + 1）")
+    #: 本来就是未删除状态（走了幂等分支，**没有产生任何写入**）
+    already_active: bool = False
+    message: str = "已恢复"
+
+
 class QuestionBatchDeleteOut(BaseModel):
     deleted: int = Field(..., description="实际软删除的条数")
     skipped: list[BigIntStr] = Field(

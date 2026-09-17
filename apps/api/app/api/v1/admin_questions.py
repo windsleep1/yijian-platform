@@ -41,6 +41,7 @@ from app.schemas.admin_question import (
     QuestionDeleteOut,
     QuestionDetail,
     QuestionListItem,
+    QuestionRestoreOut,
     QuestionUpdateIn,
 )
 from app.services import question_service
@@ -255,3 +256,42 @@ async def delete_question(
         user_agent=request.headers.get("User-Agent"),
     )
     return ok(result.model_dump(), message="已删除")
+
+
+@router.post(
+    "/{question_id}/restore",
+    response_model=Envelope[QuestionRestoreOut],
+    summary="恢复题目",
+    description=(
+        "需要权限 `question:delete`（恢复与删除是**同一个权责**：能归档的人才能解除归档，\n"
+        "所以复用权限码，不新增 `question:restore`）。\n\n"
+        "**幂等**：题目本来就没被删除 → `code=0` + `already_active=true`，"
+        "**不报错也不产生写入**。\n\n"
+        "**恢复前会校验关联数据有效性**，任何一条不满足就拒绝（`40901`）并说明原因：\n"
+        "- 题目挂的 `chapter_id` 指向的章节已被删除 / 不存在\n"
+        "- `knowledge_point_id` 指向的知识点已被删除 / 不存在\n"
+        "- 知识点**所属的章节**已被删除 / 不存在\n\n"
+        "> 题目的章节/知识点是**弱引用**，章节被软删除时数据库不会拦，题目仍「挂」在\n"
+        "> 已删除的节点上。如果直接恢复，这道题就会出现在不存在的章节里 ——\n"
+        "> 按章节筛选时既不属于任何章节、又占着列表位置，是最难查的一类脏数据。\n"
+        "> 所以**宁可拒绝并说清楚，也不静默恢复到悬空引用上**。\n\n"
+        "恢复后 `version + 1` 并写 `content_change_logs`（action=restore，"
+        "diff 为 `{is_deleted: true → false}`）。"
+    ),
+    dependencies=[Depends(require_permission("question:delete"))],
+)
+async def restore_question(
+    question_id: int,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    result = await question_service.restore_question(
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        question_id=question_id,
+        ip=client_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
+    return ok(result.model_dump(), message=result.message)

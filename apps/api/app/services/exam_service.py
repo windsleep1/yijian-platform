@@ -9,6 +9,7 @@
     GET    /admin/exams/{id}               试卷详情（分段 + 题目 + 锁定版本）
     PUT    /admin/exams/{id}               编辑试卷
     DELETE /admin/exams/{id}               归档（软删除）
+    POST   /admin/exams/{id}/restore       恢复（解除归档）
     POST   /admin/exams/{id}/auto-compose  规则自动组卷
     POST   /admin/exams/{id}/validate      卷面校验
     POST   /admin/exams/{id}/publish       发布（写版本快照锁定）
@@ -78,6 +79,7 @@ from app.schemas.admin_exam import (
     ExamPublishIn,
     ExamPublishOut,
     ExamQuestionItem,
+    ExamRestoreOut,
     ExamSectionDetail,
     ExamSectionIn,
     ExamSectionOut,
@@ -1551,6 +1553,106 @@ async def soft_delete_exam(
     )
 
 
+async def _assert_exam_relations_ok(db: AsyncSession, row: Any) -> None:
+    """恢复前校验试卷的关联数据是否还站得住。
+
+    两条检查，都对应"恢复成一张能用的卷"这个真实前提：
+
+    1. **科目仍在启用状态**（`subjects.status='on'`）—— 科目停用后这张卷
+       在 C 端不可能被正常取到，恢复它只会让它在列表里挂着点不开。
+    2. **已发布的卷，卷面题目不能被归档** —— 这是最要紧的一条：
+       `exam_questions` 引用题目，而题目可以被单独软删除。若一份**已发布**的卷
+       恢复回来时卷面缺题，考生看到的卷子就是残缺的，而校验器会一直报
+       `QUESTION_DELETED`。草稿态的卷不受此限（还在编，缺题很正常）。
+
+    **不允许静默恢复到一个不成立的状态上** —— 与题目恢复是同一条原则。
+    """
+    problems: list[str] = []
+
+    sub = (
+        await db.execute(
+            text("SELECT name, status FROM subjects WHERE id = :sid"),
+            {"sid": int(row["subject_id"])},
+        )
+    ).mappings().first()
+    if sub is None:
+        problems.append("试卷所属科目已不存在")
+    elif sub["status"] != "on":
+        problems.append(f"试卷所属科目「{sub['name']}」已停用")
+
+    if row["status"] == "published":
+        n = await db.scalar(
+            text(
+                "SELECT count(*) FROM exam_questions eq "
+                "JOIN questions q ON q.id = eq.question_id "
+                "WHERE eq.exam_id = :eid AND q.is_deleted = true"
+            ),
+            {"eid": int(row["id"])},
+        )
+        if n:
+            problems.append(
+                f"这是一份**已发布**的卷，但卷面有 {int(n)} 道题已被归档"
+                "（考生会看到残缺的卷面）"
+            )
+
+    if problems:
+        raise errors.conflict(
+            "试卷关联的数据已失效，拒绝恢复："
+            + "；".join(problems)
+            + "。请先恢复对应科目 / 卷面题目，或把试卷改回草稿并重新组卷后再恢复。",
+            40901,
+        )
+
+
+async def restore_exam(
+    db: AsyncSession,
+    *,
+    actor: Actor,
+    actor_name: str,
+    exam_id: int,
+    ip: str | None = None,
+) -> ExamRestoreOut:
+    """恢复被归档的试卷（与 `soft_delete_exam` 对称）。
+
+    - **幂等**：试卷本来就没归档 → `code=0` + `already_active=true`，无写入。
+    - **恢复前校验关联数据**（见 `_assert_exam_relations_ok`）。
+    - 恢复的是"这些卷"，**不动任何题目**（归档时也没动过）。
+    - 写 `content_change_logs`（action=restore，diff 为 `{is_deleted: true → false}`）。
+    """
+    row = await _load_exam_row(db, exam_id, for_update=True)
+    _ensure_subject_visible(actor, int(row["subject_id"]), "试卷所属科目")
+
+    if not row["is_deleted"]:
+        return ExamRestoreOut(
+            id=exam_id, title=row["title"], is_deleted=False, status=row["status"],
+            already_active=True,
+            message="试卷当前未被归档，无需恢复。",
+        )
+
+    await _assert_exam_relations_ok(db, row)
+
+    await db.execute(
+        text("UPDATE exams SET is_deleted = false, updated_at = now() WHERE id = :eid"),
+        {"eid": exam_id},
+    )
+    await _write_change_log(
+        db, entity_type="exam", entity_id=exam_id, action="restore",
+        actor_id=actor.id, ip=ip,
+        change_log=f"恢复试卷「{row['title']}」",
+        before={"is_deleted": True, "status": row["status"]},
+        after={"is_deleted": False, "status": row["status"]},
+    )
+    await db.commit()
+
+    return ExamRestoreOut(
+        id=exam_id, title=row["title"], is_deleted=False, status=row["status"],
+        message=(
+            f"试卷已恢复，状态仍是「{STATUS_LABELS.get(row['status'], row['status'])}」，"
+            "现在会重新出现在默认列表里。"
+        ),
+    )
+
+
 # ============================================================ 变更日志
 
 
@@ -1599,6 +1701,7 @@ __all__ = [
     "list_paper_rules",
     "publish_exam",
     "relaxation_steps",
+    "restore_exam",
     "soft_delete_exam",
     "update_exam",
     "update_paper_rule",

@@ -7,7 +7,7 @@
 > **Pass 2 试卷管理前端**（`/exams`、`/exams/new`、`/exams/[id]`、`/paper-rules`，待开工）。
 > 本文覆盖 Pass 1 与前置修正；Pass 2 完成后在文末追加其章节。
 >
-> **当前状态**：后端 **41 个接口**，`run-smoke.ps1` **78 passed, 1 skipped**（无回归）。
+> **当前状态**：后端 **43 个接口**，`run-smoke.ps1` **86 passed, 1 skipped**（无回归）。
 
 前置：Batch 4 的题库 CRUD、Batch 5 的导入管道（题库里已有 6000 道已发布仿真题）。
 
@@ -31,12 +31,15 @@
 | ⑩ | GET | `/admin/exams/{id}` | `exam:read` | 试卷详情（分段 + 题目 + 锁定版本） |
 | ⑪ | PUT | `/admin/exams/{id}` | `exam:create` | 编辑试卷 |
 | ⑫ | DELETE | `/admin/exams/{id}` | `exam:create` | **归档（软删除）** |
+| ⑬ | POST | `/admin/exams/{id}/restore` | `exam:publish` | **恢复（解除归档）** |
+| ⑭ | POST | `/admin/questions/{id}/restore` | `question:delete` | **恢复题目**（与⑫对称，在题库路由下） |
 
 > 原需求列了 9 个。多出来的 ⑤（试卷列表）、⑪ 的完整语义是 Pass 2 前端必需的
-> —— 列表页要有数据来源，编辑页要有落点；⑫ 与 Batch 4 的题目软删除对称（见 §3.5）。
+> —— 列表页要有数据来源，编辑页要有落点；⑫⑬⑭ 是与 Batch 4 题目软删除对称的
+> **归档 / 恢复**闭环（§3.5、§3.8）。
 > 没有超出"组卷引擎"的范围。
 
-后端接口总数：**29 → 41**。
+后端接口总数：**29 → 43**（Batch 7 贡献 14 个：试卷/组卷 13 个 + 题目恢复 1 个）。
 
 ### 1.2 前置修正（Pass 2 开工前，独立的 `chore` 提交）
 
@@ -251,7 +254,7 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 加一条要同时改种子与前端常量；而"能建卷的人能归档自己的卷"是合理的权责边界。
 若将来需要"只读 + 不能删"的划分，再拆。
 
-⚠️ **没有"取消归档"接口**（本批不做，见 §7 遗留事项）。
+**恢复接口见 §3.8**（`POST /admin/exams/{id}/restore`）—— 归档与恢复构成闭环。
 
 ### 3.6 `viewer` 只读岗补 `exam:read`（不新建角色）
 
@@ -283,10 +286,57 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 想保留规则但不再使用，请改 `status=off`：组卷时会明确拒绝停用规则
 （`test_disabled_rule_is_refused_at_compose_time`），而不是让它在暗处继续生效。
 
+### 3.8 恢复接口（解除归档）—— 与归档/删除对称
+
+| 接口 | 权限 | 说明 |
+|---|---|---|
+| `POST /admin/exams/{id}/restore` | `exam:publish` | 恢复试卷 |
+| `POST /admin/questions/{id}/restore` | `question:delete` | 恢复题目 |
+
+**都不新增权限码**，但两侧刻意选了不同的既有权限：
+
+| 动作 | 权限 | 为什么 |
+|---|---|---|
+| 归档试卷 | `exam:create` | "把卷收起来"是组卷者的日常操作 |
+| **恢复试卷** | **`exam:publish`** | 一份已发布的卷恢复后**立刻重新对外可见**，分量更接近发布 |
+| 删除题目 | `question:delete` | （Batch 4 既有） |
+| **恢复题目** | **`question:delete`** | 恢复与删除是**同一个权责**，能归档的人才能解除归档 |
+
+三条共同性质：
+
+**① 幂等** —— 对象本来就没被删除时返回 `code=0` + `already_active=true`，
+**不报错也不产生写入**。"目标状态已达成"不是失败；否则前端重试、
+或批量恢复里混进一道没删的题，都得专门写容错。注意幂等分支**不会**让 `version` 再 +1。
+
+**② 恢复前校验关联数据有效性** —— 这是本组接口最要紧的部分：
+
+| 对象 | 拒绝条件 | 不加这条会怎样 |
+|---|---|---|
+| 题目 | `chapter_id` 指向的章节已删/不存在 | 题目挂到**不存在的章节**上，按章节筛选时既不属于任何章节、又占着列表位置 |
+| 题目 | `knowledge_point_id` 已删/不存在 | 同上，且知识点的**父章节**也要一并检查（`knowledge_points.chapter_id` 是必填） |
+| 试卷 | 所属科目已停用（`status != 'on'`） | 卷子在列表里挂着但 C 端取不到、点不开 |
+| 试卷 | **已发布**的卷且卷面有题被归档 | 考生看到**残缺卷面**，且校验器会一直报 `QUESTION_DELETED` |
+
+一律 `40901` + 说清**是哪一条**不满足 + 给出可执行的下一步
+（"请先恢复对应的章节/知识点" / "或把试卷改回草稿并重新组卷"）。
+**草稿态的试卷不受"缺题"限制** —— 还在编，缺题很正常。
+
+> 为什么必须自己查：`questions.chapter_id` / `knowledge_point_id` 是**弱引用**
+> （只有 `REFERENCES`，没写 `ON DELETE` 行为），而章节/知识点用的是**软删除** ——
+> 数据库层面**根本不会拦**。所以"关联还在不在"只能由业务代码负责。
+>
+> 原则与"缺口不静默补题"同源：**不允许静默恢复到一个不成立的状态上。**
+
+**③ 留痕** —— 写 `content_change_logs`，`action=restore`，
+`diff` 为 `{before: {is_deleted: true}, after: {is_deleted: false}}`
+（与 delete 的 diff 形状一致，前端审计抽屉能直接渲染）。题目侧额外写 `audit_logs`。
+
+**版本号**：题目恢复 `version + 1`。恢复是一次内容变更，与删除对称；
+否则会出现"删除再恢复后版本号回到旧值"的诡异现象（乐观锁会错判）。
+
 ---
 
 ## 4. 数据范围
-
 复用 `question_service.scope_subject_ids()` —— **同一个事实源**，不在组卷里另写一套过滤。
 
 | 位置 | 收口方式 |
@@ -369,7 +419,7 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 ### 5.6 验收⑥ `run-smoke.ps1` 全绿，Batch 2–6 不回归
 
 ```
-78 passed, 1 skipped
+86 passed, 1 skipped
 ```
 
 | 测试文件 | 用例数 | 归属 |
@@ -377,11 +427,11 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 | `test_admin_v3.py` | 8 | Batch 3 |
 | `test_admin_v4.py` | 12 | Batch 4 |
 | `test_admin_v5.py` | 14 | Batch 5 / 6 |
-| `test_admin_v7.py` | **24** | **Batch 7（Pass 1 21 条 + 前置修正 3 条）** |
+| `test_admin_v7.py` | **32** | **Batch 7（Pass 1 21 + 前置修正 3 + 恢复接口 8）** |
 | `test_idgen.py` | 15 | Batch 5 |
 | `test_smoke.py` | 6 | Batch 2 |
 
-上一批是 `54 passed, 1 skipped`；本批 **+24**，无回归。
+上一批是 `54 passed, 1 skipped`；Batch 7 **+32**，无回归。
 （`1 skipped` 是 Batch 5 就有的 6000 行环境变量门控用例。）
 
 > ⚠️ **加 `viewer` 的 `exam:read` 会牵动 Batch 3 的用例** ——
@@ -402,6 +452,12 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 | ⑦ 数据范围（教研只能组自己科目的卷） | `test_data_scope_researcher_only_own_subject` |
 | 发布前强制校验 | `test_publish_blocked_when_validation_fails` |
 | 锁定落独立列 + JSONB 双写一致 | `test_locked_version_is_written_to_column_and_mirrored_to_jsonb` |
+| 恢复：归档→恢复→回默认列表、幂等 | `test_exam_restore_roundtrip_and_idempotent` |
+| 恢复权限（`exam:publish`） | `test_exam_restore_requires_publish_permission` |
+| 恢复前校验关联数据（科目停用 / 已发布卷缺题） | `test_exam_restore_rejects_when_subject_disabled`、`..._published_with_archived_questions` |
+| 题目恢复：幂等、版本 +1、权限 | `test_question_restore_roundtrip_and_idempotent`、`..._requires_delete_permission` |
+| **题目恢复拒绝悬空引用**（章节/知识点已删） | `test_question_restore_rejects_when_chapter_or_kp_deleted` |
+| 恢复留痕（diff `is_deleted: true→false`） | `test_restore_writes_change_log_with_is_deleted_diff` |
 
 其余为算法纯函数（6 条）与 CRUD/状态/权限边界。
 
@@ -434,8 +490,8 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 | # | 事项 | 说明 |
 |---|---|---|
 | 1 | **`rule_config.question_locks` 待清理** | 已 deprecated（读写都走独立列，JSONB 仅回退 + 双写）。**下一批删**：停掉双写、删回退分支、清存量行里的键（§3.3） |
-| 2 | **试卷没有"取消归档"接口** | `DELETE` 只能归档；恢复目前要手动改库。对称的做法是加 `POST /admin/exams/{id}/restore`（题目侧也没有，可一起做） |
-| 3 | 试卷没有"物理删除" | 只有软删除。这是**故意的**（有作答记录的卷不能真删），但与题目的处理一致 |
+| 2 | 试卷没有"物理删除" | 只有软删除 + 恢复。这是**故意的**（有作答记录的卷不能真删），与题目处理一致 |
+| 3 | **题目写路径未做数据范围校验** | `create` / `update` / `delete` / `restore` 题目都**没有**按 `user_roles.scope_type` 收口（只有列表/导入/组卷做了）。这是 Batch 4 起就存在的缺口，本次**刻意没有只给 `restore` 单独加** —— 那样会出现"能删别科目的题、却恢复不了"的更糟状态。要修就四个入口一起修 |
 | 4 | `rule_config` 的"答题行为"字段未开放 | schema 里注明它用于"随机顺序 / 单题限时 / 是否可回看"，本批没有开对应的入参（`ExamCreateIn` 未接 `rule_config`），需要时再加 |
 | 5 | 组卷不处理案例题**分组** | `case_sub` 被明确拒绝独立抽题；抽 `case` 时只抽到大题本身，**没有把它的子问一起带进卷**。真正支持案例题需要"父题 + 子问"整体入卷 |
 | 6 | 加权采样只按"使用次数" | schema 里还有 `question_stats`（正确率/区分度/平均耗时），`strategy` 也已预留 `weak_first` / `coverage` / `history_similar` 三个取值，但本批只实现 `random` 语义 |
@@ -514,10 +570,10 @@ curl -s -X POST $BASE/admin/exams/$EXAM/publish  -H "$H" -H 'Content-Type: appli
 | 发布前强制走 validate，不通过不允许发布 | 后端已强制；前端需先展示 `validation` 再放开按钮 |
 | 已发布试卷显示"锁定版本 vX"；与当前版本不同时显示 **"已锁定至 vX（当前 vY）"** + hover 差异摘要 | `ExamQuestionItem.locked_version` / `current_version` / `version_drift`（且 `stem_preview` 已是锁定版题干） |
 | **归档**按钮 + 默认列表过滤 + "显示已归档"开关 | `DELETE /admin/exams/{id}`、`ExamListItem.is_deleted`、`can_delete` |
-| **viewer 登录时"发布"按钮置灰 + tooltip** | `viewer` 已补 `exam:read`；发布返回 `40301`，消息含 `exam:publish`（tooltip 直接用） |
+| **恢复**按钮（**只在"显示已归档"模式下出现** + 二次确认） | `POST /admin/exams/{id}/restore`（§3.8）；拒绝时 `40901` + 具体原因可直接展示 |
+| **viewer 登录时"发布/归档/恢复"按钮置灰 + tooltip** | `viewer` 只有 `exam:read`；三个写接口分别返回 `40301`，消息含 `exam:publish` / `exam:create`（tooltip 直接用） |
 
 > ✅ 原「Pass 2 若要演示发布按钮置灰，需先加角色」的问题已解决 ——
 > `viewer` 补了 `exam:read` 就够（§3.6），**不需要新建角色**。
->
-> ⚠️ Pass 2 只剩一个后端侧的空缺：**没有"取消归档"接口**。
-> 前端若要做"恢复"按钮，需要先补 `POST /admin/exams/{id}/restore`（§7 第 2 条）。
+> 归档（`exam:create`）、恢复（`exam:publish`）也都在 viewer 的权限之外，
+> 所以"三个写按钮全灰"是同一个账号能一次演示完的。

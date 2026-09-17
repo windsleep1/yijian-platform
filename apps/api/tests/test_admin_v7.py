@@ -1025,3 +1025,283 @@ def test_soft_delete_hides_from_default_list_but_keeps_detail(
     # 不存在的 id 归档 → 40401
     b = body(client.delete(f"{API}/admin/exams/999999999999999999", headers=admin_h))
     assert b["code"] == 40401, b
+
+
+# ================================================================ L. 恢复接口（题目 + 试卷对称）
+# 两条接口刻意做成对称的：
+#     POST /admin/exams/{id}/restore      —— exam:publish
+#     POST /admin/questions/{id}/restore  —— question:delete
+# 共同性质：幂等；恢复前校验关联数据有效性，不静默恢复到悬空引用上。
+
+
+def restore_exam(client, headers, exam_id) -> dict:
+    return body(client.post(f"{API}/admin/exams/{exam_id}/restore", headers=headers, timeout=30))
+
+
+def restore_question(client, headers, qid) -> dict:
+    return body(client.post(f"{API}/admin/questions/{qid}/restore", headers=headers, timeout=30))
+
+
+def test_exam_restore_roundtrip_and_idempotent(client: httpx.Client, admin_h, created) -> None:
+    """归档 → 默认列表看不到 → 开开关能看到 → **恢复** → 回到默认列表；再调幂等。"""
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"恢复 {uuid.uuid4().hex[:6]}")
+    created.exams.append(exam["id"])
+    assert compose(client, admin_h, exam["id"],
+                   {"rules": [{"type": "judge", "count": 3}], "seed": 41})["code"] == 0
+
+    assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
+
+    def in_default_list() -> bool:
+        b = body(client.get(f"{API}/admin/exams", headers=admin_h,
+                            params={"page_size": 100, "subject_id": JJ_SUBJECT_ID}))
+        return any(x["id"] == exam["id"] for x in b["data"]["items"])
+
+    assert not in_default_list(), "归档后不该出现在默认列表"
+
+    # 恢复
+    r = restore_exam(client, admin_h, exam["id"])
+    assert r["code"] == 0, r
+    assert r["data"]["is_deleted"] is False and r["data"]["already_active"] is False, r["data"]
+    assert in_default_list(), "恢复后应回到默认列表"
+
+    # 详情：按钮能力恢复（草稿态可编可组）
+    d = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert d["is_deleted"] is False and d["can_edit"] is True and d["can_delete"] is True, d
+
+    # 幂等：没归档的再调一次 → code=0、already_active=true
+    again = restore_exam(client, admin_h, exam["id"])
+    assert again["code"] == 0, again
+    assert again["data"]["already_active"] is True, again["data"]
+    assert again["data"]["is_deleted"] is False, again["data"]
+
+    # 不存在的 id → 40401
+    b = restore_exam(client, admin_h, 999999999999999999)
+    assert b["code"] == 40401, b
+
+
+def test_exam_restore_requires_publish_permission(client: httpx.Client, admin_h, created) -> None:
+    """恢复需要 `exam:publish`：viewer 能看能归档（exam:create）但**不能恢复**。"""
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"恢复权限 {uuid.uuid4().hex[:6]}")
+    created.exams.append(exam["id"])
+    assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
+
+    u = fresh_user(client, nickname="B7 恢复权限")
+    assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
+    vh = auth(u["access_token"])
+
+    # 读 OK（含已归档的详情）
+    assert body(client.get(f"{API}/admin/exams/{exam['id']}", headers=vh))["code"] == 0
+    # 恢复被挡
+    b = restore_exam(client, vh, exam["id"])
+    assert b["code"] == 40301 and "exam:publish" in b["message"], b
+    # 归档也被挡（viewer 没有 exam:create）
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=vh))
+    assert b["code"] == 40301 and "exam:create" in b["message"], b
+
+    # 仍是归档态（viewer 的失败尝试无副作用）
+    d = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert d["is_deleted"] is True, d
+
+
+def test_exam_restore_rejects_when_subject_disabled(client: httpx.Client, admin_h, created) -> None:
+    """所属科目已停用 → 拒绝恢复并说明原因、**不改状态**。"""
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能改科目状态")
+
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"停用科目 {uuid.uuid4().hex[:6]}")
+    created.exams.append(exam["id"])
+    assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
+
+    try:
+        assert sql_exec("UPDATE subjects SET status='off' WHERE id=$1", JJ_SUBJECT_ID) is not None
+        b = restore_exam(client, admin_h, exam["id"])
+        assert b["code"] == 40901 and "停用" in b["message"], b
+        # 拒绝 = 没有副作用
+        d = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+        assert d["is_deleted"] is True, "被拒绝的恢复不该改动 is_deleted"
+    finally:
+        sql_exec("UPDATE subjects SET status='on' WHERE id=$1", JJ_SUBJECT_ID)
+
+    # 科目恢复启用后，同一个请求就通过了
+    assert restore_exam(client, admin_h, exam["id"])["code"] == 0
+
+
+def test_exam_restore_rejects_published_with_archived_questions(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """**已发布**的卷若卷面有题被归档 → 拒绝恢复（否则考生看到残缺卷面）。
+
+    对照：把同一个卷改回草稿，就不该再拦 —— 草稿缺题很正常。
+    """
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"缺题的已发布卷 {uuid.uuid4().hex[:6]}", pass_score=3)
+    created.exams.append(exam["id"])
+    assert compose(client, admin_h, exam["id"],
+                   {"rules": [{"type": "judge", "count": 3}], "seed": 42})["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    # 挑一道卷面题归档
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    victim = detail["sections"][0]["questions"][0]["question_id"]
+    created.questions.append(victim)
+    assert body(client.delete(f"{API}/admin/questions/{victim}", headers=admin_h))["code"] == 0
+
+    assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
+    b = restore_exam(client, admin_h, exam["id"])
+    assert b["code"] == 40901 and "已被归档" in b["message"], b
+    assert "已发布" in b["message"], b["message"]
+
+    # 草稿态不受此限
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能改试卷状态")
+    sql_exec("UPDATE exams SET status='draft', published_at=NULL WHERE id=$1", int(exam["id"]))
+    assert restore_exam(client, admin_h, exam["id"])["code"] == 0, "草稿缺题不该拦"
+
+
+def test_question_restore_roundtrip_and_idempotent(client: httpx.Client, admin_h, created) -> None:
+    """题目：软删 → 默认列表看不到 → 恢复 → 回到列表；幂等；版本号 +1。"""
+    q = make_question(client, admin_h, subject_id=JJ_SUBJECT_ID)
+    created.questions.append(q["id"])
+    assert q["version"] == 1, q
+
+    assert body(client.delete(f"{API}/admin/questions/{q['id']}", headers=admin_h))["code"] == 0
+
+    def visible() -> bool:
+        b = body(client.get(f"{API}/admin/questions", headers=admin_h,
+                            params={"page_size": 100, "subject_id": JJ_SUBJECT_ID}))
+        return any(x["id"] == q["id"] for x in b["data"]["items"])
+
+    assert not visible(), "软删除后默认列表不该有它"
+
+    r = restore_question(client, admin_h, q["id"])
+    assert r["code"] == 0, r
+    assert r["data"]["is_deleted"] is False and r["data"]["already_active"] is False, r["data"]
+    assert r["data"]["version"] == 3, f"删除 +1、恢复 +1，应为 3：{r['data']}"
+    assert visible(), "恢复后应回到默认列表"
+
+    # 幂等
+    again = restore_question(client, admin_h, q["id"])
+    assert again["code"] == 0 and again["data"]["already_active"] is True, again
+    assert again["data"]["version"] == 3, "幂等分支不该再 +1"
+
+    # 不存在的 id → 40401
+    assert restore_question(client, admin_h, 999999999999999999)["code"] == 40401
+
+
+def test_question_restore_requires_delete_permission(client: httpx.Client, admin_h, created) -> None:
+    """恢复题目需要 `question:delete`（与删除**同一个权责**，不新增权限码）。"""
+    q = make_question(client, admin_h, subject_id=JJ_SUBJECT_ID)
+    created.questions.append(q["id"])
+    assert body(client.delete(f"{API}/admin/questions/{q['id']}", headers=admin_h))["code"] == 0
+
+    u = fresh_user(client, nickname="B7 题目恢复权限")
+    assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
+    vh = auth(u["access_token"])
+
+    b = restore_question(client, vh, q["id"])
+    assert b["code"] == 40301 and "question:delete" in b["message"], b
+    # 仍然是删除态
+    d = body(client.get(f"{API}/admin/questions/{q['id']}", headers=admin_h))["data"]
+    assert d["is_deleted"] is True, d
+
+    # researcher 有 question:delete → 能恢复
+    u2 = fresh_user(client, nickname="B7 教研恢复")
+    assign_roles(client, admin_h, u2["user"]["id"], ["researcher"],
+                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    rh = auth(u2["access_token"])
+    assert restore_question(client, rh, q["id"])["code"] == 0
+
+
+def test_question_restore_rejects_when_chapter_or_kp_deleted(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """⚠️ 核心：题目挂的章节 / 知识点已删 → **拒绝恢复并说明原因**，不静默恢复到悬空引用。
+
+    章节与知识点是**软删除**，数据库不会拦题目的弱引用 ——
+    这正是"恢复前必须自己校验"的原因。
+    """
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能构造失效的章节/知识点")
+
+    # 找一个真实存在的 chapter / knowledge_point
+    ch = sql_fetch(
+        "SELECT c.id, c.subject_id, k.id AS kp_id FROM chapters c "
+        "JOIN knowledge_points k ON k.chapter_id = c.id "
+        "WHERE c.subject_id=$1 AND c.is_deleted=false AND k.is_deleted=false LIMIT 1",
+        JJ_SUBJECT_ID,
+    )
+    if not ch:
+        pytest.skip(f"科目 {JJ_SUBJECT_ID} 缺少可用的章节/知识点种子")
+    chapter_id, kp_id = int(ch[0]["id"]), int(ch[0]["kp_id"])
+
+    q = make_question(client, admin_h, subject_id=JJ_SUBJECT_ID, chapter_id=chapter_id)
+    created.questions.append(q["id"])
+    assert body(client.delete(f"{API}/admin/questions/{q['id']}", headers=admin_h))["code"] == 0
+
+    # ---- 场景 1：章节被软删除 ----
+    try:
+        sql_exec("UPDATE questions SET knowledge_point_id=$1 WHERE id=$2", kp_id, int(q["id"]))
+        sql_exec("UPDATE chapters SET is_deleted=true WHERE id=$1", chapter_id)
+
+        b = restore_question(client, admin_h, q["id"])
+        assert b["code"] == 40901, b
+        assert "章节" in b["message"] and "已删除" in b["message"], b["message"]
+        assert "不会静默恢复" in b["message"], b["message"]
+        # 拒绝 = 没有副作用
+        row = sql_fetch("SELECT is_deleted FROM questions WHERE id=$1", int(q["id"]))
+        assert row[0]["is_deleted"] is True, "被拒绝的恢复不该改动 is_deleted"
+
+        # ---- 场景 2：知识点所属章节被删（知识点本身还在）----
+        sql_exec("UPDATE questions SET chapter_id=NULL WHERE id=$1", int(q["id"]))
+        b = restore_question(client, admin_h, q["id"])
+        assert b["code"] == 40901, b
+        assert "知识点" in b["message"] and "所属章节" in b["message"], b["message"]
+
+        # ---- 场景 3：知识点自己被软删除 ----
+        sql_exec("UPDATE chapters SET is_deleted=false WHERE id=$1", chapter_id)
+        sql_exec("UPDATE knowledge_points SET is_deleted=true WHERE id=$1", kp_id)
+        b = restore_question(client, admin_h, q["id"])
+        assert b["code"] == 40901 and "知识点" in b["message"], b
+    finally:
+        # 清场：把章节/知识点/题目的引用与删除位恢复原状
+        sql_exec("UPDATE chapters SET is_deleted=false WHERE id=$1", chapter_id)
+        sql_exec("UPDATE knowledge_points SET is_deleted=false WHERE id=$1", kp_id)
+        sql_exec(
+            "UPDATE questions SET chapter_id=NULL, knowledge_point_id=NULL WHERE id=$1",
+            int(q["id"]),
+        )
+
+    # 关联数据恢复有效后，同一个请求就通过了（说明前面的拒绝是可逆的、不是永久锁死）
+    r = restore_question(client, admin_h, q["id"])
+    assert r["code"] == 0, r
+    assert r["data"]["is_deleted"] is False, r["data"]
+
+
+def test_restore_writes_change_log_with_is_deleted_diff(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """恢复要留痕：`content_change_logs` 里 action=restore，diff 为 `{is_deleted: true → false}`。"""
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能断言变更日志")
+
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"留痕 {uuid.uuid4().hex[:6]}")
+    created.exams.append(exam["id"])
+    assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
+    assert restore_exam(client, admin_h, exam["id"])["code"] == 0
+
+    rows = sql_fetch(
+        "SELECT action, diff FROM content_change_logs "
+        "WHERE entity_type='exam' AND entity_id=$1 ORDER BY created_at DESC",
+        int(exam["id"]),
+    )
+    assert rows, "归档/恢复应各写一条变更日志"
+    restore_row = next((r for r in rows if r["action"] == "restore"), None)
+    assert restore_row is not None, [r["action"] for r in rows]
+    diff = restore_row["diff"]
+    diff = json.loads(diff) if isinstance(diff, str) else diff
+    assert diff["before"]["is_deleted"] is True, diff
+    assert diff["after"]["is_deleted"] is False, diff

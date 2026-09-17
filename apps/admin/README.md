@@ -190,7 +190,7 @@ student      无权限                         → 没有 user:read
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepRunning
-# 期望：78 passed, 1 skipped
+# 期望：86 passed, 1 skipped
 #   test_admin_v5.py  13 个  ← 导入管道（上传/校验/执行/发布/回滚/变更日志/数据范围）
 #   test_idgen.py     15 个  ← 雪花 ID 精度
 #   test_admin_v3/v4、test_smoke  ← Batch 2/3/4（不能回归）
@@ -253,7 +253,7 @@ Pass 2 前端未落地前，直接打接口验证：
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
-# 期望：78 passed, 1 skipped（其中 test_admin_v7.py 24 条是组卷用例）
+# 期望：86 passed, 1 skipped（其中 test_admin_v7.py 32 条是组卷用例）
 ```
 
 只跑组卷用例（复用已运行的 API）：
@@ -265,7 +265,7 @@ DATABASE_URL="postgresql+asyncpg://yijian@127.0.0.1:55432/yijian" \
 python -m pytest tests/test_admin_v7.py -v
 ```
 
-**六个必须亲手确认的点**（完整 curl 见 `docs/13-Batch7-组卷引擎-方案与验收.md` §8）：
+**七个必须亲手确认的点**（完整 curl 见 `docs/13-Batch7-组卷引擎-方案与验收.md` §8）：
 
 | # | 确认什么 | 怎么看 |
 |---|---|---|
@@ -274,7 +274,8 @@ python -m pytest tests/test_admin_v7.py -v
 | ③ | **版本锁定真的生效** | 发布 → 改某道题的题干（version+1）→ 重新打开试卷：`locked_version` 停在旧版本、`version_drift=true`，且 `stem_preview` 是**旧题干** |
 | ④ | **数据范围** | 用挂 `subject` 范围的教研账号，去建/组别科目的卷 → `40301`；列表里也看不到别科目的规则 |
 | ⑤ | **归档不进默认列表** | 归档一份卷 → `GET /admin/exams` 看不到；加 `include_deleted=true` 能看到（带 `is_deleted=true`）；**详情仍可打开**、四个 `can_*` 全 false |
-| ⑥ | **viewer 只读** | 用 `viewer` 登录 → 能看列表/详情 → 发布返回 `40301` 且消息含 `exam:publish`（前端 tooltip 直接用这句） |
+| ⑥ | **viewer 只读** | 用 `viewer` 登录 → 能看列表/详情 → 发布/归档/恢复分别返回 `40301`（消息含 `exam:publish` / `exam:create`，tooltip 直接用） |
+| ⑦ | **恢复的关联校验** | 把某题的章节软删（`UPDATE chapters SET is_deleted=true WHERE id=…`）→ 恢复该题返回 `40901` 且说明是"章节已删除"、**`is_deleted` 一点没变**；把章节改回来后**同一个请求就能通过** |
 
 > ℹ️ 两个**曾经**的限制，已在 Pass 2 开工前修掉（`docs/13` §1.2 / §3.3 / §3.5 / §3.6）：
 > - 版本锁定已改为**独立列** `exam_questions.locked_version`（迁移
@@ -327,7 +328,7 @@ curl -s -X PUT "$BASE/admin/users/375228966664933376/roles" -H "$H" \
 curl -s -i "$BASE/admin/users/999999999999999999" -H "$H" | head -1
 ```
 
-Swagger 在 <http://localhost:8000/docs>，41 个接口都有中文 summary 和 description。
+Swagger 在 <http://localhost:8000/docs>，43 个接口都有中文 summary 和 description。
 
 ---
 
@@ -340,7 +341,7 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
 一条命令完成：起 PostgreSQL → 载入 schema → 重放 RBAC 种子 → 初始化超管 → 起 API → 跑 pytest → 收尾。
-**期望 `78 passed, 1 skipped`**：
+**期望 `86 passed, 1 skipped`**：
 
 ```
 tests/test_idgen.py      15 个   ← 雪花 ID 精度（Batch 5）
@@ -348,11 +349,12 @@ tests/test_admin_v3.py    8 个   ← 用户详情 / viewer 流程 / 角色权�
 tests/test_admin_v4.py   12 个   ← 题库 CRUD（Batch 4）
 tests/test_admin_v5.py   14 个   ← 导入管道 + 变更日志（Batch 5/6）
                                   其中 1 条是 6000 行全量门控用例，默认 skip
-tests/test_admin_v7.py   24 个   ← 组卷引擎（Batch 7）：规则 CRUD / 组卷算法 / 缺口 /
-                                  校验 / 版本锁定 / 数据范围 / viewer 只读 / 试卷归档
+tests/test_admin_v7.py   32 个   ← 组卷引擎（Batch 7）：规则 CRUD / 组卷算法 / 缺口 /
+                                  校验 / 版本锁定 / 数据范围 / viewer 只读 /
+                                  试卷归档 + 恢复 / 题目恢复
 tests/test_smoke.py       6 个   ← Batch 2 的认证链路 + RBAC（不能回归）
 ─────────────────────────────────────────────────────────────
-共 79 条 collected → 78 passed, 1 skipped
+共 87 条 collected → 86 passed, 1 skipped
 ```
 
 > `run-smoke.ps1` 用的是 8123 端口，并且**结束时会把 PostgreSQL 停掉**。
@@ -438,16 +440,18 @@ apps/admin/
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     39 条踩过的坑
+│  ├─ B端联调坑.md                     41 条踩过的坑
 │  └─ screenshots/                    人工走查截图存档（batch3/ batch6/）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 39 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+配套文档：**`docs/B端联调坑.md`** —— 41 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
 disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
 Batch 6 的回滚数字语义、模态框失败态、下载验真，
 Batch 7 的 `subjects` 无 `is_deleted`、SELECT 列与取值清单不一致、
 权限整包发放无法表达"只读"、本机 PG 必须独立后台常驻、
-**只读函数夹带准入条件导致外层放行内层拦死**、**改 schema.sql 对老库不生效**等）。
+**只读函数夹带准入条件导致外层放行内层拦死**、**改 schema.sql 对老库不生效**、
+**弱引用 + 软删除的悬空引用没人拦**、**幂等的判据是"状态达成"不是"没发生"** 等）；
+末尾四份**检查清单**可直接照着过。
 
 配套脚本：
 

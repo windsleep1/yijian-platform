@@ -12,6 +12,7 @@
     GET    /admin/exams/{id}               试卷详情              —— exam:read
     PUT    /admin/exams/{id}               编辑试卷              —— exam:create
     DELETE /admin/exams/{id}               归档（软删除）         —— exam:create
+    POST   /admin/exams/{id}/restore       恢复（解除归档）       —— exam:publish
 
 ## 两个刻意的决定
 
@@ -46,6 +47,7 @@ from app.schemas.admin_exam import (
     ExamListItem,
     ExamPublishIn,
     ExamPublishOut,
+    ExamRestoreOut,
     ExamSoftDeleteOut,
     ExamUpdateIn,
     ExamValidateOut,
@@ -409,3 +411,33 @@ async def delete_exam(
         reason=reason, ip=client_ip(request),
     )
     return ok(out.model_dump(), message="试卷已归档")
+
+
+@router.post(
+    "/admin/exams/{exam_id}/restore",
+    response_model=Envelope[ExamRestoreOut],
+    summary="恢复试卷（解除归档）",
+    description=(
+        "需要权限 `exam:publish`。\n\n"
+        "> 为什么恢复用 `exam:publish` 而归档用 `exam:create`：\n"
+        "> **归档是「把卷收起来」（组卷者的日常操作），恢复是「让它重新生效」** ——\n"
+        "> 一份已发布的卷恢复后立刻重新对外可见，这个动作的分量更接近发布。\n"
+        "> 两者都不新增权限码。\n\n"
+        "**幂等**：试卷本来就没归档 → `code=0` + `already_active=true`，无写入。\n\n"
+        "**恢复前校验关联数据有效性**，任一条不满足就拒绝（`40901`）并说明原因：\n"
+        "- 所属科目已停用（`status != 'on'`）或不存在\n"
+        "- **已发布**的卷，卷面有题目已被归档（考生会看到残缺卷面）\n\n"
+        "草稿态的卷不受第二条限制 —— 还在编，缺题很正常。\n\n"
+        "> 原则与题目恢复一致：**不允许静默恢复到一个不成立的状态上。**\n\n"
+        "恢复**不改状态**（归档前是 `published` 就还是 `published`），也不动任何题目；\n"
+        "写 `content_change_logs`（action=restore）。"
+    ),
+    dependencies=[Depends(require_permission("exam:publish"))],
+)
+async def restore_exam(
+    exam_id: int, request: Request, db: DbSession, me: CurrentUserDep
+) -> dict:
+    out = await exam_service.restore_exam(
+        db, actor=me, actor_name=me.display_name, exam_id=exam_id, ip=client_ip(request)
+    )
+    return ok(out.model_dump(), message=out.message)

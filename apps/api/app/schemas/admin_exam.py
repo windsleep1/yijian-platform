@@ -412,6 +412,21 @@ class ExamSoftDeleteOut(BaseModel):
     message: str
 
 
+class ExamRestoreOut(BaseModel):
+    """试卷恢复结果（与归档对称）。
+
+    **幂等**：试卷本来就没归档时，`already_active=true`，接口返回 `code=0`。
+    """
+
+    id: BigIntStr
+    title: str
+    is_deleted: bool = False
+    status: ExamStatus
+    #: 本来就是未归档状态（走了幂等分支，**没有产生任何写入**）
+    already_active: bool = False
+    message: str
+
+
 # ---------------------------------------------------------------- 内部校验
 
 
@@ -449,6 +464,7 @@ __all__ = [
     "ExamPublishIn",
     "ExamPublishOut",
     "ExamQuestionItem",
+    "ExamRestoreOut",
     "ExamSectionDetail",
     "ExamSectionIn",
     "ExamSectionOut",
