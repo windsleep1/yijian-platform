@@ -45,6 +45,7 @@ from app.core.response import Envelope, Page, ok, paginate
 from app.schemas.admin_import import (
     ImportBatchDetail,
     ImportBatchOut,
+    ImportChangeOut,
     ImportExecuteIn,
     ImportExecuteOut,
     ImportMode,
@@ -343,6 +344,38 @@ async def rollback_import(
         user_agent=request.headers.get("User-Agent"),
     )
     return ok(out.model_dump(), message="已整批回滚")
+
+
+# =====================================================================
+# ⑥.5 批次变更日志（Batch 6）
+# =====================================================================
+
+
+@router.get(
+    "/{batch_id}/changes",
+    response_model=Envelope[ImportChangeOut],
+    summary="批次变更日志",
+    description=(
+        "需要权限 `question:read`。按 `content_change_logs.batch_id` 捞本批次的改动痕迹。\n\n"
+        "批次统计只说得出「新增 3 / 更新 2」这种数字，说不出**动了哪几道题、谁动的、什么时候** —— "
+        "这一条补的就是那个洞。题干预览已由后端截断（`left(stem, 120)`），"
+        "6000 条的批次也不会把响应撑爆。\n\n"
+        "- `counts` 是**全量**的按 `action` 汇总，不随分页变化；\n"
+        "- 批次不存在 → `40401`（不是空列表 —— 「什么都没改」和「批次不存在」是两回事）。"
+    ),
+    dependencies=[Depends(require_permission("question:read"))],
+)
+async def list_import_changes(
+    batch_id: int,
+    db: DbSession,
+    me: CurrentUserDep,
+    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=200, description="每页条数")] = 50,
+) -> dict:
+    out = await import_service.list_batch_changes(
+        db, batch_id=batch_id, viewer=me, page=page, page_size=page_size
+    )
+    return ok(out.model_dump())
 
 
 # =====================================================================

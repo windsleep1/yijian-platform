@@ -179,16 +179,16 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只上传+校验，不写库")
     ap.add_argument("--publish", action="store_true", help="执行后再发布")
     ap.add_argument("--limit", type=int, default=0, help="只取前 N 道（调试用，0=全部）")
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="只把生成的严格 24 列模板写成 CSV（UTF-8 with BOM）后退出，不上传。"
+        "用于产出给浏览器手工走查用的文件。",
+    )
     args = ap.parse_args()
 
     if not args.dsn:
         print("[import-sim-bank] 缺少 DATABASE_URL（或 --dsn），无法取章节/知识点编码表", file=sys.stderr)
-        return 2
-
-    try:
-        import httpx  # noqa: F401
-    except ImportError:
-        print("[import-sim-bank] 缺少 httpx：pip install httpx", file=sys.stderr)
         return 2
 
     items = json.loads(SEED_JSON.read_text(encoding="utf-8"))
@@ -201,6 +201,28 @@ def main() -> int:
     missing_kp = sum(1 for r in rows if r["kp_code"] == "")
     print(f"[import-sim-bank] 读入 {len(items)} 道题；未映射到 chapter_code 的 {missing_chapter} 行，"
           f"kp_code 空的 {missing_kp} 行")
+
+    # ---- 只产出文件（给浏览器手工走查用），不上传 ----
+    if args.out:
+        import csv as _csv
+
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # utf-8-sig = UTF-8 with BOM：Excel 直接双击打开中文不乱码，
+        # 也正是导入接口要能吃下的那种"Excel 另存为 CSV"的形态。
+        with out_path.open("w", encoding="utf-8-sig", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=list(COLUMNS))
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+        print(f"[import-sim-bank] 已写出 CSV：{out_path}（{len(rows)} 行 × {len(COLUMNS)} 列，UTF-8 with BOM）")
+        return 0
+
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        print("[import-sim-bank] 缺少 httpx：pip install httpx", file=sys.stderr)
+        return 2
 
     payload = json.dumps(rows, ensure_ascii=False).encode("utf-8")
     print(f"[import-sim-bank] 生成导入文件 {len(payload) / 1048576:.1f}MB（JSON，24 列）")

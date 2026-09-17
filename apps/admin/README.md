@@ -1,6 +1,6 @@
-# 一建通 · 管理后台 v0.1（Batch 3）
+# 一建通 · 管理后台 v0.1（Batch 6）
 
-一级建造师学习备考平台的 **B 端管理后台**。本批交付 4 个页面 + 后端 4 个接口的联调闭环。
+一级建造师学习备考平台的 **B 端管理后台**。累计交付：题库 CRUD（Batch 4）+ 题库批量导入管道与导入向导（Batch 5/6）。
 
 技术栈：Next.js 14（App Router）+ TypeScript + Tailwind + shadcn/ui + TanStack Query v5。
 
@@ -75,15 +75,21 @@ python -m app.cli seed-rbac     # 幂等重放角色/权限种子
 
 ---
 
-## 2. 四个页面
+## 2. 页面
 
 | 路由 | 说明 | 需要的权限 |
 |---|---|---|
 | `/login` | 密码登录，支持 `?next=` 回跳 | — |
+| `/questions` `/questions/[id]` | 题库列表 / 题目详情编辑（Batch 4） | `question:read`；写操作另需 `question:create|update|delete` |
+| `/imports` | 导入批次列表：历史 / 状态 / 回滚入口（Batch 6） | `question:read` |
+| `/imports/new` | 导入向导三步：上传 → 校验（dry-run）→ 预览确认 → 执行 → 发布（Batch 6） | `question:import`；发布另需 `question:publish` |
+| `/imports/[id]` | 批次详情：状态流转 / 统计 / 逐行结果 / 变更日志 / 回滚（Batch 6） | `question:read`；回滚另需 `question:rollback` |
 | `/users` | 用户列表：分页 / 关键词搜索 / 状态筛选 / 角色标签 | `user:read` |
 | `/users/[id]` | 用户详情 + 分配角色（弹窗 + 二次确认） | `user:read`；改角色另需 `user:manage` |
 | `/audit-logs` | 审计日志：多条件筛选 + diff 抽屉 | `system:audit` |
 | `/forbidden` | 403 落地页（说明缺哪个权限、当前角色、该找谁） | — |
+
+菜单项全部由 `src/lib/permission.ts` 的 `MODULE_ENTRIES` 推导（唯一真相，见坑 20）。
 
 ---
 
@@ -175,9 +181,73 @@ student      无权限                         → 没有 user:read
 | 侧边栏显示"当前角色没有任何后台菜单可访问" | 给出角色名和下一步 |
 | 手动访问 `/users` → 403 | |
 
+### 3.4 如何验证导入流程（Batch 5/6）
+
+导入是**唯一一个会批量写库**的入口，所以要验证的不只是"能不能导进去"，
+还有"错了会不会半截脏数据"、"导错了能不能收回"。下面分三层，**由快到慢**。
+
+#### 3.4.1 接口层：一条命令
+
+```bash
+powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepRunning
+# 期望：54 passed, 1 skipped
+#   test_admin_v5.py  13 个  ← 导入管道（上传/校验/执行/发布/回滚/变更日志/数据范围）
+#   test_idgen.py     15 个  ← 雪花 ID 精度
+#   test_admin_v3/v4、test_smoke  ← Batch 2/3/4（不能回归）
+```
+
+`1 skipped` 是 6000 行全量的环境变量门控用例（Batch 5 起就有，需显式开启）。
+
+#### 3.4.2 真实体量：把 Batch 1 的 6000 道仿真题灌一遍
+
+```bash
+export DATABASE_URL="postgresql+asyncpg://yijian@127.0.0.1:55432/yijian"   # 端口按你的环境改
+
+# 全量体检：只上传 + 校验，一行都不写库（约 12s）
+python tools/local-verify/import-sim-bank.py --dry-run
+
+# 真灌库（upsert 模式：逐条命中已有题，题量不变）
+python tools/local-verify/import-sim-bank.py
+
+# 幂等验证：insert 模式重导同一份 → 期望 duplicate=6000 / success=0
+python tools/local-verify/import-sim-bank.py --mode insert
+```
+
+> ⚠️ 别把 `data/seed/questions.csv` 直接喂给导入接口 —— 那是 Batch 1 的**导出**格式，
+> 不是导入模板，直接喂会把 6000 道题的章节关系洗成 NULL（坑 28）。
+> 这个脚本的作用就是从 `questions.json` 重新生成**严格 24 列模板**。
+
+只想产出文件、给浏览器手工走查用（不上传）：
+
+```bash
+python tools/local-verify/import-sim-bank.py --out /tmp/simbank.csv --limit 300
+# UTF-8 with BOM，12~300 行随你切
+```
+
+#### 3.4.3 浏览器层：教研视角走一遍四个验收场景
+
+登录 `13800000000 / Admin@123456`，从侧边栏「题库导入」进。
+
+| # | 场景 | 怎么点 | 期望 | 截图 |
+|---|---|---|---|---|
+| ① | 好文件走完整流程 | `/imports/new` 上传 `docs/samples/batch6-questions.csv` → 上传并校验 → 下一步 → 执行 → 发布 | 校验页明写"未写库"；预览页给**具体数字**（新增 12）；发布后题库列表能看到 | `01`~`06`、`14` |
+| ② | 故意写错的文件 | 上传 `docs/samples/batch5-wrong-file.csv` → 上传并校验 | 错误表按行号排序（第 57 / 100 行）；点行展开**字段级**详情；下载 CSV 打开是 `row_no,field,message` 三列 | `07`~`09` |
+| ③ | 同一份文件导两次 | 把②用过的文件再导一遍 | 第二次**新增 0 / 更新 0 / 跳过 12 / 未通过 0**；**库中行数不变** | `15`、`16` |
+| ④ | 导错了要收回 | 批次详情 → 整批回滚 → 弹窗里**手输批次号** → 确认回滚 | 弹窗写"将软删除 N 道题"；回滚后状态 `rolled_back`；该批题目归档（题库计数下降） | `17`~`19` |
+
+截图存档在 `docs/screenshots/batch6/`（18 张）。走查脚本与产物见
+`docs/12-Batch6-导入向导-方案与验收.md` §9。
+
+**四个容易看漏的点**（都是本条链路的"验收含金量"所在）：
+
+1. **校验页是 dry-run** —— 校验完**故意不执行**，去题库列表看，题目数量必须**没变**。
+2. **预览页的数字不能是"通过"** —— 必须是"新增 N / 更新 N / 跳过 N / 未通过 N"四个具体数。
+3. **回滚要手输批次号** —— 输错一位，"确认回滚"必须仍是置灰的（这是防"点错批次"的减速带）。
+4. **回滚失败时弹窗保持打开** —— 失败信息画在**弹窗内部**并给重试；不是弹个 toast 就没了（坑 30）。
+
 ---
 
-## 4. 后端接口 curl 示例（Batch 3 新增 4 个）
+## 4. 后端接口 curl 示例
 
 ```bash
 BASE=http://localhost:8000/api/v1      # run-smoke 路径改成 :8123
@@ -228,11 +298,17 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
 一条命令完成：起 PostgreSQL → 载入 schema → 重放 RBAC 种子 → 初始化超管 → 起 API → 跑 pytest → 收尾。
-**期望 `14 passed`**：
+**期望 `54 passed, 1 skipped`**：
 
 ```
-tests/test_admin_v3.py  8 个   ← 本批新增（用户详情 / viewer 流程 / 角色权限契约 / 审计筛选）
-tests/test_smoke.py     6 个   ← Batch 2 的认证链路 + RBAC（不能回归）
+tests/test_idgen.py      15 个   ← 雪花 ID 精度（Batch 5）
+tests/test_admin_v3.py    8 个   ← 用户详情 / viewer 流程 / 角色权限契约 / 审计筛选
+tests/test_admin_v4.py   12 个   ← 题库 CRUD（Batch 4）
+tests/test_admin_v5.py   14 个   ← 导入管道 + 变更日志（Batch 5/6）
+                                  其中 1 条是 6000 行全量门控用例，默认 skip
+tests/test_smoke.py       6 个   ← Batch 2 的认证链路 + RBAC（不能回归）
+─────────────────────────────────────────────────────────────
+共 55 条 collected → 54 passed, 1 skipped
 ```
 
 > `run-smoke.ps1` 用的是 8123 端口，并且**结束时会把 PostgreSQL 停掉**。
@@ -297,26 +373,34 @@ apps/admin/
 │  ├─ login/ forbidden/               公开页
 │  └─ (console)/                      带侧边栏的控制台
 │     ├─ layout.tsx                   ★ 第二层守卫 RequireAuth
-│     ├─ users/ users/[id]/ audit-logs/
+│     ├─ questions/ questions/[id]/   题库 CRUD（Batch 4）
+│     ├─ imports/ imports/new/ imports/[id]/   ★ 导入向导（Batch 6）
+│     └─ users/ users/[id]/ audit-logs/
 ├─ src/components/
 │  ├─ PermissionGate.tsx              ★ 权限门控（disabled + tooltip）
 │  ├─ DataTable.tsx                   ★ 表格壳（分页/排序/空态/骨架）
 │  ├─ AssignRolesDialog.tsx           ★ 分配角色（列权限 + diff + 二次确认）
 │  ├─ AuditDiffDrawer.tsx             ★ 审计 diff 抽屉
+│  ├─ StepWizard.tsx                  ★ 导入步骤条（高亮/打勾/不可跳步）
+│  ├─ ErrorReportTable.tsx            ★ 错误表（排序/展开字段级/下载 CSV）
+│  ├─ RollbackDialog.tsx              ★ 回滚二次确认（手输批次号 + 失败降级）
+│  ├─ ImportStatCards.tsx / ImportStatusFlow.tsx / InlineError.tsx
 │  └─ ui/                             shadcn/ui 组件
-├─ src/hooks/                          useTableState / useUsers / useAuditLogs / useRoles
+├─ src/hooks/                          useTableState / useUsers / useAuditLogs / useRoles / useImports
 ├─ src/lib/
 │  ├─ api.ts                          ★ 信封解包 + 401 分流（刷新 / 跳登录）+ trace_id
 │  ├─ json-bigint.ts                  ★ 大整数 ID 解析安全带（防御垫）
+│  ├─ import.ts                       ★ 导入：状态流推导 / CSV 构造(BOM+CRLF) / 下载 / 前置校验
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     16 条踩过的坑
-│  └─ screenshots/                    人工走查的截图存档（01~15）
+│  ├─ B端联调坑.md                     33 条踩过的坑
+│  └─ screenshots/                    人工走查截图存档（batch3/ batch6/）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 16 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
-disabled 不出 tooltip、时区、脱敏位置、401 分流等）。
+配套文档：**`docs/B端联调坑.md`** —— 33 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
+以及 Batch 6 的回滚数字语义、模态框失败态、下载验真等）。
 
 配套脚本：
 
@@ -324,8 +408,11 @@ disabled 不出 tooltip、时区、脱敏位置、401 分流等）。
 |---|---|
 | `tools/local-verify/serve-local.ps1` | 起后端并**保持运行**（联调用） |
 | `tools/local-verify/run-smoke.ps1` | 一键验收：起环境 → pytest → 收尾 |
-| `tools/local-verify/seed-demo-users.ps1` | 建 `viewer` 演示账号 + 写一条角色变更审计 |
+| `tools/local-verify/seed-demo-users.ps1` | 建 `viewer`/`researcher` 演示账号 + 写角色变更审计 |
 | `tools/local-verify/probe-silent-refresh.py` | 浏览器端静默刷新链路探针 |
+| `tools/local-verify/import-sim-bank.py` | 把 6000 道仿真题按**严格 24 列模板**灌库；`--out` 只产出文件 |
+| `tools/local-verify/probe-import-pipeline.py` | 导入管道端到端探针（含数据范围） |
+| `tools/local-verify/ab-capture-download.js` | 测试基建：拦 `URL.createObjectURL` 抓导出字节（坑 31） |
 
 ---
 

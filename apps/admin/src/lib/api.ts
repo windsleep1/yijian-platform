@@ -193,39 +193,19 @@ export type RequestOptions = {
 };
 
 /**
- * 发起请求并**返回解包后的 data**（不带信封）。
- * 业务码非 0 一律抛 `ApiError`，由 TanStack Query 的 onError 统一 toast。
+ * 信封解包的**唯一出口**。
+ *
+ * `doFetch` 是个闭包而不是 `Response`，因为 401 刷新后需要**原样重放**这次请求
+ * （含请求体）。抽成 `send` 之后，JSON 请求与 multipart 上传共用同一套
+ * 「信封 → 业务码 → 单飞刷新 → trace_id」逻辑 —— 上传接口不需要另写一份，
+ * 也就不会出现"上传路由忘了处理 401"这种只在断网/过期时才炸的分裂。
  */
-export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  if (opts.body !== undefined) assertNoUnsafeIdInBody(opts.body, path);
-
-  const url = new URL(`${API_BASE}${path}`);
-  for (const [k, v] of Object.entries(opts.query ?? {})) {
-    // 注意：`false` 必须保留（`success=false` 是有效的筛选条件），
-    // 只跳过 undefined / null / 空字符串。
-    if (v === undefined || v === null || v === "") continue;
-    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
-      if (process.env.NODE_ENV !== "production") {
-        // eslint-disable-next-line no-console
-        console.warn(`[api] 查询参数 ${k} 不是基本类型，已忽略：`, v);
-      }
-      continue;
-    }
-    url.searchParams.set(k, String(v));
-  }
-
-  const headers: Record<string, string> = {};
-  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
-  const at = getAccessToken();
-  if (at) headers.Authorization = `Bearer ${at}`;
-
-  const res = await fetch(url.toString(), {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    signal: opts.signal,
-  });
-
+async function send<T>(
+  path: string,
+  doFetch: () => Promise<Response>,
+  allowAuthRetry: boolean,
+): Promise<T> {
+  const res = await doFetch();
   const headerTrace = res.headers.get("X-Request-ID") ?? "";
 
   // 先读 text 再尝试解析：204 空响应、网关 502 返回 HTML 都不能无脑 res.json()
@@ -262,15 +242,98 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
 
   // ---- 认证类错误：单飞刷新后重试一次 ----
-  if (RETRYABLE_AUTH_CODES.has(body.code) && !opts._retried) {
+  if (RETRYABLE_AUTH_CODES.has(body.code) && allowAuthRetry) {
     const refreshed = await refreshToken();
     if (!refreshed) {
       redirectToLogin();
       throw new ApiError(body.code, body.message, body.trace_id || headerTrace, res.status);
     }
-    return request<T>(path, { ...opts, _retried: true });
+    return send<T>(path, doFetch, false);
   }
 
   // ---- 其余业务错误：交给上层统一 toast（带 trace_id）----
   throw new ApiError(body.code, body.message, body.trace_id || headerTrace, res.status);
+}
+
+/**
+ * 发起请求并**返回解包后的 data**（不带信封）。
+ * 业务码非 0 一律抛 `ApiError`，由 TanStack Query 的 onError 统一 toast。
+ */
+export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  if (opts.body !== undefined) assertNoUnsafeIdInBody(opts.body, path);
+
+  const url = new URL(`${API_BASE}${path}`);
+  for (const [k, v] of Object.entries(opts.query ?? {})) {
+    // 注意：`false` 必须保留（`success=false` 是有效的筛选条件），
+    // 只跳过 undefined / null / 空字符串。
+    if (v === undefined || v === null || v === "") continue;
+    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+      if (process.env.NODE_ENV !== "production") {
+        // eslint-disable-next-line no-console
+        console.warn(`[api] 查询参数 ${k} 不是基本类型，已忽略：`, v);
+      }
+      continue;
+    }
+    url.searchParams.set(k, String(v));
+  }
+
+  const doFetch = async () => {
+    const headers: Record<string, string> = {};
+    if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+    // token 每次都重新取：刷新后重放必须用新 token，闭包里缓存旧值就白刷了
+    const at = getAccessToken();
+    if (at) headers.Authorization = `Bearer ${at}`;
+
+    return fetch(url.toString(), {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      signal: opts.signal,
+    });
+  };
+
+  return send<T>(path, doFetch, !opts._retried);
+}
+
+/**
+ * **multipart/form-data** 请求（文件上传）。
+ *
+ * 为什么不能复用 `request`：`Content-Type` 必须留给浏览器 ——
+ * 它要自己生成 `boundary=...`。手写 `application/json` 或手拼
+ * `multipart/form-data` 都会让后端解析失败（FastAPI 会直接 422/500）。
+ *
+ * ⚠️ **放进 FormData 的 ID 必须是字符串。** 浏览器会把数字转成十进制字符串，
+ * 但**已经丢过精度的数字**转出来仍是错的（`375273861765140480` → `375273861765140500`）。
+ * 所以调用方一律 `String(id)`，别指望 FormData 兜住 —— 这与 `assertNoUnsafeIdInBody`
+ * 拦的是同一类问题，只是这里没有可结构化遍历的对象。
+ *
+ * 好处：401 单飞刷新、trace_id 提取、信封解包全部与 JSON 请求共用 `send`，
+ * 上传路由不会成为认证链路上的例外。
+ */
+export async function uploadRequest<T>(
+  path: string,
+  form: FormData,
+  opts: { signal?: AbortSignal } = {},
+): Promise<T> {
+  if (process.env.NODE_ENV !== "production") {
+    for (const [k, v] of form.entries()) {
+      if (typeof v === "number" && looksLikeUnsafeId(v)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[api] 上传 ${path} 的表单字段 ${k} 是超出安全整数范围的 number（${v}）。` +
+            "这可能已经被舍入，请改用 String(id)。",
+        );
+      }
+    }
+  }
+
+  const doFetch = async () => {
+    const headers: Record<string, string> = {};
+    // 刻意不设 Content-Type —— 浏览器要自己补 boundary
+    const at = getAccessToken();
+    if (at) headers.Authorization = `Bearer ${at}`;
+    return fetch(`${API_BASE}${path}`, { method: "POST", headers, body: form, signal: opts.signal });
+  };
+
+  return send<T>(path, doFetch, true);
 }

@@ -233,6 +233,49 @@ class ImportRollbackOut(BaseModel):
     )
 
 
+# ------------------------------------------------- Batch 6：批次变更日志
+
+
+class ImportChangeItem(BaseModel):
+    """本批次在 `content_change_logs` 里留下的一条痕迹。
+
+    B 端「批次详情」要回答的问题是"**这一批到底动了什么**"。
+    批次统计只给得出数字（新增 3 / 更新 2），说不出"动了哪几道题、谁动的、什么时候"，
+    所以这里把 `content_change_logs` 按 `batch_id` 捞出来摊开。
+
+    `question_stem` 是题干预览（后端已截断）—— 只有 ID 的日志表对人不友好；
+    题目被回滚后是**软删除**，行还在，所以 join 依然能取到题干。
+    """
+
+    id: BigIntStr
+    entity_type: str = Field(..., description="question / chapter / ...")
+    entity_id: BigIntStr
+    action: str = Field(..., description="create / update / publish / rollback")
+    change_log: str | None = None
+    question_stem: str | None = Field(None, description="题干预览（截断），便于人读")
+    operator_id: BigIntStrOpt = None
+    operator_name: str | None = None
+    created_at: datetime | None = None
+
+
+class ImportChangeOut(BaseModel):
+    """批次变更日志（分页）。
+
+    `counts` 是**全量**的按 action 汇总（不受分页影响）——
+    前端要能显示"本批共 6000 条：新增 0 / 更新 6000"，
+    这个数字不能随翻页变化，否则用户会以为数据在变。
+    """
+
+    id: BigIntStr
+    batch_no: str
+    total: int = 0
+    counts: dict[str, int] = Field(default_factory=dict)
+    page: int = 1
+    page_size: int = 50
+    has_more: bool = False
+    items: list[ImportChangeItem] = Field(default_factory=list)
+
+
 __all__ = [
     "IMPORT_COLUMNS",
     "OPTION_COLUMNS",
@@ -251,4 +294,6 @@ __all__ = [
     "ImportUploadOut",
     "ImportExecuteOut",
     "ImportRollbackOut",
+    "ImportChangeItem",
+    "ImportChangeOut",
 ]

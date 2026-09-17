@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, ScrollText, ShieldCheck, Users, type LucideIcon } from "lucide-react";
+import { BookOpen, ScrollText, ShieldCheck, Upload, Users, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
  */
 const ICONS: Record<string, LucideIcon> = {
   "/questions": BookOpen,
+  "/imports": Upload,
   "/users": Users,
   "/audit-logs": ScrollText,
 };
@@ -85,7 +86,7 @@ export function Sidebar() {
       <div className="border-t p-3">
         <div className="flex items-center gap-1.5">
           <Badge variant="outline" className="text-[10px]">
-            v0.1 · Batch 4
+            v0.1 · Batch 6
           </Badge>
         </div>
       </div>

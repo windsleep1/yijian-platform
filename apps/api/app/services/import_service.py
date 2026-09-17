@@ -63,6 +63,8 @@ from app.schemas.admin_import import (
     ErrorReport,
     ImportBatchDetail,
     ImportBatchOut,
+    ImportChangeItem,
+    ImportChangeOut,
     ImportExecuteOut,
     ImportRollbackOut,
     ImportRowPreview,
@@ -924,6 +926,72 @@ async def list_batches(
         _batch_out(dict(r), can=_capabilities(r["status"], viewer, executed=r["id"] in executed_ids))
         for r in rows
     ], total
+
+
+# =====================================================================
+# ③.5 批次变更日志（Batch 6）
+# =====================================================================
+
+# `left(q.stem, 120)`：只取题干预览。6000 条的批次如果整段题干回传，
+# 一个分页响应就能有几 MB —— 而这只是给人扫一眼"动了哪些题"。
+_CHANGE_SELECT = """
+SELECT c.id, c.entity_type, c.entity_id, c.action, c.change_log,
+       c.operator_id, c.created_at,
+       COALESCE(u.nickname, u.phone) AS operator_name,
+       left(q.stem, 120) AS question_stem
+FROM content_change_logs c
+LEFT JOIN users u ON u.id = c.operator_id
+LEFT JOIN questions q ON q.id = c.entity_id AND c.entity_type = 'question'
+WHERE c.batch_id = :batch_id
+"""
+
+
+async def list_batch_changes(
+    db: AsyncSession, *, batch_id: int, viewer: ScopeViewer,
+    page: int = 1, page_size: int = ROW_PAGE_SIZE_DEFAULT,
+) -> ImportChangeOut:
+    """本批次的 `content_change_logs`（分页）+ 按 action 的全量汇总。
+
+    与 `get_batch` 一样先 `_load_batch`：批次不存在要老实报 `40401`，
+    而不是返回一个空列表 —— 空列表会被前端画成"这一批什么都没改"，
+    与"这一批根本不存在"是两回事。
+    """
+    batch = await _load_batch(db, batch_id)
+
+    counts = {
+        str(r["action"]): int(r["n"])
+        for r in (
+            await db.execute(
+                text(
+                    "SELECT action, count(*) AS n FROM content_change_logs "
+                    "WHERE batch_id = :id GROUP BY action"
+                ),
+                {"id": batch_id},
+            )
+        ).mappings().all()
+    }
+    total = sum(counts.values())
+
+    rows = (
+        await db.execute(
+            text(_CHANGE_SELECT + " ORDER BY c.created_at DESC, c.id DESC LIMIT :lim OFFSET :off"),
+            {"batch_id": batch_id, "lim": page_size, "off": (page - 1) * page_size},
+        )
+    ).mappings().all()
+
+    return ImportChangeOut(
+        id=batch["id"], batch_no=batch["batch_no"], total=total, counts=counts,
+        page=page, page_size=page_size, has_more=page * page_size < total,
+        items=[
+            ImportChangeItem(
+                id=r["id"], entity_type=r["entity_type"], entity_id=r["entity_id"],
+                action=r["action"], change_log=r["change_log"],
+                question_stem=r["question_stem"], operator_id=r["operator_id"],
+                operator_name=r["operator_name"], created_at=r["created_at"],
+            )
+            for r in rows
+        ],
+    )
 
 
 # =====================================================================

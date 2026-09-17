@@ -1,4 +1,4 @@
-"""Batch 5 题库批量导入管道验收（7 个接口）。
+"""Batch 5 题库批量导入管道验收（7 个接口 + Batch 6 补的变更日志）。
 
     POST   /admin/imports/upload             ① 上传建批次
     POST   /admin/imports/{id}/validate      ② 逐行校验（dry-run）
@@ -7,6 +7,7 @@
     POST   /admin/imports/{id}/publish       ⑤ draft → published
     POST   /admin/imports/{id}/rollback      ⑥ 整批回滚
     GET    /admin/imports                    ⑦ 批次列表
+    GET    /admin/imports/{id}/changes       ⑧ 批次变更日志（Batch 6 前端详情页要用）
 
 需要 API 已启动（真 PG + fakeredis）：
 
@@ -643,3 +644,53 @@ def test_seed_bank_full_6000_upsert(client: httpx.Client, admin_h) -> None:
     assert detail["total_rows"] == 6000 and detail["success_rows"] == 6000
     assert detail["failed_rows"] == 0, detail
     assert count_questions(client, admin_h) == before, "upsert 不该改变题量"
+
+
+# ================================================================ 9. Batch 6：批次变更日志
+
+def test_batch_changes_contract(client: httpx.Client, admin_h, sz) -> None:
+    """批次变更日志：B 端「批次详情」要能回答"这一批到底动了哪几道题"。
+
+    断言的是**契约**而不是实现细节：
+      - 形状（分页信封 + 按 action 的全量汇总）；
+      - ID 一律字符串（守住坑 1/21）；
+      - 汇总 `counts` 不随分页变化（否则用户翻页会以为数字在变）；
+      - 执行 → 3 条 create；回滚 → 再添 3 条 rollback；
+      - 批次不存在要 40401，**不是空列表**（"什么都没改" ≠ "批次不存在"）。
+    """
+    _, chapter_code = sz
+    bid, _, ex = import_once(client, admin_h, csv_bytes([row(chapter=chapter_code) for _ in range(3)]))
+    assert ex["code"] == 0, ex
+
+    ch = body(client.get(f"{API}/admin/imports/{bid}/changes", headers=admin_h))
+    assert ch["code"] == 0, ch
+    d = ch["data"]
+    assert d["id"] == str(bid) and d["batch_no"], d
+    for key in ("total", "counts", "page", "page_size", "has_more", "items"):
+        assert key in d, (key, sorted(d))
+    assert d["counts"].get("create") == 3, d["counts"]
+    assert d["total"] == 3, d
+
+    it = d["items"][0]
+    for key in ("id", "entity_type", "entity_id", "action", "change_log",
+                "question_stem", "operator_name", "created_at"):
+        assert key in it, (key, sorted(it))
+    assert isinstance(it["id"], str) and isinstance(it["entity_id"], str), it
+    assert it["entity_type"] == "question" and it["action"] == "create", it
+    assert it["question_stem"], "题干预览取不到（questions 的 join 断了）"
+    assert it["operator_name"], it
+
+    # 分页：汇总不随分页变化
+    p2 = body(client.get(f"{API}/admin/imports/{bid}/changes?page=2&page_size=2", headers=admin_h))["data"]
+    assert len(p2["items"]) == 1, p2
+    assert p2["total"] == 3 and p2["has_more"] is False and p2["counts"].get("create") == 3, p2
+
+    # 回滚后再看：多出 3 条 rollback，create 仍是 3
+    assert rollback(client, admin_h, bid)["code"] == 0
+    ch2 = body(client.get(f"{API}/admin/imports/{bid}/changes?page_size=200", headers=admin_h))["data"]
+    assert ch2["counts"].get("rollback") == 3, ch2["counts"]
+    assert ch2["counts"].get("create") == 3, ch2["counts"]
+    assert ch2["total"] == 6, ch2["total"]
+
+    miss = body(client.get(f"{API}/admin/imports/999999999999/changes", headers=admin_h))
+    assert miss["code"] == 40401, miss

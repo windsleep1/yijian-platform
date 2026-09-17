@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, RotateCw } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api";
@@ -43,7 +44,22 @@ export function ErrorState({
       {traceId ? (
         <button
           type="button"
-          onClick={() => void navigator.clipboard?.writeText(traceId)}
+          onClick={async () => {
+            // 早期写法是 `void navigator.clipboard?.writeText(traceId)` —— 剪贴板写入
+            // 是**异步且可能被拒绝**的（权限被拒 / 文档未聚焦 / 非安全上下文），
+            // 被 `void` 丢掉的拒绝会变成 unhandled rejection（Next 开发覆盖层直接红点），
+            // 而用户什么都没看到。这与坑 22（"复制 ID 失败却报已复制"）是同一类问题，
+            // 只是反过来：这里连"已复制"都不说。Batch 6 顺手改掉（原属 Batch 4 遗留项）。
+            try {
+              if (!navigator.clipboard) throw new Error("browser has no clipboard api");
+              await navigator.clipboard.writeText(traceId);
+              toast.success("trace_id 已复制");
+            } catch {
+              toast.error("复制失败：浏览器拒绝了剪贴板写入", {
+                description: "可以手动选中下面这串字符再复制。",
+              });
+            }
+          }}
           className="yj-json mt-3 rounded border bg-muted px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted/70"
           title="点击复制 trace_id"
         >

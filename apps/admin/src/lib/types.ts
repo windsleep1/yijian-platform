@@ -462,3 +462,157 @@ export type ListQuestionsQuery = {
   order_by?: "updated_at" | "created_at" | "difficulty" | "id";
   order?: "asc" | "desc";
 };
+
+// ---------------------------------------------------------------- 题库导入（Batch 5 后端 / Batch 6 前端）
+
+/**
+ * 批次状态。**与后端 `ImportStatus` 枚举逐一对应**（`app/schemas/admin_import.py`）。
+ *
+ * ⚠️ 注意这里**没有** "validated" 这个值 —— 校验完成的批次也是 `done`。
+ * 「待执行」与「已执行」靠 `can_execute`（服务端按 `content_change_logs` 判定）区分，
+ * 前端不要自己编一个状态出来，否则状态流转图会画出后端永远给不出的节点。
+ */
+export type ImportStatus =
+  | "pending"
+  | "parsing"
+  | "validating"
+  | "importing"
+  | "done"
+  | "failed"
+  | "rolled_back";
+
+/** 命中同内容题时的策略：跳过（insert）或更新（upsert）。 */
+export type ImportMode = "insert" | "upsert";
+export type ImportFileType = "csv" | "json";
+
+/** 单行单字段的错误。`row_no` 是**文件里的数据行号**（从 1 起，不含表头）。 */
+export type RowError = {
+  row_no: number;
+  field: string;
+  message: string;
+};
+
+export type ErrorReport = {
+  /** 完整计数（`errors` 可能被截断到 200 条） */
+  total_errors: number;
+  truncated: boolean;
+  errors: RowError[];
+};
+
+/** 逐行结果里的 `action`：insert / update / duplicate / skip / error。 */
+export type ImportRowAction = "insert" | "update" | "duplicate" | "skip" | "error";
+
+export type ImportRowPreview = {
+  row_no: number;
+  action: string;
+  message: string | null;
+  question_id: Id | null;
+};
+
+/** 批次状态 + 统计。列表 / 详情 / 校验 / 执行 / 发布 / 回滚**共用**这个形状。 */
+export type ImportBatch = {
+  id: Id;
+  batch_no: string;
+  file_name: string;
+  file_type: string;
+  file_hash: string;
+  file_size: number | null;
+  subject_id: Id | null;
+  subject_code: string | null;
+  subject_name: string | null;
+  source_type: SourceType;
+  license_note: string | null;
+  mode: string;
+  status: ImportStatus;
+  auto_publish: boolean;
+
+  total_rows: number;
+  success_rows: number;
+  failed_rows: number;
+  duplicate_rows: number;
+  updated_rows: number;
+
+  error_report: ErrorReport;
+
+  operator_id: Id | null;
+  operator_name: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  rollback_at: string | null;
+  rollback_by: Id | null;
+  created_at: string | null;
+
+  /** 服务端算好的按钮可用性 —— **与路由权限门严格一致**，前端不要自己再推一遍 */
+  can_execute: boolean;
+  can_publish: boolean;
+  can_rollback: boolean;
+};
+
+export type ImportBatchDetail = ImportBatch & {
+  rows: ImportRowPreview[];
+  row_page: number;
+  row_page_size: number;
+  row_total: number;
+};
+
+export type ImportUploadOut = {
+  id: Id;
+  batch_no: string;
+  file_name: string;
+  file_type: string;
+  total_rows: number;
+  status: string;
+  message: string;
+};
+
+export type ImportExecuteOut = {
+  id: Id;
+  status: string;
+  total_rows: number;
+  success_rows: number;
+  failed_rows: number;
+  duplicate_rows: number;
+  updated_rows: number;
+  duration_ms: number;
+};
+
+export type ImportRollbackOut = {
+  id: Id;
+  status: string;
+  rolled_back_questions: number;
+  rolled_back_updates: number;
+  missing: Id[];
+};
+
+/** 批次变更日志的一条（`content_change_logs`）。 */
+export type ImportChangeItem = {
+  id: Id;
+  entity_type: string;
+  entity_id: Id;
+  action: string;
+  change_log: string | null;
+  /** 题干预览（后端已截断到 120 字） */
+  question_stem: string | null;
+  operator_id: Id | null;
+  operator_name: string | null;
+  created_at: string | null;
+};
+
+export type ImportChangeOut = {
+  id: Id;
+  batch_no: string;
+  /** 全量条数（不随分页变化） */
+  total: number;
+  /** 全量按 action 汇总：`{create: 3, rollback: 3}` */
+  counts: Record<string, number>;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  items: ImportChangeItem[];
+};
+
+export type ListImportsQuery = {
+  page: number;
+  page_size: number;
+  status?: ImportStatus;
+};

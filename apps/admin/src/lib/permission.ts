@@ -18,6 +18,12 @@ export const P = {
   questionCreate: "question:create",
   questionUpdate: "question:update",
   questionDelete: "question:delete",
+  /** 批量导入（上传 / 校验 / 执行是同一件事的三个阶段，共用这一个权限） */
+  questionImport: "question:import",
+  /** 把草稿推向线上题库（权责与"导入"不同） */
+  questionPublish: "question:publish",
+  /** 整批回滚（`admin` 角色刻意没有这个权限，只有 super_admin / researcher 有） */
+  questionRollback: "question:rollback",
 } as const;
 
 export type PermissionCode = (typeof P)[keyof typeof P];
@@ -81,6 +87,9 @@ export function statusLabel(code: string): string {
  */
 export const MODULE_ENTRIES = [
   { perm: P.questionRead, href: "/questions", label: "题库管理" },
+  // Batch 6：导入向导。入口权限仍是 `question:read`（列表/详情是只读接口），
+  // 放在 /questions 之后 —— 顺序即优先级，扫码一样的落地页应当还是题库列表。
+  { perm: P.questionRead, href: "/imports", label: "题库导入" },
   { perm: P.userRead, href: "/users", label: "用户管理" },
   { perm: P.systemAudit, href: "/audit-logs", label: "审计日志" },
 ] as const;
