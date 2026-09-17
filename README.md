@@ -46,7 +46,7 @@ npm run dev                                       # 打开 http://localhost:3000
 > **Batch 5（导入管道）→ Batch 6（导入向导）→ Batch 7（组卷引擎）**。
 > 记忆曲线、小程序端、支付、数据看板仍未启动。
 >
-> 当前后端共 **40 个接口**，pytest 全量 **75 passed, 1 skipped**。
+> 当前后端共 **41 个接口**，pytest 全量 **78 passed, 1 skipped**。
 
 **每一批都可以独立执行、独立验收。** Batch 2 起，后端本身就是可运行服务：
 `cd deploy && cp .env.example .env && docker compose up -d --build` → `http://localhost:8000/docs` 即可点开 Swagger 联调。
@@ -97,7 +97,7 @@ yijian-platform/
 │   │   ├─ Dockerfile                 # python:3.12-slim，非 root 运行
 │   │   ├─ docker-entrypoint.sh       # 等依赖 → 建表 → 建超管 → 启动
 │   │   ├─ requirements.txt
-│   │   ├─ tests/                     # pytest（75 passed, 1 skipped）：smoke + v3 + v4 + v5 + v7 + idgen
+│   │   ├─ tests/                     # pytest（78 passed, 1 skipped）：smoke + v3 + v4 + v5 + v7 + idgen
 │   │   └─ app/
 │   │       ├─ main.py                # 应用入口（中间件 / 异常处理 / 路由挂载）
 │   │       ├─ cli.py                 # wait-db / wait-redis / init-db / seed-admin / seed-questions
@@ -107,7 +107,7 @@ yijian-platform/
 │   │       ├─ services/              # 业务逻辑（auth / rbac / sms / user / audit / question / import / exam）
 │   │       └─ api/v1/                # health / auth / admin_users / admin_rbac / admin_audit
 │   │                                 #   / admin_chapters / admin_questions / admin_imports
-│   │                                 #   / admin_exams（共 40 个接口）
+│   │                                 #   / admin_exams（共 41 个接口）
 │   └─ admin/                         # 管理后台（Next.js 14，Batch 3–6）
 │       ├─ src/app/(console)/         # questions（列表/new/[id]）/ imports（列表/new/[id]）
 │       │                             #   / users / audit-logs
@@ -117,7 +117,7 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 37 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 39 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
 │           └─ screenshots/batch7/     # Batch 7 Pass 2 待产出
@@ -167,7 +167,7 @@ curl http://localhost:8000/api/v1/health
 cd ../apps/api
 pip install -r requirements.txt
 ADMIN_INIT_PHONE=13800000000 ADMIN_INIT_PASSWORD=Admin@123456 pytest tests -v
-# 全量 75 passed, 1 skipped（1 skipped 是 6000 行导入用例，需环境变量显式开启）
+# 全量 78 passed, 1 skipped（1 skipped 是 6000 行导入用例，需环境变量显式开启）
 ```
 
 `test_smoke.py` 覆盖认证主链路：注册 → `/me` → 密码登录 → 刷新令牌轮换（旧 token 立即失效）→ 登出 →
@@ -191,7 +191,7 @@ curl -s -X POST http://localhost:8000/api/v1/auth/register \
 > 这段演示的是 **Batch 2 当时的 10 个接口**（`/health` + `/auth` 7 个 + `/admin/users` 2 个）——
 > 认证与 RBAC 的最小完整闭环，详见 `docs/08-Batch2-验收报告.md`。
 > 后续批次在此基础上加了题库 CRUD（Batch 4）、章节树、导入管道（Batch 5）、变更日志（Batch 6）、
-> 组卷引擎（Batch 7），**当前共 40 个接口**。
+> 组卷引擎（Batch 7），**当前共 41 个接口**。
 
 ### 手动新建一道题（Batch 4 题库接口）
 
@@ -332,12 +332,14 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 
 ## 七、下一步
 
-**Batch 1 ~ 7 Pass 1 已完成**（认证/RBAC → 管理后台 → 题库 CRUD → 导入管道 → 导入向导 → 组卷引擎后端）。
+**Batch 1 ~ 7 Pass 1 + 前置修正已完成**（认证/RBAC → 管理后台 → 题库 CRUD → 导入管道
+→ 导入向导 → 组卷引擎后端 + locked_version 列 / viewer 只读 / 试卷归档）。
 往下可以接着推：
 
-- **Batch 7 Pass 2（下一步）** → 试卷管理前端：`/exams` 列表、`/exams/new`（手动选题 / 规则自动组卷）、
-  `/exams/[id]`（卷面结构预览 + 加题/移题 + 发布）、`/paper-rules` 规则管理。
-  后端 11 个接口与 `shortfalls` / 版本锁定能力已就绪（见 `docs/13` §9）
+- **Batch 7 Pass 2（下一步）** → 试卷管理前端：`/exams` 列表（含"显示已归档"开关）、
+  `/exams/new`（手动选题 / 规则自动组卷）、`/exams/[id]`（卷面结构预览 + 加题/移题 +
+  发布 + 归档）、`/paper-rules` 规则管理。
+  后端 **12 个接口**与 `shortfalls` / 版本锁定 / 归档 / viewer 只读能力已就绪（见 `docs/13` §9）
 - **记忆曲线** → 学员练习调度算法（依赖答题记录，需 C 端先落地）
 - **移动端骨架** → 学员侧页面：首页倒计时、章节练习、答题卡、错题本、模拟考试、成绩报告
 - **「调整方案」** → 告诉我哪里要改（比如要换 Spring Boot / 要加直播 / 要做多租户加盟商）
@@ -347,9 +349,14 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 > 回归手段见 `tools/local-verify/probe-snowflake-batch.py` 与 `apps/api/tests/test_idgen.py`（15 条）。
 > 后续任何"批量生成 ID"或"把 ID 拼进请求体"的新代码，都要再跑一次这两道防线。
 >
-> ⚠️ **组卷前必读**：`exam_questions` **没有** `locked_version` 列，版本锁定暂存在
-> `exams.rule_config.question_locks`（见 `docs/13` §3.3 与 `B端联调坑.md` 坑 34/35）。
+> ⚠️ **组卷前必读**：版本锁定用**独立列** `exam_questions.locked_version`
+> （`db/migrations/20260917-01-*.sql` 加的，含从旧 JSONB 的回填）。
+> `rule_config.question_locks` 已 **deprecated**（仍双写 + 读时回退，下一批清理）。
 > 另注意 `subjects` / `paper_rules` 等表**没有 `is_deleted`**，写校验前先看 `db/schema.sql`。
+>
+> ⚠️ **改了 `db/schema.sql` 别忘了写迁移**：`run-smoke.ps1` 只在**首次建库**时载入
+> schema.sql，库已存在就整段跳过 —— 新结构只在新库存在（`B端联调坑.md` 坑 39）。
+> 迁移放 `db/migrations/`，脚本自身必须幂等。
 >
 > 其余已知遗留项见 `docs/10-Batch4-题库CRUD-方案与验收.md` §7、
 > `docs/12-Batch6-导入向导-方案与验收.md` §8、`docs/13-Batch7-组卷引擎-方案与验收.md` §7。

@@ -78,6 +78,25 @@ try {
         Write-Host "[local-verify] 表已存在，跳过建表"
     }
 
+    # ---------- 3.5 迁移（幂等，按文件名排序）----------
+    # ⚠️ 为什么必须有这一步：schema.sql **只在首次建库时**载入（上面那个 to_regclass 判断），
+    #    库已存在时整段跳过。所以任何"加列 / 回填 / 补种子权限"如果只改 schema.sql，
+    #    对已有数据的库**永远不生效** —— 表现为"新代码读一个不存在的列"。
+    #    所有迁移脚本必须自身幂等（ADD COLUMN IF NOT EXISTS / ON CONFLICT DO NOTHING），
+    #    这样才能无条件重跑。
+    $migDir = Join-Path $repo "db\migrations"
+    if (Test-Path $migDir) {
+        $migs = @(Get-ChildItem -Path $migDir -Filter *.sql | Sort-Object Name)
+        if ($migs.Count -gt 0) {
+            Write-Host "[local-verify] 应用 $($migs.Count) 个迁移脚本 ..."
+            foreach ($m in $migs) {
+                $mr = Invoke-Psql -PsqlArgs @("-d", $DbName, "-q", "-v", "ON_ERROR_STOP=1", "-f", $m.FullName)
+                if ($mr.ExitCode -ne 0) { Fail "迁移 $($m.Name) 执行失败" }
+                Write-Host "[local-verify]   ✓ $($m.Name)"
+            }
+        }
+    }
+
     # ---------- 4. 选一个「真的装了依赖」的 Python ----------
     # 教训：PATH 上的 `python` 很可能是 Anaconda 之类，未必有 fastapi/asyncpg/fakeredis。
     # 这里按优先级逐个探测，第一个能 import 全部依赖的才用。

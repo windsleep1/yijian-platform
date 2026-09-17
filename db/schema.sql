@@ -890,6 +890,11 @@ CREATE TABLE exam_questions (
   question_id BIGINT      NOT NULL REFERENCES questions(id),
   seq         SMALLINT    NOT NULL,
   score       NUMERIC(6,2) NOT NULL DEFAULT 1,
+  -- 发布试卷时锁定的题目版本（Batch 7 补列）。
+  -- 已发布/已考过的卷面必须按这一版作答与展示 ——
+  -- "考生昨天考了 80 分，今天你改了答案，他的成绩就成了悬案"（docs/07 §6.4）。
+  -- 未发布时为 NULL；重新组卷会清空。
+  locked_version INTEGER,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX uq_exam_question ON exam_questions(exam_id, question_id);
@@ -1400,16 +1405,23 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT 2, id FROM permissions WHERE code <> 'question:rollback'
 ON CONFLICT DO NOTHING;
 
--- viewer：只读审计岗。三个权限刻意选得最小：
+-- viewer：**通用只读岗**。权限刻意选得最小：
 --   user:read      能进用户列表/详情（但**没有** user:manage → 前端「分配角色」按钮 disabled）
 --   system:audit   能看审计日志
 --   stats:read     能看统计
--- 它存在的现实理由：种子里的 6 个角色，凡有 user:read 的（super_admin/admin/operator）
--- **都有 user:manage**，没有 user:manage 的（researcher/teacher/student）又都进不了用户页。
--- 于是「有 user:read、没有 user:manage → 按钮置灰」这个 B 端状态**没有任何账号能复现**。
--- viewer 补上了这个缺口，让权限门控能在浏览器里被真实验证。
+--   exam:read      能看试卷列表/详情（Batch 7 加，**没有** exam:publish → 「发布」按钮置灰）
+-- 它存在的现实理由：种子里的其他角色凡有某模块 read 权限的，**都同时拿到了该模块的写权限**
+-- （权限按 module 整包发放）。于是「有 read、没有 write → 按钮置灰」这个 B 端状态
+-- **没有任何账号能复现**：
+--   · user 模块：有 user:read 的（super_admin/admin/operator）都有 user:manage
+--   · exam 模块：super_admin/admin/researcher/teacher 四条 exam 权限**完全一样**
+-- viewer 是唯一能复现"只读"的账号，让权限门控能在浏览器里被真实验证（验收标准 2 靠它）。
+--
+-- ⚠️ 定位是**通用只读岗**，将来补新的只读场景（比如 course:read）往这里加即可，
+-- **不要再新建角色**。
 INSERT INTO role_permissions (role_id, permission_id)
-SELECT 7, id FROM permissions WHERE code IN ('user:read', 'system:audit', 'stats:read')
+SELECT 7, id FROM permissions
+WHERE code IN ('user:read', 'system:audit', 'stats:read', 'exam:read')
 ON CONFLICT DO NOTHING;
 
 -- <<< RBAC-SEED:END

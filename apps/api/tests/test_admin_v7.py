@@ -1,32 +1,36 @@
-"""Batch 7 Pass 1 组卷引擎验收（11 个接口）。
+"""Batch 7 组卷引擎验收（12 个接口）。
 
     GET    /admin/paper-rules              ① 组卷规则列表
     POST   /admin/paper-rules              ② 新建规则
     PUT    /admin/paper-rules/{id}         ③ 编辑规则
     DELETE /admin/paper-rules/{id}         ④ 删除规则
-    GET    /admin/exams                    ⑤ 试卷列表
+    GET    /admin/exams                    ⑤ 试卷列表（含 include_deleted 开关）
     POST   /admin/exams                    ⑥ 创建试卷
     POST   /admin/exams/{id}/auto-compose  ⑦ 规则自动组卷
     POST   /admin/exams/{id}/validate      ⑧ 卷面校验
     POST   /admin/exams/{id}/publish       ⑨ 发布（版本锁定）
     GET    /admin/exams/{id}               ⑩ 试卷详情
     PUT    /admin/exams/{id}               ⑪ 编辑试卷
+    DELETE /admin/exams/{id}               ⑫ 归档（软删除）
 
 需要 API 已启动（真 PG + fakeredis）：
 
     powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 
-用例与「六条验收标准」的对应关系：
+用例与「验收标准」的对应关系：
 
     ① 一条规则生成完整卷，题型数量/分值/总分匹配  → test_compose_full_paper_matches_rule_and_sections
-    ② 题库不足 → shortfalls 准确回传，不静默补题   → test_shortfall_is_reported_and_never_silently_filled
-    ③ 发布→改题→已发布卷仍显示锁定版本              → test_publish_locks_version_and_later_edit_does_not_change_paper
-    ④ 用 6000 道仿真题库组一套完整模考卷            → test_compose_full_mock_paper_from_seed_bank
-    ⑤ 数据范围（教研只能组自己科目的卷）            → test_data_scope_researcher_only_own_subject
-    ⑥ 发布前强制走 validate，不通过不允许发布       → test_publish_blocked_when_validation_fails
+    ② viewer 能看列表/详情，发布按钮置灰            → test_viewer_can_read_but_not_publish
+    ③ 题库不足 → shortfalls 准确回传，不静默补题   → test_shortfall_is_reported_and_never_silently_filled
+    ④ 发布→改题→已发布卷仍显示锁定版本              → test_publish_locks_version_and_later_edit_does_not_change_paper
+    ⑤ 归档 → 默认列表看不到 → 开开关能看到          → test_soft_delete_hides_from_default_list_but_keeps_detail
+    ⑥ 用 6000 道仿真题库组一套完整模考卷            → test_compose_full_mock_paper_from_seed_bank
+    ⑦ 数据范围（教研只能组自己科目的卷）            → test_data_scope_researcher_only_own_subject
 
-另有 8 条覆盖算法纯函数与 CRUD 边界：加权采样偏好未用过的题、同种子可复现、
-放宽梯度、缺口算式、`case_sub` 不可独立抽题、难度区间校验、规则 CRUD、状态保护。
+另有算法纯函数与 CRUD 边界用例：加权采样偏好未用过的题、同种子可复现、放宽梯度、
+缺口算式、`case_sub` 不可独立抽题、难度区间校验、规则 CRUD、停用规则、状态保护、
+**发布前强制校验**、权限门控、
+**锁定版本落独立列**（`test_locked_version_is_written_to_column_and_mirrored_to_jsonb`）。
 
 设计要点（与前几批一致）：**每个用例自己造数据**，不依赖别的用例的残留；
 凡写进库的，用例结束前都清理掉，避免污染题库、也避免用例之间互相影响。
@@ -35,6 +39,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import string
@@ -837,3 +842,186 @@ def test_exam_endpoints_require_permissions(client: httpx.Client, admin_h, creat
                    {"rules": [{"type": "judge", "count": 3}], "seed": 9})["code"] == 0
     b = publish(client, rh, exam["data"]["id"])
     assert b["code"] == 0 and b["data"]["locked_versions"] == 3, b
+
+
+# ================================================================ K. 前置修正三件
+# （locked_version 独立列 / viewer 只读 / 试卷归档）—— 这三条是 Pass 2 前端的地基。
+
+
+def test_locked_version_is_written_to_column_and_mirrored_to_jsonb(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """版本锁定落在**独立列** `exam_questions.locked_version`；JSONB 仍双写但已 deprecated。
+
+    为什么单独断言这件事：锁定最初挤在 `exams.rule_config.question_locks` 里
+    （"不改 schema"的过度约束）。加列之后，**读**优先走列、**写**双写，
+    两件事都必须被固定住，否则下批清理 JSONB 时没人知道它到底还用不用。
+    """
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能直接断言列内容")
+
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"锁定列 {uuid.uuid4().hex[:6]}")
+    created.exams.append(exam["id"])
+    assert compose(client, admin_h, exam["id"],
+                   {"rules": [{"type": "judge", "count": 4}], "seed": 11})["code"] == 0
+
+    # 发布前：列应为 NULL（没有锁定）
+    rows = sql_fetch(
+        "SELECT locked_version FROM exam_questions WHERE exam_id=$1", int(exam["id"])
+    )
+    assert len(rows) == 4 and all(r["locked_version"] is None for r in rows), rows
+
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    # 发布后：4 行的列都被填上，且值等于题目当前 version
+    after = sql_fetch(
+        "SELECT eq.question_id, eq.locked_version, q.version AS current_version "
+        "FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
+        "WHERE eq.exam_id=$1",
+        int(exam["id"]),
+    )
+    assert len(after) == 4, after
+    assert all(r["locked_version"] is not None for r in after), f"列没被填上：{after}"
+    assert all(r["locked_version"] == r["current_version"] for r in after), after
+
+    # JSONB 仍在双写（deprecated，留回滚余地）—— 键与值都要与列**逐条**一致，
+    # 否则回滚到旧代码时锁定会悄悄丢。
+    # 注意：asyncpg 把 jsonb 当**字符串**返回（没注册 codec），这里要自己解析。
+    rc_rows = sql_fetch("SELECT rule_config FROM exams WHERE id=$1", int(exam["id"]))
+    rc_raw = rc_rows[0]["rule_config"]
+    rc = json.loads(rc_raw) if isinstance(rc_raw, str) else (rc_raw or {})
+    locks_json = rc.get("question_locks") or {}
+    assert len(locks_json) == 4, f"JSONB 双写缺失（回滚会丢锁定）：{locks_json}"
+    for r in after:
+        key = str(r["question_id"])
+        assert key in locks_json, f"JSONB 缺少题目 {key}：{locks_json}"
+        assert int(locks_json[key]) == r["locked_version"], (
+            f"JSONB 与列不一致：jsonb={locks_json[key]} column={r['locked_version']}"
+        )
+
+    # 重新组卷应把列清空（卷面换了，旧锁没意义）
+    # 已发布的卷不能重组，所以先造一张草稿卷验证清理逻辑
+    draft = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                        title=f"清锁 {uuid.uuid4().hex[:6]}")
+    created.exams.append(draft["id"])
+    assert compose(client, admin_h, draft["id"],
+                   {"rules": [{"type": "judge", "count": 3}], "seed": 12})["code"] == 0
+    publish(client, admin_h, draft["id"])
+    # 已发布 → 直接改回 draft 再重组（模拟"下线重编"）
+    sql_exec("UPDATE exams SET status='draft', published_at=NULL WHERE id=$1", int(draft["id"]))
+    assert compose(client, admin_h, draft["id"],
+                   {"rules": [{"type": "judge", "count": 3}], "seed": 13})["code"] == 0
+    cleared = sql_fetch(
+        "SELECT locked_version FROM exam_questions WHERE exam_id=$1", int(draft["id"])
+    )
+    assert all(r["locked_version"] is None for r in cleared), f"重组后锁未清：{cleared}"
+
+
+def test_viewer_can_read_but_not_publish(client: httpx.Client, admin_h, created) -> None:
+    """验收标准 ②：`viewer` 能看试卷列表与详情，**发布按钮置灰**（后端 40301）。
+
+    `viewer` 是"通用只读岗"（Batch 7 给它补了 `exam:read`，**不新建角色**）。
+    这条同时是把「有 read、没有 write → 按钮置灰」这个 B 端状态**变得可复现**的关键：
+    其他角色的权限是按模块整包发的，都能发布（见坑 36）。
+    """
+    # 先备一张有内容的卷，供 viewer 读
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"viewer 只读 {uuid.uuid4().hex[:6]}", pass_score=3)
+    created.exams.append(exam["id"])
+    assert compose(client, admin_h, exam["id"],
+                   {"rules": [{"type": "judge", "count": 3}], "seed": 21})["code"] == 0
+
+    u = fresh_user(client, nickname="B7 只读岗")
+    ar = assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
+    assert ar["code"] == 0, ar
+    vh = auth(u["access_token"])
+
+    # 读：列表 / 详情 / 校验，全部放行
+    b = body(client.get(f"{API}/admin/exams", headers=vh, params={"page_size": 100}))
+    assert b["code"] == 0 and any(x["id"] == exam["id"] for x in b["data"]["items"]), b
+    b = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=vh))
+    assert b["code"] == 0, b
+    assert b["data"]["id"] == exam["id"] and len(b["data"]["sections"]) == 1, b["data"]
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/validate", headers=vh))
+    assert b["code"] == 0, b
+    b = body(client.get(f"{API}/admin/paper-rules", headers=vh))
+    assert b["code"] == 0, b
+
+    # 写：全部 40301，且消息里点明缺哪个权限（前端 tooltip 直接用这句）
+    b = publish(client, vh, exam["id"])
+    assert b["code"] == 40301 and "exam:publish" in b["message"], b
+    b = body(client.post(f"{API}/admin/exams", headers=vh, json={
+        "subject_id": JJ_SUBJECT_ID, "title": "越权建卷", "sections": [],
+    }))
+    assert b["code"] == 40301 and "exam:create" in b["message"], b
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=vh,
+                         json={"rules": [{"type": "judge", "count": 1}]}))
+    assert b["code"] == 40301 and "exam:create" in b["message"], b
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=vh))
+    assert b["code"] == 40301 and "exam:create" in b["message"], b
+
+    # 权限模型自检：viewer 有 exam:read 但没有 exam:publish
+    perms = body(client.get(f"{API}/auth/me", headers=vh))["data"]["permissions"]
+    assert "exam:read" in perms, perms
+    assert "exam:publish" not in perms, perms
+    assert "exam:create" not in perms, perms
+
+    # 卷子仍是 draft（viewer 的失败尝试没有产生副作用）
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert detail["status"] == "draft", detail
+
+
+def test_soft_delete_hides_from_default_list_but_keeps_detail(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """验收标准 ⑤：归档一份卷 → 默认列表看不到 → 打开开关能看到 → 详情仍可读。
+
+    与 Batch 4 的题目软删除同一套语义：只置 `is_deleted`，
+    题目不动、卷面不删、详情不 404。
+    """
+    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
+                       title=f"归档 {uuid.uuid4().hex[:6]}")
+    created.exams.append(exam["id"])
+    assert compose(client, admin_h, exam["id"],
+                   {"rules": [{"type": "judge", "count": 3}], "seed": 31})["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    # 归档
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h,
+                           params={"reason": "用例归档"}))
+    assert b["code"] == 0, b
+    assert b["data"]["is_deleted"] is True, b["data"]
+    assert b["data"]["previous_status"] == "published", b["data"]
+    assert b["data"]["question_count"] == 3, b["data"]
+
+    # 默认列表看不到
+    b = body(client.get(f"{API}/admin/exams", headers=admin_h,
+                        params={"page_size": 100, "status": "published"}))
+    assert not any(x["id"] == exam["id"] for x in b["data"]["items"]), "归档后默认列表不该出现"
+
+    # 开关打开能看到，且带 is_deleted 标记
+    b = body(client.get(f"{API}/admin/exams", headers=admin_h,
+                        params={"page_size": 100, "include_deleted": "true"}))
+    hits = [x for x in b["data"]["items"] if x["id"] == exam["id"]]
+    assert len(hits) == 1 and hits[0]["is_deleted"] is True, "开了开关应能看到归档的卷"
+
+    # 详情仍可打开（不是 404），并且按钮全灰
+    b = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))
+    assert b["code"] == 0 and b["data"]["is_deleted"] is True, b
+    assert b["data"]["can_edit"] is False and b["data"]["can_delete"] is False, b["data"]
+    assert b["data"]["can_publish"] is False and b["data"]["can_compose"] is False, b["data"]
+    # 卷面数据仍在
+    assert len(b["data"]["sections"][0]["questions"]) == 3, b["data"]["sections"]
+
+    # 重复归档 → 40001（不静默成功）
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))
+    assert b["code"] == 40001 and "已归档" in b["message"], b
+
+    # 归档不动题目：题库题量不变
+    n = body(client.get(f"{API}/admin/questions?page=1&page_size=1", headers=admin_h))
+    assert n["code"] == 0, n
+
+    # 不存在的 id 归档 → 40401
+    b = body(client.delete(f"{API}/admin/exams/999999999999999999", headers=admin_h))
+    assert b["code"] == 40401, b

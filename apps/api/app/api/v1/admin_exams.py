@@ -11,6 +11,7 @@
     POST   /admin/exams/{id}/publish       发布（版本锁定）       —— exam:publish
     GET    /admin/exams/{id}               试卷详情              —— exam:read
     PUT    /admin/exams/{id}               编辑试卷              —— exam:create
+    DELETE /admin/exams/{id}               归档（软删除）         —— exam:create
 
 ## 两个刻意的决定
 
@@ -45,6 +46,7 @@ from app.schemas.admin_exam import (
     ExamListItem,
     ExamPublishIn,
     ExamPublishOut,
+    ExamSoftDeleteOut,
     ExamUpdateIn,
     ExamValidateOut,
     PaperRuleCreateIn,
@@ -374,3 +376,36 @@ async def update_exam(
         payload=payload, ip=client_ip(request),
     )
     return ok(detail.model_dump(), message="已保存")
+
+
+@router.delete(
+    "/admin/exams/{exam_id}",
+    response_model=Envelope[ExamSoftDeleteOut],
+    summary="归档试卷（软删除）",
+    description=(
+        "需要权限 `exam:create`。\n\n"
+        "与 Batch 4 的题目软删除**同一套语义**：\n"
+        "- 只置 `is_deleted = true`，**题目不动、卷面不删**（重新启用后卷面还在）；\n"
+        "- 列表默认过滤掉，传 `include_deleted=true` 能带出来；\n"
+        "- **详情仍可打开**（会带 `is_deleted=true`），不是 404 —— "
+        "归档的卷要能被查看与审计；\n"
+        "- 写一条 `content_change_logs`（action=delete）。\n\n"
+        "已归档的再归档 → `40001`。\n\n"
+        "> 权限复用 `exam:create` 而不是新增 `exam:delete`：权限码是跨前后端的契约，\n"
+        "> 加一条要同时改种子与前端常量。而「能建卷的人能归档自己的卷」是合理的权责边界。\n"
+        "> 若将来要做「只读 + 不能删」的角色划分，再拆。"
+    ),
+    dependencies=[Depends(require_permission("exam:create"))],
+)
+async def delete_exam(
+    exam_id: int,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+    reason: Annotated[str | None, Query(max_length=200, description="归档原因")] = None,
+) -> dict:
+    out = await exam_service.soft_delete_exam(
+        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
+        reason=reason, ip=client_ip(request),
+    )
+    return ok(out.model_dump(), message="试卷已归档")

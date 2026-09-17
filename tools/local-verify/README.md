@@ -4,7 +4,7 @@
 > （Batch 2 起引入，后续批次持续复用；覆盖认证 / RBAC / 题库 CRUD / 导入管道）。
 > Redis 用 `fakeredis` 顶替（只模拟命令行为，其余代码路径 100% 真实）。
 >
-> 已在 Windows + PostgreSQL 16.15 + Python 3.13 上实测通过：**`75 passed, 1 skipped`**（Batch 7 Pass 1 时点）。
+> 已在 Windows + PostgreSQL 16.15 + Python 3.13 上实测通过：**`78 passed, 1 skipped`**（Batch 7 时点）。
 
 ---
 
@@ -59,8 +59,19 @@ cd yijian-platform
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
-脚本会依次：初始化并启动 PG → 建库 → 载入 `db/schema.sql` → **初始化超管** →
-起 API（真 PG + fakeredis）→ 跑 `pytest tests -v` → 收尾停止服务。
+脚本会依次：初始化并启动 PG → 建库 → 载入 `db/schema.sql`（仅首次建库）
+→ **应用 `db/migrations/*.sql`** → **初始化超管** → 起 API（真 PG + fakeredis）
+→ 跑 `pytest tests -v` → 收尾停止服务。
+
+> ⚠️ **为什么迁移是单独一步**：`db/schema.sql` **只在首次建库时**载入 ——
+> 脚本会先查 `to_regclass('public.users')`，库已存在就**整段跳过**。
+> 所以"加列 / 回填 / 补种子权限"这类改动如果只改 schema.sql，**老库永远拿不到**，
+> 而验收环境恰好是新库 → **问题会留到生产才爆**。
+>
+> 因此：结构变更一律写进 `db/migrations/`（按日期命名，如
+> `20260917-01-locked-version-and-viewer-exam-read.sql`），**脚本自身必须幂等**
+> （`ADD COLUMN IF NOT EXISTS` / `ON CONFLICT DO NOTHING`），这样才能无条件重跑。
+> 手工起环境（不用 run-smoke）时，记得自己 `psql -f` 跑一遍这批脚本。
 
 两个副产物日志（排查时直接看）：
 
@@ -78,12 +89,12 @@ tests/test_smoke.py::test_password_login_refresh_logout PASSED
 tests/test_smoke.py::test_unauthorized_access PASSED
 tests/test_smoke.py::test_rbac_flow PASSED
 tests/test_smoke.py::test_rate_limit_on_sms PASSED
-===================== 75 passed, 1 skipped in 20.68s =====================
+===================== 78 passed, 1 skipped in 25.38s =====================
 ```
 
 > 前面还会有 `test_admin_v3.py`（8）、`test_admin_v4.py`（12）、`test_admin_v5.py`（14）、
-> `test_admin_v7.py`（21）、`test_idgen.py`（15）。
-> **当前全量是 `75 passed, 1 skipped`** ——
+> `test_admin_v7.py`（24）、`test_idgen.py`（15）。
+> **当前全量是 `78 passed, 1 skipped`** ——
 > 那个 `1 skipped` 是 `test_admin_v5.py` 里的 6000 行全量导入用例，需环境变量显式开启才会跑。
 
 > **`test_rbac_flow` 必须是 `PASSED` 而不是 `SKIPPED`。**

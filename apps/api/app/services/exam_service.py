@@ -8,6 +8,7 @@
     POST   /admin/exams                    创建试卷（含卷面分段）
     GET    /admin/exams/{id}               试卷详情（分段 + 题目 + 锁定版本）
     PUT    /admin/exams/{id}               编辑试卷
+    DELETE /admin/exams/{id}               归档（软删除）
     POST   /admin/exams/{id}/auto-compose  规则自动组卷
     POST   /admin/exams/{id}/validate      卷面校验
     POST   /admin/exams/{id}/publish       发布（写版本快照锁定）
@@ -31,17 +32,21 @@
 权重 `w = 4.0 if usage == 0 else 1/(1+usage)`，再按权重无放回抽样。
 不带权重的话，大题库里反复抽到同一批"高频题"是必然事件。
 
-## 版本锁定：为什么存在 `rule_config` 里
+## 版本锁定
 
-`docs/07 §6.4` 的示例用了 `eq.locked_version`，但 `exam_questions` **没有这一列**，
-本批又约定不改 schema，所以锁定映射落在 `exams.rule_config.question_locks`：
-
-    {"question_locks": {"<question_id>": <version>, ...}, "locked_at": "..."}
-
-`get_exam_detail` 会拿锁定版本去 `question_versions` 取**当时的题干快照**，
+**主存储是 `exam_questions.locked_version`（独立列）。** 发布时把每道题的当前版本写进卷面行；
+`get_exam_detail` 再拿锁定版本去 `question_versions` 取**当时的题干快照** ——
 所以"改了题也不影响已发布试卷"是**真的**，不只是记了个数字。
-建议下一批补 `ALTER TABLE exam_questions ADD COLUMN locked_version INTEGER` —— 届时
-只需改 `_question_locks` / `_merge_rule_config` 两处内部函数。
+
+> **历史与遗留**：Pass 1 最初把锁定挤在 `exams.rule_config.question_locks`（JSONB）里，
+> 那是"不改 schema"这个**过度约束**下的将就 —— 版本锁定是试卷的核心语义，
+> 不该寄居在一个描述"答题行为"的字段里。现已补列：
+> `db/migrations/20260917-01-locked-version-and-viewer-exam-read.sql`（含从 JSONB 回填）。
+>
+> **JSONB 仍双写，但已 deprecated**（保留一次回滚余地，下一批清理）：
+> - **读**：`_question_locks()` 优先读列；列为 NULL 才回退 JSONB
+>   （覆盖"迁移已执行但代码先上线"的时间窗，以及未回填的历史行）；
+> - **写**：`publish_exam()` 双写（列 + JSONB）；`compose_exam()` 两处都清。
 
 ## 分层
 
@@ -76,6 +81,7 @@ from app.schemas.admin_exam import (
     ExamSectionDetail,
     ExamSectionIn,
     ExamSectionOut,
+    ExamSoftDeleteOut,
     ExamUpdateIn,
     ExamValidateIssue,
     ExamValidateOut,
@@ -159,9 +165,9 @@ def _rule_config_of(row: Any) -> dict[str, Any]:
 def _merge_rule_config(current: dict[str, Any], **updates: Any) -> dict[str, Any]:
     """合并写 `rule_config`。
 
-    **必须读-改-写**：组卷写 `shortfalls` / 发布写 `question_locks`，
+    **必须读-改-写**：组卷写 `shortfalls` / 发布写 `question_locks`（deprecated），
     两者不能互相覆盖。这是把它当"一个 JSONB 存多件事"的必然代价 ——
-    也是建议下一批补独立列的又一条理由。
+    版本锁定已经搬到独立列，剩下的 `shortfalls` / `compose` 若要拆，可以照同样的路子走。
     """
     merged = dict(current or {})
     for k, v in updates.items():
@@ -461,6 +467,7 @@ def _exam_item(row: Any) -> ExamListItem:
         difficulty=float(row["difficulty"] or 0),
         has_subjective=bool(row["has_subjective"]),
         is_free=bool(row["is_free"]),
+        is_deleted=bool(row.get("is_deleted")),
         published_at=row.get("published_at"),
         updated_at=row["updated_at"],
         created_by=int(row["created_by"]) if row.get("created_by") else None,
@@ -695,11 +702,16 @@ async def _load_sections(db: AsyncSession, exam_id: int) -> list[Any]:
 
 
 async def _load_exam_questions(db: AsyncSession, exam_id: int) -> list[Any]:
-    """取卷面题目 + 题目**当前**版本。锁定版本的题干快照另取（只在有漂移时）。"""
+    """取卷面题目 + 题目**当前**版本 + **锁定版本**。
+
+    锁定版本优先读 `exam_questions.locked_version`（Batch 7 补的独立列）；
+    该列为 NULL 时由 `_question_locks()` 回退到 `rule_config.question_locks`。
+    """
     return (
         await db.execute(
             text(
                 "SELECT eq.id, eq.section_id, eq.question_id, eq.seq, eq.score, "
+                "       eq.locked_version, "
                 "       q.type AS question_type, q.stem, q.difficulty, q.chapter_id, "
                 "       q.version AS current_version, q.is_deleted, q.status AS q_status "
                 "FROM exam_questions eq "
@@ -710,6 +722,27 @@ async def _load_exam_questions(db: AsyncSession, exam_id: int) -> list[Any]:
             {"eid": exam_id},
         )
     ).mappings().all()
+
+
+def _question_locks(qrows: Sequence[Any], rc: dict[str, Any]) -> dict[str, int]:
+    """卷面每道题锁定的版本，键是 `question_id` 的字符串形式。
+
+    **优先读 `exam_questions.locked_version`**（独立列，Batch 7 前置修正加的），
+    该列为 NULL 时才回退到 `rule_config.question_locks`（**deprecated**，下批清理）。
+
+    回退分支保留的理由：让"加了列但还没回填"的库仍然工作 ——
+    迁移脚本虽然会回填，但生产库执行迁移与代码上线之间总有时间窗。
+    """
+    fallback = {str(k): int(v) for k, v in (rc.get("question_locks") or {}).items()}
+    out: dict[str, int] = {}
+    for r in qrows:
+        qid = int(r["question_id"])
+        locked = r.get("locked_version")
+        if locked is None:
+            locked = fallback.get(str(qid))
+        if locked is not None:
+            out[str(qid)] = int(locked)
+    return out
 
 
 async def _load_locked_snapshots(db: AsyncSession, pairs: Sequence[tuple[int, int]]) -> dict[tuple[int, int], dict]:
@@ -740,16 +773,20 @@ def _stem_preview(stem: str | None, limit: int = 60) -> str:
 
 
 async def get_exam_detail(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) -> ExamDetail:
+    """试卷详情。
+
+    **已归档（软删除）的卷仍可查看** —— 对称 Batch 4 题目软删除的处理：
+    详情页要能显示"这张卷已归档"，而不是给个 404 让用户以为它从没存在过。
+    只有真正不存在的 id 才 `40401`。
+    """
     row = await _load_exam_row(db, exam_id)
-    if row["is_deleted"]:
-        raise errors.not_found("试卷不存在", 40401)
     _ensure_subject_visible(viewer, int(row["subject_id"]), "试卷所属科目")
 
+    deleted = bool(row["is_deleted"])
+
     rc = _rule_config_of(row)
-    locks: dict[str, int] = {
-        str(k): int(v) for k, v in (rc.get("question_locks") or {}).items()
-    }
     qrows = await _load_exam_questions(db, exam_id)
+    locks = _question_locks(qrows, rc)
 
     # 只有"锁定版本 != 当前版本"的行才去取快照，避免为 100 道题白读 100 个 JSONB
     drift_pairs = [
@@ -817,10 +854,12 @@ async def get_exam_detail(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer
         shortfalls=shortfalls,
         validation=validation,
         created_at=row["created_at"],
-        can_edit=not (row["status"] == "published" and not rc.get("allow_edit_after_publish")),
-        can_compose=row["status"] in ("draft", "reviewing", "off"),
-        can_publish=row["status"] in ("draft", "reviewing"),
-        can_unpublish=row["status"] == "published",
+        can_edit=not deleted
+        and not (row["status"] == "published" and not rc.get("allow_edit_after_publish")),
+        can_compose=not deleted and row["status"] in ("draft", "reviewing", "off"),
+        can_publish=not deleted and row["status"] in ("draft", "reviewing"),
+        can_unpublish=not deleted and row["status"] == "published",
+        can_delete=not deleted,
     )
 
 
@@ -1126,6 +1165,14 @@ async def compose_exam(
 
     await _refresh_exam_totals(db, exam_id)
 
+    # 重新组卷 = 旧的版本锁定作废（卷面都换了，锁定就没意义了）。
+    # 两处都要清：独立列置 NULL + JSONB 置空（deprecated 双写，见 publish_exam）。
+    # 只在卷子不是 published 时才走到这里，所以不存在"抹掉已发布卷的锁定"的风险。
+    await db.execute(
+        text("UPDATE exam_questions SET locked_version = NULL WHERE exam_id = :eid"),
+        {"eid": exam_id},
+    )
+
     shortfall_dump = [s.model_dump(mode="json") for s in shortfalls]
     new_rc = _merge_rule_config(
         _rule_config_of(exam),
@@ -1137,7 +1184,7 @@ async def compose_exam(
             "filled": len(chosen),
             "rules": len(rules),
         },
-        # 重新组卷 = 旧的版本锁定作废（卷面换了，锁定就没意义了）
+        # JSONB 侧同步清空（deprecated 双写；独立列已在上面 UPDATE 置 NULL）
         question_locks={},
         locked_at=None,
     )
@@ -1236,8 +1283,10 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
     要发布就先把分段数字改成实际值（那等于明确认可"这张卷就是 52 道"）。
     """
     row = await _load_exam_row(db, exam_id)
-    if row["is_deleted"]:
-        raise errors.not_found("试卷不存在", 40401)
+    # ⚠️ **已经归档的卷也要能校验** —— 本函数是只读的，而且 `get_exam_detail` 会在内部
+    # 调它来内联校验结果。这里若对 `is_deleted` 抛 404，详情页就会**在上层已经放行之后**
+    # 又被这一层拦死（实测踩到：外层 remove 了 404，归档卷详情仍然 404）。
+    # 真正要拒绝归档卷的是**写操作**：compose / update / publish，它们各自有检查。
     _ensure_subject_visible(viewer, int(row["subject_id"]), "试卷所属科目")
 
     errors_out: list[ExamValidateIssue] = []
@@ -1332,7 +1381,7 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
             ExamValidateIssue(level="warning", code="NO_PASS_SCORE",
                               message="未设置及格线（pass_score=0）。")
         )
-    locks = {str(k): int(v) for k, v in (rc.get("question_locks") or {}).items()}
+    locks = _question_locks(qrows, rc)
     drift = [
         r for r in qrows
         if str(int(r["question_id"])) in locks
@@ -1391,10 +1440,24 @@ async def publish_exam(
         detail = "；".join(f"[{e.code}] {e.message}" for e in check.errors)
         raise errors.conflict(f"卷面校验未通过，不能发布：{detail}", 40901)
 
-    locks = {
-        str(int(r["question_id"])): int(r["current_version"])
-        for r in await _load_exam_questions(db, exam_id)
-    }
+    qrows = await _load_exam_questions(db, exam_id)
+    locks = {str(int(r["question_id"])): int(r["current_version"]) for r in qrows}
+
+    # ★ 主存储：独立列 `exam_questions.locked_version`。
+    # 一条 UPDATE 把每道题的**当前**版本写进卷面行 —— 比逐行 UPDATE 少 n 次往返，
+    # 且天然原子（同一个事务）。
+    await db.execute(
+        text(
+            "UPDATE exam_questions eq SET locked_version = q.version "
+            "FROM questions q "
+            "WHERE q.id = eq.question_id AND eq.exam_id = :eid"
+        ),
+        {"eid": exam_id},
+    )
+
+    # ⚠️ JSONB **双写**（deprecated，下批清理）：
+    # 保留一次回滚余地 —— 若代码回退到 Batch 7 Pass 1 那版，它只读
+    # rule_config.question_locks；不双写就会表现为"锁定凭空丢了"。
     new_rc = _merge_rule_config(
         _rule_config_of(row),
         question_locks=locks,
@@ -1426,6 +1489,64 @@ async def publish_exam(
         message=(
             f"已发布，{len(locks)} 道题都已锁定当前版本。"
             "之后即使题目被修改，本卷仍按锁定版本展示与判分。"
+        ),
+    )
+
+
+# ============================================================ 归档（软删除）
+
+
+async def soft_delete_exam(
+    db: AsyncSession,
+    *,
+    actor: Actor,
+    actor_name: str,
+    exam_id: int,
+    reason: str | None = None,
+    ip: str | None = None,
+) -> ExamSoftDeleteOut:
+    """软删除试卷（归档）。刻意与 Batch 4 的题目软删除保持同一套语义：
+
+    | 行为 | 说明 |
+    |---|---|
+    | 置 `exams.is_deleted = true` | 只动这一列 |
+    | 题目 | **不动**。题目是题库的资产，卷子只是"引用"了它们 |
+    | 卷面 | **不删**。`exam_questions` 保留，重新启用后卷面还在 |
+    | 列表 | 默认过滤掉；`include_deleted=true` 带出来 |
+    | 详情 | **仍可打开**（显示"已归档"），不是 404 |
+    | 留痕 | 写 `content_change_logs`（action=delete） |
+
+    已归档的再归档 → `40001`（不静默成功）。
+    """
+    row = await _load_exam_row(db, exam_id, for_update=True)
+    _ensure_subject_visible(actor, int(row["subject_id"]), "试卷所属科目")
+    if row["is_deleted"]:
+        raise errors.bad_request("试卷已归档，无需重复删除", 40001)
+
+    await db.execute(
+        text("UPDATE exams SET is_deleted = true, updated_at = now() WHERE id = :eid"),
+        {"eid": exam_id},
+    )
+    await _write_change_log(
+        db, entity_type="exam", entity_id=exam_id, action="delete",
+        actor_id=actor.id, ip=ip,
+        change_log=f"归档试卷「{row['title']}」" + (f"：{reason}" if reason else ""),
+        before={"is_deleted": False, "status": row["status"]},
+        after={"is_deleted": True, "status": row["status"]},
+    )
+    await db.commit()
+
+    is_published = row["status"] == "published"
+    return ExamSoftDeleteOut(
+        id=exam_id,
+        title=row["title"],
+        previous_status=row["status"],
+        is_deleted=True,
+        question_count=int(row["question_count"] or 0),
+        message=(
+            "试卷已归档：列表默认不再显示（打开「显示已归档」可以看到），详情仍可打开。"
+            "题目与卷面数据都保留，不受影响。"
+            + ("⚠️ 这张卷原本是**已发布**状态，归档后不应再用于考试。" if is_published else "")
         ),
     )
 
@@ -1478,6 +1599,7 @@ __all__ = [
     "list_paper_rules",
     "publish_exam",
     "relaxation_steps",
+    "soft_delete_exam",
     "update_exam",
     "update_paper_rule",
     "validate_exam",

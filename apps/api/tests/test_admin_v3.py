@@ -12,8 +12,10 @@ Batch 3 管理后台接口验收（需要 API 已启动 + 已跑 `python -m app.
 
     A. 所有 ID 字段必须是 JSON **字符串** —— 雪花 ID 18~19 位，超出 JS 安全整数范围
        (2^53-1 = 9007199254740991)，`JSON.parse` 会静默抹平尾数，拿去拼 URL 必然 404。
-    B. `viewer` 角色（只读审计岗）必须能看用户/审计，但**不能**改角色 ——
-       这是「有 user:read、没有 user:manage → 按钮 disabled」唯一可复现的账号。
+    B. `viewer` 角色（**通用只读岗**）必须能看用户/审计/试卷，但**不能**改任何东西 ——
+       这是「有 read、没有 write → 按钮 disabled」唯一可复现的账号
+       （其他角色的权限是按模块整包发的，read 和 write 总是一起拿到）。
+       Batch 7 给它补了 `exam:read`，用于「能看试卷、发布按钮置灰」。
     C. 脱敏必须由**服务端**决定：`phone` 永远脱敏，`phone_full` 只给有 `user:export` 的人。
        前端把字符盖住不算数 —— 值仍躺在响应体里，F12 一览无余。
 """
@@ -31,7 +33,14 @@ from .conftest import (
     register,
 )
 
-VIEWER_PERMS = {"user:read", "system:audit", "stats:read"}
+# viewer 是"通用只读岗"：只读场景补一个新的就往它身上加，**不新建角色**。
+#   user:read      Batch 3（看用户列表/详情，但没有 user:manage → 按钮置灰）
+#   system:audit   Batch 3（看审计日志）
+#   stats:read     Batch 3（看统计）
+#   exam:read      Batch 7（看试卷列表/详情，但没有 exam:publish → 「发布」按钮置灰）
+# 变动这里的成员时，`test_viewer_read_only_flow` 与 `test_roles_contract` 会一起被判，
+# 这是**故意的** —— 权限集合是跨批次契约，改它必须是有意识的决定。
+VIEWER_PERMS = {"user:read", "system:audit", "stats:read", "exam:read"}
 
 
 # ================================================================ A. ID 字符串契约

@@ -295,6 +295,9 @@ class ExamListItem(BaseModel):
     difficulty: float
     has_subjective: bool
     is_free: bool
+    #: 软删除标记。**已归档的卷仍可查看详情**（对称 Batch 4 题目软删除），
+    #: 列表默认过滤掉、`include_deleted=true` 时带出。
+    is_deleted: bool = False
     published_at: datetime | None = None
     updated_at: datetime
     created_by: BigIntStrOpt = None
@@ -314,6 +317,7 @@ class ExamDetail(ExamListItem):
     can_compose: bool = False
     can_publish: bool = False
     can_unpublish: bool = False
+    can_delete: bool = False
 
 
 # ---------------------------------------------------------------- 组卷 / 校验 / 发布
@@ -395,6 +399,19 @@ class ExamPublishOut(BaseModel):
     message: str
 
 
+class ExamSoftDeleteOut(BaseModel):
+    """软删除结果。字段与 Batch 4 的 `QuestionDeleteOut` 对齐。"""
+
+    id: BigIntStr
+    title: str
+    #: 删除前的状态（已发布的卷被归档时，调用方需要知道它原来是什么状态）
+    previous_status: ExamStatus
+    is_deleted: bool = True
+    #: 仍被软删除的卷面题数（题目本身不动，归档的只是"这张卷"）
+    question_count: int = 0
+    message: str
+
+
 # ---------------------------------------------------------------- 内部校验
 
 
@@ -435,6 +452,7 @@ __all__ = [
     "ExamSectionDetail",
     "ExamSectionIn",
     "ExamSectionOut",
+    "ExamSoftDeleteOut",
     "ExamStatus",
     "ExamType",
     "ExamUpdateIn",
