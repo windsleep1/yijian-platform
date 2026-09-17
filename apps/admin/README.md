@@ -190,7 +190,7 @@ student      无权限                         → 没有 user:read
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepRunning
-# 期望：54 passed, 1 skipped
+# 期望：75 passed, 1 skipped
 #   test_admin_v5.py  13 个  ← 导入管道（上传/校验/执行/发布/回滚/变更日志/数据范围）
 #   test_idgen.py     15 个  ← 雪花 ID 精度
 #   test_admin_v3/v4、test_smoke  ← Batch 2/3/4（不能回归）
@@ -245,6 +245,41 @@ python tools/local-verify/import-sim-bank.py --out /tmp/simbank.csv --limit 300
 3. **回滚要手输批次号** —— 输错一位，"确认回滚"必须仍是置灰的（这是防"点错批次"的减速带）。
 4. **回滚失败时弹窗保持打开** —— 失败信息画在**弹窗内部**并给重试；不是弹个 toast 就没了（坑 30）。
 
+### 3.5 如何验证组卷引擎（Batch 7 Pass 1，后端）
+
+组卷的验收要点不是"能不能生成卷子"，而是**三件容易做错的事**：
+缺口要如实回传、卷面必须自洽、发布后不能被改题悄悄影响。
+Pass 2 前端未落地前，直接打接口验证：
+
+```bash
+powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
+# 期望：75 passed, 1 skipped（其中 test_admin_v7.py 21 条是组卷用例）
+```
+
+只跑组卷用例（复用已运行的 API）：
+
+```bash
+cd apps/api
+AI_BASE=http://127.0.0.1:8123 \
+DATABASE_URL="postgresql+asyncpg://yijian@127.0.0.1:55432/yijian" \
+python -m pytest tests/test_admin_v7.py -v
+```
+
+**四个必须亲手确认的点**（完整 curl 见 `docs/13-Batch7-组卷引擎-方案与验收.md` §8）：
+
+| # | 确认什么 | 怎么看 |
+|---|---|---|
+| ① | **缺口不静默凑数** | 配一条"要 100 道 case 题"的规则（库里只有 27 道）→ `shortfalls[0]` 的 `need=100/got=27/missing=73`，且**卷面题数 = 27**，不是 100 |
+| ② | **卷面自洽** | 组卷后 `validate` 的 `ok=true`、`errors=[]`；分段 `actual_count == question_count` |
+| ③ | **版本锁定真的生效** | 发布 → 改某道题的题干（version+1）→ 重新打开试卷：`locked_version` 停在旧版本、`version_drift=true`，且 `stem_preview` 是**旧题干** |
+| ④ | **数据范围** | 用挂 `subject` 范围的教研账号，去建/组别科目的卷 → `40301`；列表里也看不到别科目的规则 |
+
+> ⚠️ 两个已知限制，验收时别当成 bug：
+> - `exam_questions` **没有** `locked_version` 列，锁定信息暂存在
+>   `exams.rule_config.question_locks`（`docs/13` §3.3 说明了取舍与建议的修法）。
+> - 权限种子把 `exam` 四条权限**整包**发给角色，所以**没有**"能看试卷但不能发布"的内置角色
+>   —— 想演示发布按钮置灰需要先加角色（坑 36）。
+
 ---
 
 ## 4. 后端接口 curl 示例
@@ -285,7 +320,7 @@ curl -s -X PUT "$BASE/admin/users/375228966664933376/roles" -H "$H" \
 curl -s -i "$BASE/admin/users/999999999999999999" -H "$H" | head -1
 ```
 
-Swagger 在 <http://localhost:8000/docs>，14 个接口都有中文 summary 和 description。
+Swagger 在 <http://localhost:8000/docs>，40 个接口都有中文 summary 和 description。
 
 ---
 
@@ -298,7 +333,7 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
 一条命令完成：起 PostgreSQL → 载入 schema → 重放 RBAC 种子 → 初始化超管 → 起 API → 跑 pytest → 收尾。
-**期望 `54 passed, 1 skipped`**：
+**期望 `75 passed, 1 skipped`**：
 
 ```
 tests/test_idgen.py      15 个   ← 雪花 ID 精度（Batch 5）
@@ -306,9 +341,10 @@ tests/test_admin_v3.py    8 个   ← 用户详情 / viewer 流程 / 角色权�
 tests/test_admin_v4.py   12 个   ← 题库 CRUD（Batch 4）
 tests/test_admin_v5.py   14 个   ← 导入管道 + 变更日志（Batch 5/6）
                                   其中 1 条是 6000 行全量门控用例，默认 skip
+tests/test_admin_v7.py   21 个   ← 组卷引擎：规则 CRUD / 组卷算法 / 缺口 / 校验 / 版本锁定 / 数据范围（Batch 7）
 tests/test_smoke.py       6 个   ← Batch 2 的认证链路 + RBAC（不能回归）
 ─────────────────────────────────────────────────────────────
-共 55 条 collected → 54 passed, 1 skipped
+共 76 条 collected → 75 passed, 1 skipped
 ```
 
 > `run-smoke.ps1` 用的是 8123 端口，并且**结束时会把 PostgreSQL 停掉**。
@@ -394,13 +430,15 @@ apps/admin/
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     33 条踩过的坑
+│  ├─ B端联调坑.md                     37 条踩过的坑
 │  └─ screenshots/                    人工走查截图存档（batch3/ batch6/）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 33 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+配套文档：**`docs/B端联调坑.md`** —— 37 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
 disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
-以及 Batch 6 的回滚数字语义、模态框失败态、下载验真等）。
+Batch 6 的回滚数字语义、模态框失败态、下载验真，
+以及 Batch 7 的 `subjects` 无 `is_deleted`、SELECT 列与取值清单不一致、
+权限整包发放无法表达"只读"、本机 PG 必须独立后台常驻等）。
 
 配套脚本：
 

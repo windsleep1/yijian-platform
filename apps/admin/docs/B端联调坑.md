@@ -1,12 +1,17 @@
 # B 端前后端联调常见坑
 
-> 本批（Batch 3 管理后台骨架 + Batch 4 题库 CRUD）实际踩到或明确识别出的坑。
-> 每条都按 **现象 → 根因 → 解法 → 在本项目里落在哪个文件** 写，方便以后照方抓药。
+> **37 条**实战坑，覆盖 Batch 2 ~ Batch 7 Pass 1（认证/RBAC → 管理后台 → 题库 CRUD
+> → 导入管道 → 导入向导 → 组卷引擎）。每条都按
+> **现象 → 根因 → 解法 → 在本项目里落在哪个文件** 写，方便以后照方抓药。
 >
-> 排序大致按"杀伤力"：前 5 条是会让人查半天的，中间是写一次就能避开的，
-> 第 15 条是取舍留痕，第 16 条是验收时实测出来并已修掉的。
-> 第 20~22 条是 Batch 4 验收时新踩的：20 是"权限漏配导致主用户进不来"，
-> 21 是对第 1 条的补完（**请求方向**同样会丢精度），22 是"假成功"类问题。
+> 读法建议：
+> - 排序大致按"杀伤力"。**前 5 条**是会让人查半天的（雪花 ID 精度、Rotation 并发、
+>   disabled 不出 tooltip、脱敏位置、时区）。
+> - **第 15 条**是取舍留痕（token 存 localStorage），**不是 bug，是明知的选择**。
+> - 按批次回溯：**1~16** Batch 2/3 ｜ **17~23** Batch 3/4 验收 ｜
+>   **24~28** Batch 5 导入管道 ｜ **29~33** Batch 6 导入向导 ｜ **34~37** Batch 7 组卷引擎。
+> - 末尾三份**检查清单**（新增导入管道 / 新增后台页面 / 一批交付收尾）是前面各条的"可执行版"，
+>   开新功能前照着过一遍，大部分坑能提前避开。
 
 ---
 
@@ -1449,6 +1454,123 @@ UI 主标签用 `label`（教研看得懂），下面一行等宽小字显示 `h
 不要默默选一边 —— 把两边都显示出来。** 对用户说人话，对排查说行话。
 另外，`published` 这种"看起来像批次状态"的东西值得单独想一想：
 **它到底是"这批导入"的属性，还是"被导入的那些题"的属性？** 这里是后者。
+
+---
+
+## 34. `subjects` 表**没有** `is_deleted` —— 别假设每张表都有软删除列 ★（Batch 7 Pass 1 实测）
+
+**现象**：`POST /admin/exams` 稳定 50001，日志里是
+
+```
+asyncpg.exceptions.UndefinedColumnError: column "is_deleted" does not exist
+[SQL: SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false]
+```
+
+**根因**：写"科目是否存在"的校验时想当然加了 `is_deleted = false`。
+但 **`subjects` 用的是 `status IN ('on','off')`**，根本没有 `is_deleted` 列。
+
+**全库哪些表真有 `is_deleted`**（`db/schema.sql` 实测）：
+
+| 有 `is_deleted` | 没有（用别的机制） |
+|---|---|
+| `questions`、`exams`、`users` | `subjects`（`status`）、`paper_rules`（`status`）、`exam_sections`、`exam_questions`、`question_versions`、`content_change_logs`、`roles`、`permissions` |
+
+**教训**：**"某张表有软删除"是一个需要查证的事实，不是可以类推的常识。**
+Batch 4/5 一直在跟 `questions` / `exams` 打交道，很容易形成"库里到处都是 `is_deleted`"的错觉。
+写任何"存在性/有效性校验"之前，先 `grep -A 20 "CREATE TABLE <表名>" db/schema.sql` 看一眼。
+
+> 修法落点：`exam_service._assert_subject_usable()` —— 顺手把"科目被停用"也归到同一个校验里，
+> 并把这个事实写进函数 docstring，避免下一个人再踩。
+
+---
+
+## 35. SELECT 列清单与 `row["x"]` 取值清单**会悄悄对不上**，且报错很像数据库问题 ★（Batch 7 Pass 1 实测）
+
+**现象**：给 `_EXAM_SELECT` 补字段时漏了 `e.is_deleted`，而代码里照常 `row["is_deleted"]`：
+
+```
+sqlalchemy.exc.NoSuchColumnError: Could not locate column in row for column 'is_deleted'
+```
+
+**为什么比坑 34 更阴**：坑 34 是**数据库**报的（`UndefinedColumnError`，带 `[SQL: ...]`）；
+这一条是**纯 Python 侧**报的 —— SQL 执行得好好的，只是结果行里没那一列。
+堆栈里**没有 `[SQL: ...]` 那一行**，第一眼很容易当成"SQL 写错了"，
+然后去反复改 WHERE 子句，改半天没有用。
+
+**判据**：看有没有 `[SQL: ...]`。
+- 有 → 数据库不认识这个列 → 改 SQL。
+- 没有、只有 `Could not locate column in row` → SQL 没问题，是**取值端**与 **select 端**不一致。
+
+**教训**：**`SELECT` 常量与"从这行取哪些字段"的函数要挨着写。**
+本模块把 `_EXAM_SELECT` 和 `_exam_item()` / `_load_exam_row()` 放在相邻位置，
+就是为了让这种不一致在 diff 里可见。列清单一旦散落到十个地方，这类 bug 就查不动了。
+
+---
+
+## 36. 权限**整包**发放 → 想验证"能看不能发"根本构造不出来 ★（Batch 7 Pass 1 实测）
+
+**现象**：想给"发布需要 `exam:publish`"写一条权限门控用例，预期教研（`researcher`）能读不能发，
+结果**发布直接成功了**。
+
+**根因**：`db/schema.sql` 的权限种子是按**模块整包**发权限的：
+
+```sql
+INSERT INTO role_permissions SELECT 3, id FROM permissions WHERE module IN ('question','exam','stats');
+```
+
+于是 `exam` 模块的四条（`read` / `create` / `publish` / `grade`）
+**同时**发给了 `super_admin`、`admin`、`researcher`、`teacher` 四个角色。
+查库确认：这四个角色的 exam 权限**完全一样**，没有任何一个"缺 publish"。
+
+**后果**：**当前角色模型无法表达"试卷只读"**。
+这跟 Batch 3 遇到的"有 `user:read` 的都同时有 `user:manage`"是**同一类缺口**
+（那次是靠新增 `viewer` 角色补上的）。
+
+**本批的处理**：不新增角色（改种子超出组卷引擎的范围），
+**把用例改成如实断言现状** —— `researcher` 走完 建卷→组卷→发布 全链路，
+同时在 docstring 与 `docs/13` 的遗留事项里写明这个缺口。
+
+**教训**：**写权限用例之前，先查一遍"这个状态在种子里能不能被构造出来"。**
+`SELECT r.code, p.code FROM role_permissions rp JOIN roles r ON ... JOIN permissions p ON ...`
+一条 SQL 的事，能省掉一轮"以为测了其实没测"。
+另外，用例断言**现状**时要把"这是现状，不是理想"写进注释 ——
+否则下一个人会把这条用例当成"设计意图"来维护。
+
+---
+
+## 37. 本机 PostgreSQL 必须作为**独立后台进程**常驻，否则会被工具会话回收 ★（Batch 7 Pass 1 实测）
+
+**现象**：在同步工具调用里跑 `pg_ctl start`（或 `start-pg.ps1`），脚本自己打印了
+`PostgreSQL 已就绪 -> 127.0.0.1:55432`，**但调用一返回，55432 立刻连不上**：
+
+```
+[local-verify] PostgreSQL 已就绪 -> 127.0.0.1:55432
+55432: closed          ← 同一个调用序列的下一步
+```
+
+而且 abrupt kill 会留下 **stale `postmaster.pid`**，下次 `pg_ctl start` 直接
+`another server might be running` 拒绝启动 —— 而 `run-smoke.ps1` **没有** stale-pid 自愈逻辑。
+
+**修法（二选一）**：
+
+1. **把 `postgres.exe` 本身当后台任务跑**（推荐用于反复迭代）：
+   它就是那个常驻进程，不会因为"父 shell 退出"被回收。
+   ```bash
+   "$PGBIN/postgres.exe" -D "$PGDATA" -p 55432 -c listen_addresses=127.0.0.1   # 作为后台任务
+   ```
+2. **交给 `run-smoke.ps1` 全权托管**（推荐用于跑验收）：它会自己起 PG、跑完停掉。
+   但**跑之前必须确认没有别的实例占着 55432/8123**，且**先删掉 stale `postmaster.pid`**。
+
+**清理 stale pid 前必须先确认没有 postgres 在跑**：
+
+```powershell
+$procs = @(Get-Process -Name postgres -ErrorAction SilentlyContinue)
+if ($procs.Count -eq 0) { Remove-Item "$env:USERPROFILE\.workbuddy\binaries\pg\data16\postmaster.pid" -Force }
+```
+
+**教训**：**"脚本说它起来了" ≠ "它还在"。** 判断服务是否常驻，要在**下一次**工具调用里验端口，
+而不是信同一次调用里的成功输出。这也是坑 17（端口预检）的兄弟条 ——
+一个防"旧进程占着端口"，一个防"新进程已被回收"，两者症状都是"验收假绿"。
 
 ---
 

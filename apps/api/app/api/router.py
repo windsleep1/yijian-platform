@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     admin_audit,
     admin_chapters,
+    admin_exams,
     admin_imports,
     admin_questions,
     admin_rbac,
@@ -26,10 +27,11 @@ api_router.include_router(admin_questions.router)  # Batch 4：/admin/questions 
 api_router.include_router(admin_chapters.router)   # Batch 4：/admin/chapters/tree
 api_router.include_router(admin_imports.router)    # Batch 5：/admin/imports 题库批量导入管道（7 接口）
                                                    # Batch 6：+ /admin/imports/{id}/changes 批次变更日志
+api_router.include_router(admin_exams.router)      # Batch 7：/admin/paper-rules 组卷规则 + /admin/exams
+                                                   #   试卷 CRUD / auto-compose / validate / publish（11 接口）
 
 # 后续批次在此追加：
 #   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点
 #   api_router.include_router(practice.router)      # 刷题
-#   api_router.include_router(exams.router)         # 模考
 
 __all__ = ["api_router"]
