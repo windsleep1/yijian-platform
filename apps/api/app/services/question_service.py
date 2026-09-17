@@ -235,16 +235,19 @@ def apply_data_scope(query: QuestionQuery, current_user: ScopeViewer) -> Questio
 # ============================================================ 内部查询工具
 
 _Q_SELECT = """
-SELECT q.id, q.subject_id, q.chapter_id, q.type, q.stem, q.difficulty, q.score_default,
+SELECT q.id, q.subject_id, q.chapter_id, q.knowledge_point_id,
+       q.type, q.stem, q.difficulty, q.score_default,
        q.status, q.version, q.is_deleted, q.keywords, q.exam_year,
        q.created_at, q.updated_at,
        s.name AS subject_name,
        c.name AS chapter_name,
+       kp.name AS knowledge_point_name,
        COALESCE(cu.nickname, cu.phone) AS created_by_name,
        COALESCE(uu.nickname, uu.phone) AS updated_by_name
 FROM questions q
 JOIN subjects s ON s.id = q.subject_id
 LEFT JOIN chapters c ON c.id = q.chapter_id
+LEFT JOIN knowledge_points kp ON kp.id = q.knowledge_point_id
 LEFT JOIN users cu ON cu.id = q.created_by
 LEFT JOIN users uu ON uu.id = q.updated_by
 """
@@ -308,6 +311,8 @@ def _row_to_list_item(row: dict[str, Any], opts: list[dict[str, Any]]) -> Questi
         subject_name=row["subject_name"],
         chapter_id=row["chapter_id"],
         chapter_name=row["chapter_name"],
+        knowledge_point_id=row.get("knowledge_point_id"),
+        knowledge_point_name=row.get("knowledge_point_name"),
         type=row["type"],
         stem=stem[:STEM_PREVIEW_LEN] + ("…" if len(stem) > STEM_PREVIEW_LEN else ""),
         difficulty=row["difficulty"],
@@ -379,6 +384,7 @@ async def list_questions(
     page_size: int,
     subject_id: int | None = None,
     chapter_id: int | None = None,
+    knowledge_point_id: int | None = None,
     qtype: str | None = None,
     difficulty: int | None = None,
     status: str | None = None,
@@ -393,6 +399,9 @@ async def list_questions(
     —— 对应前端顶部那个「显示已归档」开关。
 
     排序字段走白名单映射，**不接受调用方直接传列名**（否则就是注入面）。
+
+    `knowledge_point_id` 是 Batch 7 Pass 2 补的：组卷时"加题"要按知识点挑，
+    而在此之前只能按章节/题型/难度（章节比知识点粗得多，挑不细）。
     """
     q = QuestionQuery()
     if not include_deleted:
@@ -401,6 +410,8 @@ async def list_questions(
         q.add("q.subject_id = :subject_id", subject_id=subject_id)
     if chapter_id is not None:
         q.add("q.chapter_id = :chapter_id", chapter_id=chapter_id)
+    if knowledge_point_id is not None:
+        q.add("q.knowledge_point_id = :kp_id", kp_id=knowledge_point_id)
     if qtype:
         q.add("q.type = :qtype", qtype=qtype)
     if difficulty is not None:

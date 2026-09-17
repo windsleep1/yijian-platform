@@ -10,6 +10,8 @@
     PUT    /admin/exams/{id}               编辑试卷
     DELETE /admin/exams/{id}               归档（软删除）
     POST   /admin/exams/{id}/restore       恢复（解除归档）
+    POST   /admin/exams/{id}/questions     手动加题
+    DELETE /admin/exams/{id}/questions/{eq_id}  移出一题
     POST   /admin/exams/{id}/auto-compose  规则自动组卷
     POST   /admin/exams/{id}/validate      卷面校验
     POST   /admin/exams/{id}/publish       发布（写版本快照锁定）
@@ -71,6 +73,8 @@ from app.core import errors
 from app.core.idgen import next_id, to_inet
 from app.schemas.admin_exam import (
     OBJECTIVE_TYPES,
+    ExamAddQuestionsIn,
+    ExamAddQuestionsOut,
     ExamComposeIn,
     ExamComposeOut,
     ExamCreateIn,
@@ -79,6 +83,7 @@ from app.schemas.admin_exam import (
     ExamPublishIn,
     ExamPublishOut,
     ExamQuestionItem,
+    ExamRemoveQuestionOut,
     ExamRestoreOut,
     ExamSectionDetail,
     ExamSectionIn,
@@ -93,6 +98,7 @@ from app.schemas.admin_exam import (
     PaperRuleUpdateIn,
     RuleItem,
     Shortfall,
+    SkippedQuestion,
 )
 
 logger = logging.getLogger("app.exam")
@@ -1057,10 +1063,7 @@ async def compose_exam(
     if exam["is_deleted"]:
         raise errors.not_found("试卷不存在", 40401)
     _ensure_subject_visible(actor, int(exam["subject_id"]), "试卷所属科目")
-    if exam["status"] == "published":
-        raise errors.conflict(
-            "试卷已发布，不能重新组卷。请先下线到草稿态，或新建一份试卷。", 40901
-        )
+    _assert_exam_mutable(exam, action="重新组卷")
 
     subject_id = payload.subject_id or int(exam["subject_id"])
     if payload.subject_id is not None:
@@ -1653,6 +1656,255 @@ async def restore_exam(
     )
 
 
+# ============================================================ 手动加题 / 移题
+
+
+def _assert_exam_mutable(row: Any, *, action: str) -> None:
+    """写操作前的统一准入：**已发布的卷面是冻结的**。
+
+    收口到一个函数，是因为这判断原本散在 compose / update 里各写一份 ——
+    "同一份判断散落多处，改一处漏三处"正是坑 38（外层放行、内层拦死）的成因。
+    `update_exam` 只在**改卷面结构**时用它，改标题/简介这类展示字段不受限。
+    """
+    if row["status"] == "published" and not _rule_config_of(row).get("allow_edit_after_publish"):
+        raise errors.conflict(
+            f"试卷已发布，卷面已冻结，不能{action}。"
+            "请先把试卷下线到草稿态，或在发布时勾选「允许发布后编辑」。",
+            40901,
+        )
+
+
+async def add_exam_questions(
+    db: AsyncSession,
+    *,
+    actor: Actor,
+    actor_name: str,
+    exam_id: int,
+    payload: ExamAddQuestionsIn,
+    ip: str | None = None,
+) -> ExamAddQuestionsOut:
+    """往试卷里手动加题。
+
+    逐条判断、逐条给理由 —— 与导入管道同一个哲学：
+    **批量操作不因为其中一条有问题就整批失败，但绝不静默丢弃**，
+    每一条没加进去的都要能在 `skipped[].reason` 里查到原因。
+
+    六道闸（全部进 `skipped` 而不是整批报错）：
+
+    | 判据 | reason |
+    |---|---|
+    | 题目不存在 | 题目不存在 |
+    | 已归档 | 题目已归档（软删除） |
+    | 非已发布 | 题目不是已发布状态 |
+    | **科目不一致** | 题目不属于本试卷的科目 |
+    | 已在卷面 | 该题已在卷面中 |
+    | 找不到同题型分段 | 卷面没有「X 题」分段，请先加一个 |
+
+    **科目一致**这条别省：不加就会出现"经济卷里塞进一道法规题"，
+    而校验器只看得懂题型和分值，**看不出科目串了**。
+    """
+    exam = await _load_exam_row(db, exam_id, for_update=True)
+    if exam["is_deleted"]:
+        raise errors.not_found("试卷不存在", 40401)
+    _ensure_subject_visible(actor, int(exam["subject_id"]), "试卷所属科目")
+    _assert_exam_mutable(exam, action="加题/移题")
+
+    sections = await _load_sections(db, exam_id)
+    section_ids = {int(s["id"]) for s in sections}
+    if payload.section_id is not None and payload.section_id not in section_ids:
+        raise errors.bad_request("指定的分段不属于这份试卷", 40001)
+
+    # 题型 -> 该题型的分段 id（按 sort_no 顺序，取第一个）
+    by_type: dict[str, int] = {}
+    for s in sections:
+        by_type.setdefault(s["question_type"], int(s["id"]))
+    score_per = {int(s["id"]): float(s["score_per"]) for s in sections}
+
+    # 去重保序：同一个 id 传两次只算一次
+    wanted = list(dict.fromkeys(int(q) for q in payload.question_ids))
+
+    rows = (
+        await db.execute(
+            text(
+                "SELECT id, subject_id, type, status, is_deleted FROM questions "
+                "WHERE id = ANY(CAST(:ids AS bigint[]))"
+            ),
+            {"ids": wanted},
+        )
+    ).mappings().all()
+    info = {int(r["id"]): r for r in rows}
+
+    existing = {
+        int(r["question_id"])
+        for r in (
+            await db.execute(
+                text("SELECT question_id FROM exam_questions WHERE exam_id = :eid"),
+                {"eid": exam_id},
+            )
+        ).mappings().all()
+    }
+    seq = int(
+        await db.scalar(
+            text("SELECT COALESCE(max(seq), 0) FROM exam_questions WHERE exam_id = :eid"),
+            {"eid": exam_id},
+        )
+        or 0
+    )
+
+    skipped: list[SkippedQuestion] = []
+    to_add: list[tuple[int, int, float]] = []  # (question_id, section_id, score)
+    for qid in wanted:
+        r = info.get(qid)
+        if r is None:
+            skipped.append(SkippedQuestion(question_id=qid, reason="题目不存在"))
+            continue
+        if r["is_deleted"]:
+            skipped.append(SkippedQuestion(question_id=qid, reason="题目已归档（软删除）"))
+            continue
+        if r["status"] != "published":
+            skipped.append(
+                SkippedQuestion(
+                    question_id=qid,
+                    reason=f"题目不是已发布状态（当前 {r['status']}）",
+                )
+            )
+            continue
+        if int(r["subject_id"]) != int(exam["subject_id"]):
+            skipped.append(
+                SkippedQuestion(question_id=qid, reason="题目不属于本试卷的科目")
+            )
+            continue
+        if qid in existing:
+            skipped.append(SkippedQuestion(question_id=qid, reason="该题已在卷面中"))
+            continue
+
+        sid = payload.section_id or by_type.get(r["type"])
+        if sid is None:
+            label = TYPE_LABELS.get(r["type"], r["type"])
+            skipped.append(
+                SkippedQuestion(
+                    question_id=qid,
+                    reason=f"卷面没有「{label}」分段，请先加一个该题型的分段",
+                )
+            )
+            continue
+
+        existing.add(qid)
+        to_add.append((qid, int(sid), score_per.get(int(sid), 1.0)))
+
+    for qid, sid, score in to_add:
+        seq += 1
+        await db.execute(
+            text(
+                "INSERT INTO exam_questions (id, exam_id, section_id, question_id, seq, score) "
+                "VALUES (:id, :eid, :sid, :qid, :seq, :score)"
+            ),
+            {"id": next_id(), "eid": exam_id, "sid": sid, "qid": qid, "seq": seq, "score": score},
+        )
+
+    await _refresh_exam_totals(db, exam_id)
+    await _write_change_log(
+        db, entity_type="exam", entity_id=exam_id, action="update",
+        actor_id=actor.id, ip=ip,
+        change_log=f"手动加题：成功 {len(to_add)} 道，跳过 {len(skipped)} 道",
+        before=None,
+        after={
+            "added": len(to_add),
+            "question_ids": [q for q, _, _ in to_add],
+            "skipped": [s.model_dump(mode="json") for s in skipped],
+        },
+    )
+    await db.commit()
+
+    fresh = await _load_exam_row(db, exam_id)
+    sections_out = await _load_sections(db, exam_id)
+    if skipped:
+        msg = (
+            f"已加 {len(to_add)} 道题，跳过 {len(skipped)} 道（原因见 skipped）。"
+            f"卷面现有 {int(fresh['question_count'] or 0)} 题。"
+        )
+    else:
+        msg = f"已加 {len(to_add)} 道题，卷面现有 {int(fresh['question_count'] or 0)} 题。"
+
+    return ExamAddQuestionsOut(
+        exam_id=exam_id,
+        added=len(to_add),
+        skipped=skipped,
+        question_count=int(fresh["question_count"] or 0),
+        total_score=float(fresh["total_score"] or 0),
+        sections=[_section_out(s) for s in sections_out],
+        message=msg,
+    )
+
+
+async def remove_exam_question(
+    db: AsyncSession,
+    *,
+    actor: Actor,
+    actor_name: str,
+    exam_id: int,
+    exam_question_id: int,
+    ip: str | None = None,
+) -> ExamRemoveQuestionOut:
+    """从试卷里移走一道题（删除卷面行，**不动题目本身**）。
+
+    注意移到这一步之后，分段的**计划题数不会自动变小** ——
+    于是 `validate` 会报 `SECTION_NOT_FILLED`（计划 60、实际 59）。
+    这是**有意**的：分段是卷面的契约，改动它应当是一个显式动作
+    （要么补一道题，要么把分段数字改成实际值）。
+    """
+    exam = await _load_exam_row(db, exam_id, for_update=True)
+    if exam["is_deleted"]:
+        raise errors.not_found("试卷不存在", 40401)
+    _ensure_subject_visible(actor, int(exam["subject_id"]), "试卷所属科目")
+    _assert_exam_mutable(exam, action="加题/移题")
+
+    row = (
+        await db.execute(
+            text(
+                "SELECT id, question_id FROM exam_questions WHERE id = :eqid AND exam_id = :eid"
+            ),
+            {"eqid": exam_question_id, "eid": exam_id},
+        )
+    ).mappings().first()
+    if row is None:
+        raise errors.not_found("卷面题目不存在（可能已被移走）", 40401)
+
+    await db.execute(
+        text("DELETE FROM exam_questions WHERE id = :eqid"), {"eqid": exam_question_id}
+    )
+    await _refresh_exam_totals(db, exam_id)
+    await _write_change_log(
+        db, entity_type="exam", entity_id=exam_id, action="update",
+        actor_id=actor.id, ip=ip,
+        change_log=f"移出题目 {row['question_id']}",
+        before={"exam_question_id": exam_question_id, "question_id": int(row["question_id"])},
+        after=None,
+    )
+    await db.commit()
+
+    fresh = await _load_exam_row(db, exam_id)
+    sections_out = await _load_sections(db, exam_id)
+    unfinished = [s for s in sections_out if int(s["actual_count"]) != int(s["question_count"])]
+    msg = (
+        f"已移出该题，卷面现有 {int(fresh['question_count'] or 0)} 题。"
+        + (
+            f"⚠️ 有 {len(unfinished)} 个分段的题数与计划不符，发布前会被校验拦住。"
+            if unfinished
+            else ""
+        )
+    )
+    return ExamRemoveQuestionOut(
+        exam_id=exam_id,
+        exam_question_id=exam_question_id,
+        question_id=int(row["question_id"]),
+        question_count=int(fresh["question_count"] or 0),
+        total_score=float(fresh["total_score"] or 0),
+        sections=[_section_out(s) for s in sections_out],
+        message=msg,
+    )
+
+
 # ============================================================ 变更日志
 
 
@@ -1691,6 +1943,7 @@ __all__ = [
     "STATUS_LABELS",
     "TYPE_LABELS",
     "UNUSED_WEIGHT",
+    "add_exam_questions",
     "build_shortfall",
     "compose_exam",
     "create_exam",
@@ -1701,6 +1954,7 @@ __all__ = [
     "list_paper_rules",
     "publish_exam",
     "relaxation_steps",
+    "remove_exam_question",
     "restore_exam",
     "soft_delete_exam",
     "update_exam",

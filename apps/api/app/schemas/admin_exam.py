@@ -427,6 +427,51 @@ class ExamRestoreOut(BaseModel):
     message: str
 
 
+class ExamAddQuestionsIn(BaseModel):
+    """往试卷里加题（手动选题）。
+
+    一次最多 200 道。`question_ids` 会**去重保序**（重复传同一个 id 只算一次）。
+    """
+
+    question_ids: list[int] = Field(..., min_length=1, max_length=200)
+    section_id: int | None = Field(
+        None,
+        description="挂到哪个分段。不传则按**题目题型**自动匹配同题型的分段",
+    )
+
+
+class SkippedQuestion(BaseModel):
+    """被跳过的题及原因。
+
+    与导入管道同一个哲学：**批量操作不因为其中一条有问题就整批失败**，
+    但**必须逐条说清为什么没加进去**，绝不静默丢弃。
+    """
+
+    question_id: BigIntStr
+    reason: str
+
+
+class ExamAddQuestionsOut(BaseModel):
+    exam_id: BigIntStr
+    added: int
+    skipped: list[SkippedQuestion] = Field(default_factory=list)
+    question_count: int
+    total_score: float
+    sections: list[ExamSectionOut] = Field(default_factory=list)
+    message: str
+
+
+class ExamRemoveQuestionOut(BaseModel):
+    exam_id: BigIntStr
+    #: 被移除的卷面行 id（`exam_questions.id`）
+    exam_question_id: BigIntStr
+    question_id: BigIntStr
+    question_count: int
+    total_score: float
+    sections: list[ExamSectionOut] = Field(default_factory=list)
+    message: str
+
+
 # ---------------------------------------------------------------- 内部校验
 
 
@@ -456,6 +501,8 @@ ExamDetail.model_rebuild()
 __all__ = [
     "COMPOSABLE_TYPES",
     "OBJECTIVE_TYPES",
+    "ExamAddQuestionsIn",
+    "ExamAddQuestionsOut",
     "ExamComposeIn",
     "ExamComposeOut",
     "ExamCreateIn",
@@ -464,6 +511,7 @@ __all__ = [
     "ExamPublishIn",
     "ExamPublishOut",
     "ExamQuestionItem",
+    "ExamRemoveQuestionOut",
     "ExamRestoreOut",
     "ExamSectionDetail",
     "ExamSectionIn",
@@ -482,4 +530,5 @@ __all__ = [
     "RuleStatus",
     "RuleStrategy",
     "Shortfall",
+    "SkippedQuestion",
 ]

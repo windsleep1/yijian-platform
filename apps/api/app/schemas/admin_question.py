@@ -201,6 +201,10 @@ class QuestionListItem(BaseModel):
     subject_name: str | None = None
     chapter_id: BigIntStrOpt = None
     chapter_name: str | None = None
+    #: 知识点（Batch 7 Pass 2 补）。组卷"加题"要按知识点挑题，
+    #: 列表里也得能看出这道题挂在哪个知识点上，否则筛完也不知道筛的是什么。
+    knowledge_point_id: BigIntStrOpt = None
+    knowledge_point_name: str | None = None
     type: str
     stem: str = Field(..., description="题干纯文本（已按 stem_preview_len 截断）")
     difficulty: int

@@ -1305,3 +1305,200 @@ def test_restore_writes_change_log_with_is_deleted_diff(
     diff = json.loads(diff) if isinstance(diff, str) else diff
     assert diff["before"]["is_deleted"] is True, diff
     assert diff["after"]["is_deleted"] is False, diff
+
+
+# ================================================================ M. 手动加题 / 移题
+# Pass 2 的前置缺口：spec 要求「手动选题 / 加题 / 移题」，但后端原本只有"自动组卷"。
+
+
+def add_questions(client, headers, exam_id, ids: list[int], section_id: int | None = None) -> dict:
+    payload: dict = {"question_ids": [str(i) for i in ids]}
+    if section_id is not None:
+        payload["section_id"] = str(section_id)
+    return body(client.post(f"{API}/admin/exams/{exam_id}/questions",
+                            headers=headers, json=payload, timeout=60))
+
+
+def make_exam_with_sections(client, admin_h, created, *, subject_id=JJ_SUBJECT_ID,
+                            single=0, multiple=0, judge=0) -> dict:
+    """建一张**带分段**的草稿卷，供手动加题用。"""
+    sections = []
+    sort_no = 0
+    for qt, cnt, score in (("single", single, 1), ("multiple", multiple, 2), ("judge", judge, 1)):
+        if cnt:
+            sections.append({
+                "name": {"single": "单项选择题", "multiple": "多项选择题",
+                         "judge": "判断题"}[qt],
+                "question_type": qt, "question_count": cnt, "score_per": score,
+                "sort_no": sort_no,
+            })
+            sort_no += 1
+    exam = create_exam(client, admin_h, subject_id=subject_id,
+                       title=f"手动选题 {uuid.uuid4().hex[:6]}", sections=sections)
+    created.exams.append(exam["id"])
+    return exam
+
+
+def pick_published_ids(client, admin_h, subject_id: int, qtype: str, n: int) -> list[int]:
+    b = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
+        "subject_id": subject_id, "type": qtype, "status": "published", "page_size": n,
+    }))
+    assert b["code"] == 0, b
+    return [int(x["id"]) for x in b["data"]["items"]][:n]
+
+
+def test_manual_add_and_remove_questions(client: httpx.Client, admin_h, created) -> None:
+    """手动加题 → 题型自动挂到同题型分段 → 题数/总分重算；移题后题数回落 + 提示分段不符。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=5, multiple=3)
+    assert exam["question_count"] == 0, exam
+
+    singles = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 2)
+    multiples = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "multiple", 1)
+    assert len(singles) == 2 and len(multiples) == 1, "题库容量不足，先确认种子已导入"
+
+    b = add_questions(client, admin_h, exam["id"], singles + multiples)
+    assert b["code"] == 0, b
+    d = b["data"]
+    assert d["added"] == 3 and d["skipped"] == [], d
+    # 单选每题 1 分、多选每题 2 分 → 1+1+2 = 4
+    assert d["question_count"] == 3 and d["total_score"] == 4.0, d
+
+    # 分段实际题数：单选段 2 道、多选段 1 道
+    by_type = {s["question_type"]: s for s in d["sections"]}
+    assert by_type["single"]["actual_count"] == 2, by_type["single"]
+    assert by_type["multiple"]["actual_count"] == 1, by_type["multiple"]
+
+    # 详情里能拿到卷面行 id（移题要用）
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    eq_id = detail["sections"][0]["questions"][0]["id"]
+
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}",
+                           headers=admin_h))
+    assert b["code"] == 0, b
+    d = b["data"]
+    assert d["question_count"] == 2, d
+    assert d["total_score"] == 3.0, d
+    assert "分段的题数与计划不符" in d["message"], d["message"]
+    # 题目本身没被删（只是移出卷面）
+    assert body(client.get(f"{API}/admin/questions/{d['question_id']}", headers=admin_h))["code"] == 0
+
+    # 再移一次同一个卷面行 → 40401
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}", headers=admin_h))
+    assert b["code"] == 40401, b
+
+
+def test_add_questions_skips_with_reason_not_whole_batch_failure(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """六道闸逐条给理由，**不因为一条有问题就整批失败**，也**不静默丢弃**。"""
+    # 只建「单选」分段：于是判断题必然找不到同题型分段（第 6 道闸）
+    exam = make_exam_with_sections(client, admin_h, created, single=3)
+
+    good = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 1)[0]
+    # 别科目的题（经济卷里塞法规题）
+    other_subject = pick_published_ids(client, admin_h, JZ_SUBJECT_ID, "single", 1)[0]
+    # 已归档的题
+    archived = make_question(client, admin_h, subject_id=JJ_SUBJECT_ID)
+    created.questions.append(archived["id"])
+    assert body(client.delete(f"{API}/admin/questions/{archived['id']}",
+                              headers=admin_h))["code"] == 0
+    # 卷面没有「判断题」分段 → 这道 judge 题应被跳过
+    judge_q = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 1)[0]
+
+    b = add_questions(client, admin_h, exam["id"],
+                      [good, int(other_subject), int(archived["id"]), int(judge_q),
+                       999999999999999999, good])
+    assert b["code"] == 0, "一条有问题不该整批失败"
+    d = b["data"]
+    assert d["added"] == 1, d
+    assert d["question_count"] == 1, d
+
+    reasons = {s["question_id"]: s["reason"] for s in d["skipped"]}
+    assert len(d["skipped"]) == 4, d["skipped"]
+    assert "不属于本试卷的科目" in reasons[str(other_subject)], reasons
+    assert "已归档" in reasons[str(archived["id"])], reasons
+    assert "判断题" in reasons[str(judge_q)] and "分段" in reasons[str(judge_q)], reasons
+    assert "不存在" in reasons["999999999999999999"], reasons
+    # 重复传同一个 id（good 传了两次）只算一次，不该进 skipped
+    assert str(good) not in reasons, reasons
+
+
+def test_add_and_remove_questions_frozen_after_publish(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """已发布的卷面是冻结的：加题 / 移题都 `40901`。"""
+    exam = make_exam_with_sections(client, admin_h, created, judge=2, subject_id=JJ_SUBJECT_ID)
+    qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2)
+    assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    eq_id = detail["sections"][0]["questions"][0]["id"]
+    extra = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 1)
+
+    b = add_questions(client, admin_h, exam["id"], extra)
+    assert b["code"] == 40901 and "已发布" in b["message"] and "冻结" in b["message"], b
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}", headers=admin_h))
+    assert b["code"] == 40901 and "已发布" in b["message"], b
+
+
+def test_add_questions_validates_section_and_permission(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """指定了不属于本卷的分段 → 40001；viewer 无 `exam:create` → 40301。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=2)
+    qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 1)
+
+    # 不属于本卷的分段 id
+    b = add_questions(client, admin_h, exam["id"], qs, section_id=999999999999999999)
+    assert b["code"] == 40001 and "分段" in b["message"], b
+
+    u = fresh_user(client, nickname="B7 加题权限")
+    assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
+    vh = auth(u["access_token"])
+    b = add_questions(client, vh, exam["id"], qs)
+    assert b["code"] == 40301 and "exam:create" in b["message"], b
+    # viewer 也移不了题
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    eq_id = detail["sections"][0]["questions"][0]["id"]
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}", headers=vh))
+    assert b["code"] == 40301 and "exam:create" in b["message"], b
+
+
+def test_question_list_filters_by_knowledge_point(client: httpx.Client, admin_h) -> None:
+    """按知识点筛选（Pass 2 的「加题」面板要按知识点挑题，原来只能按章节）。"""
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能找有题的知识点")
+
+    rows = sql_fetch(
+        "SELECT knowledge_point_id AS kp, count(*) AS n FROM questions "
+        "WHERE subject_id=$1 AND status='published' AND is_deleted=false "
+        "  AND knowledge_point_id IS NOT NULL "
+        "GROUP BY knowledge_point_id ORDER BY n DESC LIMIT 1",
+        JJ_SUBJECT_ID,
+    )
+    if not rows:
+        pytest.skip(f"科目 {JJ_SUBJECT_ID} 没有挂了知识点的已发布题")
+    kp_id, total = int(rows[0]["kp"]), int(rows[0]["n"])
+
+    b = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
+        "subject_id": JJ_SUBJECT_ID, "knowledge_point_id": kp_id, "page_size": 1,
+    }))
+    assert b["code"] == 0, b
+    assert int(b["data"]["total"]) == total, f"期望 {total}，实际 {b['data']['total']}"
+
+    # 不传该参数时结果集更大（证明筛选真的在起作用）
+    b2 = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
+        "subject_id": JJ_SUBJECT_ID, "page_size": 1,
+    }))
+    assert int(b2["data"]["total"]) > total, "知识点筛选没起作用"
+
+    # 每条结果的 knowledge_point_id 都等于筛选值
+    b3 = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
+        "subject_id": JJ_SUBJECT_ID, "knowledge_point_id": kp_id, "page_size": 50,
+    }))
+    assert all(
+        int(x["knowledge_point_id"]) == kp_id for x in b3["data"]["items"]
+    ), "返回了别的知识点的题"

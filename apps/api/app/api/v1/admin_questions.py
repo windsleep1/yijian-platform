@@ -57,8 +57,8 @@ router = APIRouter(prefix="/admin/questions", tags=["管理端 · 题库"])
         "需要权限 `question:read`。\n\n"
         "- **默认只返回未删除的题**（`is_deleted=false`）。要连软删除的一起看，"
         "传 `include_deleted=true`（对应列表页顶部的「显示已归档」开关）。\n"
-        "- 筛选支持：`subject_id` / `chapter_id` / `type` / `difficulty` / `status` / `keyword`。"
-        "`keyword` 同时模糊匹配题干、关键词与富文本题干。\n"
+        "- 筛选支持：`subject_id` / `chapter_id` / `knowledge_point_id` / `type` / "
+        "`difficulty` / `status` / `keyword`。`keyword` 同时模糊匹配题干、关键词与富文本题干。\n"
         "- `order_by` 走白名单（`updated_at` / `created_at` / `difficulty` / `id`），"
         "**不接受列名直传**，避免变成注入面。\n"
         "- 排序末尾恒定追加 `q.id`，否则同一时间戳的行在翻页时会重复或漏项。"
@@ -71,6 +71,9 @@ async def list_questions(
     page_info: Annotated[tuple[int, int], Depends(pagination)],
     subject_id: Annotated[int | None, Query(description="科目 ID")] = None,
     chapter_id: Annotated[int | None, Query(description="章节 ID")] = None,
+    knowledge_point_id: Annotated[
+        int | None, Query(description="知识点 ID（组卷加题时按知识点挑题用）")
+    ] = None,
     qtype: Annotated[QType | None, Query(alias="type", description="题型")] = None,
     difficulty: Annotated[int | None, Query(ge=1, le=5, description="难度 1~5")] = None,
     status: Annotated[QStatus | None, Query(description="业务状态")] = None,
@@ -91,6 +94,7 @@ async def list_questions(
         page_size=page_size,
         subject_id=subject_id,
         chapter_id=chapter_id,
+        knowledge_point_id=knowledge_point_id,
         qtype=qtype,
         difficulty=difficulty,
         status=status,

@@ -13,6 +13,8 @@
     PUT    /admin/exams/{id}               编辑试卷              —— exam:create
     DELETE /admin/exams/{id}               归档（软删除）         —— exam:create
     POST   /admin/exams/{id}/restore       恢复（解除归档）       —— exam:publish
+    POST   /admin/exams/{id}/questions     手动加题              —— exam:create
+    DELETE /admin/exams/{id}/questions/{eq_id}  移出一题          —— exam:create
 
 ## 两个刻意的决定
 
@@ -40,6 +42,8 @@ from app.core.deps import (
 )
 from app.core.response import Envelope, Page, ok, paginate
 from app.schemas.admin_exam import (
+    ExamAddQuestionsIn,
+    ExamAddQuestionsOut,
     ExamComposeIn,
     ExamComposeOut,
     ExamCreateIn,
@@ -47,6 +51,7 @@ from app.schemas.admin_exam import (
     ExamListItem,
     ExamPublishIn,
     ExamPublishOut,
+    ExamRemoveQuestionOut,
     ExamRestoreOut,
     ExamSoftDeleteOut,
     ExamUpdateIn,
@@ -439,5 +444,66 @@ async def restore_exam(
 ) -> dict:
     out = await exam_service.restore_exam(
         db, actor=me, actor_name=me.display_name, exam_id=exam_id, ip=client_ip(request)
+    )
+    return ok(out.model_dump(), message=out.message)
+
+
+@router.post(
+    "/admin/exams/{exam_id}/questions",
+    response_model=Envelope[ExamAddQuestionsOut],
+    summary="手动加题到试卷",
+    description=(
+        "需要权限 `exam:create`。一次最多 200 道，`question_ids` 会**去重保序**。\n\n"
+        "`section_id` 不传时按**题目题型**自动挂到同题型的分段。\n\n"
+        "**逐条判断、逐条给理由** —— 与导入管道同一个哲学：批量操作不因为其中一条"
+        "有问题就整批失败，但**绝不静默丢弃**，没加进去的都在 `skipped[].reason` 里。\n\n"
+        "六道闸：题目不存在 / 已归档 / 非「已发布」/ **不属于本试卷科目** / 已在卷面 / "
+        "卷面没有该题型的分段。\n\n"
+        "> 「科目一致」这条别省：不加就会出现「经济卷里塞进一道法规题」，\n"
+        "> 而校验器只看得懂题型与分值，**看不出科目串了**。\n\n"
+        "**已发布的卷不能加题**（卷面冻结）→ `40901`；已归档的卷 → `40401`。\n\n"
+        "加题**不受分段计划题数限制**：加超了 `validate` 会以 `SECTION_NOT_FILLED` 报出来，"
+        "由你决定是补题、还是把分段数字改成实际值。"
+    ),
+    dependencies=[Depends(require_permission("exam:create"))],
+)
+async def add_exam_questions(
+    exam_id: int,
+    payload: ExamAddQuestionsIn,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    out = await exam_service.add_exam_questions(
+        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
+        payload=payload, ip=client_ip(request),
+    )
+    return ok(out.model_dump(), message=out.message)
+
+
+@router.delete(
+    "/admin/exams/{exam_id}/questions/{exam_question_id}",
+    response_model=Envelope[ExamRemoveQuestionOut],
+    summary="从试卷移出一题",
+    description=(
+        "需要权限 `exam:create`。删除的是**卷面行**（`exam_questions.id`），"
+        "**题目本身不受影响**（题库里照旧）。\n\n"
+        "⚠️ 移题之后分段的**计划题数不会自动变小** → `validate` 会报 `SECTION_NOT_FILLED`。\n"
+        "这是有意的：分段是卷面的契约，改动它应当是一个显式动作"
+        "（补一道题，或把分段数字改成实际值）。响应里的 `message` 会提示这点。\n\n"
+        "**已发布的卷不能移题**（卷面冻结）→ `40901`。"
+    ),
+    dependencies=[Depends(require_permission("exam:create"))],
+)
+async def remove_exam_question(
+    exam_id: int,
+    exam_question_id: int,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    out = await exam_service.remove_exam_question(
+        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
+        exam_question_id=exam_question_id, ip=client_ip(request),
     )
     return ok(out.model_dump(), message=out.message)

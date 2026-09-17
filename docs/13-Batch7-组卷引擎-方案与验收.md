@@ -7,7 +7,7 @@
 > **Pass 2 试卷管理前端**（`/exams`、`/exams/new`、`/exams/[id]`、`/paper-rules`，待开工）。
 > 本文覆盖 Pass 1 与前置修正；Pass 2 完成后在文末追加其章节。
 >
-> **当前状态**：后端 **43 个接口**，`run-smoke.ps1` **86 passed, 1 skipped**（无回归）。
+> **当前状态**：后端 **45 个接口**，`run-smoke.ps1` **91 passed, 1 skipped**（无回归）。
 
 前置：Batch 4 的题库 CRUD、Batch 5 的导入管道（题库里已有 6000 道已发布仿真题）。
 
@@ -33,13 +33,18 @@
 | ⑫ | DELETE | `/admin/exams/{id}` | `exam:create` | **归档（软删除）** |
 | ⑬ | POST | `/admin/exams/{id}/restore` | `exam:publish` | **恢复（解除归档）** |
 | ⑭ | POST | `/admin/questions/{id}/restore` | `question:delete` | **恢复题目**（与⑫对称，在题库路由下） |
+| ⑮ | POST | `/admin/exams/{id}/questions` | `exam:create` | **手动加题**（Pass 2 前置缺口，§3.9） |
+| ⑯ | DELETE | `/admin/exams/{id}/questions/{eq_id}` | `exam:create` | **移出一题**（同上） |
+
+另外 `GET /admin/questions` 补了 `knowledge_point_id` 筛选参数（原只能按章节挑题），
+并在列表项里带出 `knowledge_point_id` / `knowledge_point_name`。
 
 > 原需求列了 9 个。多出来的 ⑤（试卷列表）、⑪ 的完整语义是 Pass 2 前端必需的
 > —— 列表页要有数据来源，编辑页要有落点；⑫⑬⑭ 是与 Batch 4 题目软删除对称的
-> **归档 / 恢复**闭环（§3.5、§3.8）。
+> **归档 / 恢复**闭环（§3.5、§3.8）；⑮⑯ 是 Pass 2 手动选题必需的后端缺口（§3.9）。
 > 没有超出"组卷引擎"的范围。
 
-后端接口总数：**29 → 43**（Batch 7 贡献 14 个：试卷/组卷 13 个 + 题目恢复 1 个）。
+后端接口总数：**29 → 45**（Batch 7 贡献 16 个）。
 
 ### 1.2 前置修正（Pass 2 开工前，独立的 `chore` 提交）
 
@@ -334,6 +339,50 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 **版本号**：题目恢复 `version + 1`。恢复是一次内容变更，与删除对称；
 否则会出现"删除再恢复后版本号回到旧值"的诡异现象（乐观锁会错判）。
 
+### 3.9 手动加题 / 移题（Pass 2 前置缺口）
+
+**这是 spec 里"手动选题 / 加题 / 移题"必需、但原后端没有的能力。**
+Batch 7 Pass 1 只做了"自动组卷"，卷面的题**只能**由组卷产生 ——
+一旦组卷有缺口，教研没有任何手段补一道题进去。
+
+| 接口 | 权限 | 说明 |
+|---|---|---|
+| `POST /admin/exams/{id}/questions` | `exam:create` | 批量加题（≤200，去重保序） |
+| `DELETE /admin/exams/{id}/questions/{eq_id}` | `exam:create` | 移出一题（删**卷面行**，不动题目） |
+
+**逐条判断、逐条给理由** —— 与导入管道同一个哲学：批量操作不因为其中一条有问题
+就整批失败，但**绝不静默丢弃**。六道闸全部进 `skipped[].reason`：
+
+| 判据 | reason |
+|---|---|
+| 题目不存在 | 题目不存在 |
+| 已归档 | 题目已归档（软删除） |
+| 非「已发布」 | 题目不是已发布状态（当前 draft） |
+| **科目不一致** | 题目不属于本试卷的科目 |
+| 已在卷面 | 该题已在卷面中 |
+| 找不到同题型分段 | 卷面没有「判断题」分段，请先加一个该题型的分段 |
+
+> **「科目一致」这条别省**：不加就会出现"经济卷里塞进一道法规题"，
+> 而校验器只看得懂题型与分值，**看不出科目串了**。
+
+**`section_id` 不传时按题目题型自动挂到同题型的分段**；传了则校验它属于本卷（否则 `40001`）。
+
+**加题不受分段计划题数限制**：加超了 `validate` 会以 `SECTION_NOT_FILLED` 报出来，
+由教研决定是补题、还是把分段数字改成实际值（那等于明确认可新的卷面构成）。
+
+**移题之后分段的计划题数不会自动变小** → `validate` 会报 `SECTION_NOT_FILLED`。
+这是**有意**的：分段是卷面的契约，改动它应当是一个**显式动作**。
+响应 `message` 里会带上这句提示，前端直接展示即可。
+
+**卷面冻结**：已发布（且未开「允许发布后编辑」）的卷**不能加题也不能移题** → `40901`。
+这条判断收口在 `_assert_exam_mutable()` 一处 —— 原本 compose / update 各写一份，
+"同一份判断散落多处、改一处漏三处"正是坑 38 的成因。
+
+配套的 `GET /admin/questions` 增加了 `knowledge_point_id` 筛选，
+并在列表项带出 `knowledge_point_id` / `knowledge_point_name`：
+加题面板要按知识点挑题（章节比知识点粗得多，挑不细），
+而**筛完也得能看出这道题挂在哪个知识点上**，否则筛选形同虚设。
+
 ---
 
 ## 4. 数据范围
@@ -419,7 +468,7 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 ### 5.6 验收⑥ `run-smoke.ps1` 全绿，Batch 2–6 不回归
 
 ```
-86 passed, 1 skipped
+91 passed, 1 skipped
 ```
 
 | 测试文件 | 用例数 | 归属 |
@@ -427,11 +476,11 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 | `test_admin_v3.py` | 8 | Batch 3 |
 | `test_admin_v4.py` | 12 | Batch 4 |
 | `test_admin_v5.py` | 14 | Batch 5 / 6 |
-| `test_admin_v7.py` | **32** | **Batch 7（Pass 1 21 + 前置修正 3 + 恢复接口 8）** |
+| `test_admin_v7.py` | **37** | **Batch 7（Pass 1 21 + 前置修正 3 + 恢复 8 + 加题移题 5）** |
 | `test_idgen.py` | 15 | Batch 5 |
 | `test_smoke.py` | 6 | Batch 2 |
 
-上一批是 `54 passed, 1 skipped`；Batch 7 **+32**，无回归。
+上一批是 `54 passed, 1 skipped`；Batch 7 **+37**，无回归。
 （`1 skipped` 是 Batch 5 就有的 6000 行环境变量门控用例。）
 
 > ⚠️ **加 `viewer` 的 `exam:read` 会牵动 Batch 3 的用例** ——
@@ -458,6 +507,11 @@ Pass 1 最初的实现把锁定挤在 `exams.rule_config.question_locks`（JSONB
 | 题目恢复：幂等、版本 +1、权限 | `test_question_restore_roundtrip_and_idempotent`、`..._requires_delete_permission` |
 | **题目恢复拒绝悬空引用**（章节/知识点已删） | `test_question_restore_rejects_when_chapter_or_kp_deleted` |
 | 恢复留痕（diff `is_deleted: true→false`） | `test_restore_writes_change_log_with_is_deleted_diff` |
+| 手动加题 / 移题 + 分段计数与总分重算 | `test_manual_add_and_remove_questions` |
+| 加题六道闸逐条给理由、不整批失败 | `test_add_questions_skips_with_reason_not_whole_batch_failure` |
+| 已发布卷面冻结（加题/移题都 40901） | `test_add_and_remove_questions_frozen_after_publish` |
+| 分段归属校验 + 权限 | `test_add_questions_validates_section_and_permission` |
+| 题目按**知识点**筛选 | `test_question_list_filters_by_knowledge_point` |
 
 其余为算法纯函数（6 条）与 CRUD/状态/权限边界。
 
@@ -554,19 +608,46 @@ curl -s -X POST $BASE/admin/exams/$EXAM/publish  -H "$H" -H 'Content-Type: appli
 
 ---
 
-## 9. Pass 2 待办（前端，待确认后开工）
+## 9. Pass 2：试卷管理前端
+
+### 9.1 拆成两个 Pass 的理由
+
+四个页面 + 一个可复用的"就地反馈"组件 + E2E 走查与截图，工作量约为 Pass 1 的两倍。
+一次做完，最费时间的浏览器走查与截图部分最容易压成"点一下截一张"的形式主义。
+所以按**真实边界**拆开：
+
+| Pass | 内容 | 一句话概括 |
+|---|---|---|
+| **2a** | `/exams` 列表 + `/exams/[id]` 详情编辑 + 归档/恢复 + 就地反馈组件 | **看已有的卷、管它的状态** |
+| **2b** | `/exams/new`（手动选题 / 规则自动组卷）+ `/paper-rules` 规则管理 | **造新卷、配规则** |
+
+切分的好处：**归档/恢复的就地反馈组件在 2a 落地并沉淀，2b 直接复用**；
+2a 的验收标准（viewer 只读、归档→恢复→回列表、锁定版本显示）不依赖 2b 的任何东西。
+
+前置：2a 依赖 §3.9 的手动加题/移题接口（已随本批交付）。
+
+### 9.2 就地反馈组件（用户指定的交互模式）
+
+操作成功后**不打断当前视图**，三段式反馈：
+
+1. **停留在当前视图**（例如仍停在"显示已归档"下，方便连续操作）
+2. 目标行**就地标记"已恢复"**（淡出 / 打勾），**3 秒后从列表移除**
+3. 同时弹 toast：**「已恢复 N 道题 · [查看]」**，点 [查看] 跳默认列表
+
+抽成组件复用（后面批量删除 / 发布也用它）。
+
+### 9.3 页面与关键交互
 
 四个页面：`/exams`（列表 + 类型/科目/状态筛选 + **include_deleted 开关**）、
 `/exams/new`（手动选题 / 规则自动组卷）、
-`/exams/[id]`（卷面结构预览 + 加题/移题 + 发布 + **归档**）、`/paper-rules`（规则管理）。
-
-关键交互（依赖后端已经就位的能力）：
+`/exams/[id]`（卷面结构预览 + 加题/移题 + 发布 + **归档 / 恢复**）、`/paper-rules`（规则管理）。
 
 | 交互 | 后端已支持 |
 |---|---|
 | 自动组卷实时展示抽题结果 + **缺口警告（need/got/missing）** | `ExamComposeOut.shortfalls` + `message` |
 | 卷面结构可视化（按 section 分段：题型/数量/分值） | `ExamDetail.sections[]`（含 `actual_count` / `actual_score`） |
-| 加题时按章节/知识点/难度筛选 | 复用 Batch 4 的 `/admin/questions` 筛选 |
+| 加题时按章节/**知识点**/难度筛选 | `GET /admin/questions?chapter_id=&knowledge_point_id=&difficulty=` |
+| 加题 / 移题 | `POST /admin/exams/{id}/questions`、`DELETE .../questions/{eq_id}`（§3.9） |
 | 发布前强制走 validate，不通过不允许发布 | 后端已强制；前端需先展示 `validation` 再放开按钮 |
 | 已发布试卷显示"锁定版本 vX"；与当前版本不同时显示 **"已锁定至 vX（当前 vY）"** + hover 差异摘要 | `ExamQuestionItem.locked_version` / `current_version` / `version_drift`（且 `stem_preview` 已是锁定版题干） |
 | **归档**按钮 + 默认列表过滤 + "显示已归档"开关 | `DELETE /admin/exams/{id}`、`ExamListItem.is_deleted`、`can_delete` |
