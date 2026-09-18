@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useUpdateExam } from "@/hooks/useExams";
+import { useReplaceExamSections } from "@/hooks/useExams";
+import { ApiError } from "@/lib/api";
 import { qTypeLabel } from "@/lib/question";
 import type { ExamDetail, ExamSectionIn, QType } from "@/lib/types";
 
@@ -71,20 +72,26 @@ export function ExamSectionsDialog({
   open,
   onOpenChange,
   exam,
+  onRefresh,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   exam: ExamDetail;
+  /** 乐观并发冲突时让父组件刷新详情（拿最新的 question_count 重试） */
+  onRefresh?: () => void;
 }) {
-  const update = useUpdateExam(exam.id);
+  const replace = useReplaceExamSections(exam.id);
   const [drafts, setDrafts] = useState<Draft[]>(() => toDraft(exam));
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [ack, setAck] = useState(false);
+  /** 「卷面已变化」冲突：单独提示，因为这需要用户**先刷新**才能继续 */
+  const [stale, setStale] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setDrafts(toDraft(exam));
     setAck(false);
+    setStale(false);
     // 依赖 [open]：详情页后台 refetch 不该冲掉正在填的表单
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -125,7 +132,7 @@ export function ExamSectionsDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={update.isPending ? undefined : onOpenChange}>
+      <Dialog open={open} onOpenChange={replace.isPending ? undefined : onOpenChange}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>编辑卷面结构</DialogTitle>
@@ -139,6 +146,31 @@ export function ExamSectionsDialog({
             <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
               这份试卷<strong>已发布</strong>，卷面结构不可再改。
               如需调整，请先把它下线到草稿态，或新建一份试卷。
+            </div>
+          ) : null}
+
+          {stale ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+              <p className="font-medium text-destructive">卷面已变化，请刷新后重试</p>
+              <p className="mt-1 text-muted-foreground">
+                从你打开这个对话框到现在，这张卷的题数被改过了
+                （当前是 <strong>{exam.question_count}</strong> 道）。
+                为避免误清掉别人刚加的题，后端拒绝了这次提交，<strong>没有写入任何数据</strong>。
+                点「刷新」拿到最新版本后，请重新确认一遍再提交。
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => {
+                  onRefresh?.();
+                  setStale(false);
+                  setDrafts(toDraft(exam));
+                }}
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+                刷新并重填
+              </Button>
             </div>
           ) : null}
 
@@ -237,12 +269,12 @@ export function ExamSectionsDialog({
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={update.isPending}>
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={replace.isPending}>
               取消
             </Button>
             <Button
               variant="destructive"
-              disabled={frozen || invalid || update.isPending || drafts.length === 0}
+              disabled={frozen || invalid || replace.isPending || drafts.length === 0}
               onClick={() => setConfirmOpen(true)}
             >
               保存卷面结构
@@ -260,7 +292,7 @@ export function ExamSectionsDialog({
         }}
         title="确认重建卷面结构？"
         destructive
-        loading={update.isPending}
+        loading={replace.isPending}
         confirmText={`清空 ${exam.question_count} 道题并保存`}
         confirmDisabled={!ack}
         confirmDisabledReason="请先勾选下方「我明白…」"
@@ -291,12 +323,25 @@ export function ExamSectionsDialog({
         onConfirm={async () => {
           if (!ack) return;
           try {
-            await update.mutateAsync({ sections: payloadSections });
+            await replace.mutateAsync({
+              sections: payloadSections,
+              // ⚠️ 乐观并发：把**我读到的**当前卷面题数交给后端核对。
+              // 期间有人改过这张卷 → 后端 40901，不会把对方的题默默清掉。
+              expected_question_count: exam.question_count,
+            });
             setConfirmOpen(false);
             setAck(false);
             onOpenChange(false);
-          } catch {
-            // 错误 toast 由 MutationCache 统一弹；保持对话框打开便于重试
+          } catch (err) {
+            // 「卷面已变化」要单独处理：用户必须先刷新拿到最新数据，
+            // 否则改多少次都会撞同一堵墙（错误 toast 只说了一次，容易漏）。
+            if (err instanceof ApiError && err.code === 40901 && err.message.includes("卷面已变化")) {
+              setStale(true);
+              setConfirmOpen(false);
+              setAck(false);
+              onRefresh?.();
+            }
+            // 其余错误的 toast 已由 MutationCache 统一弹出；保持对话框打开便于重试
           }
         }}
       />

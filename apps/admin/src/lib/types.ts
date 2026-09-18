@@ -793,7 +793,33 @@ export type ExamCreateIn = {
   sections: ExamSectionIn[];
 };
 
-export type ExamUpdateIn = Partial<Omit<ExamCreateIn, "subject_id">>;
+/**
+ * 编辑试卷的**元数据**。
+ *
+ * ⚠️ **刻意不含 `sections`** —— 后端已经从 `PUT /admin/exams/{id}` 上把它剥离了：
+ * 它一旦被传入就会 `DELETE FROM exam_questions`（整卷题目清空）。
+ * 类型上少一个字段，就少一次"把详情对象原样回传"的机会（坑 42）。
+ *
+ * 改卷面结构用 `ExamSectionsReplaceIn` → `PUT /admin/exams/{id}/sections`。
+ */
+export type ExamUpdateIn = Partial<Omit<ExamCreateIn, "subject_id" | "sections">>;
+
+/** 重建卷面结构（唯一入口）。会清空卷面题目，所以必须给 `expected_question_count`。 */
+export type ExamSectionsReplaceIn = {
+  sections: ExamSectionIn[];
+  /** 调用方读到的**当前卷面题数**（详情里的 `question_count`）。对不上就 40901。 */
+  expected_question_count: number;
+};
+
+export type ExamSectionsReplaceOut = {
+  exam_id: Id;
+  /** 重建前卷面有多少道题（题目本身不受影响） */
+  removed_questions: number;
+  question_count: number;
+  total_score: number;
+  sections: ExamSectionOut[];
+  message: string;
+};
 
 export type ExamListItem = {
   id: Id;

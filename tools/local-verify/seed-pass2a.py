@@ -107,6 +107,27 @@ def main() -> None:
     print(f"缺口卷组卷：{comp2['question_count']} 题，缺口 {len(comp2['shortfalls'])} 条")
 
     # ---------------------------------------------------------------- 3) 已发布 + 有版本漂移的卷
+    #
+    # ⚠️ 这里**必须自己造一道题**来制造漂移，绝不能改种子题库里的题。
+    # 踩过一次：早先的写法是"从卷面里挑第一道题，把题干加个后缀" ——
+    # 看着无害，但导入管道的去重是**内容指纹**（`questions.content_hash`，
+    # 见 question_service.content_hash），改题干会让那道题**不再等于种子里那一行**。
+    # 后果是 `test_admin_v5.py::test_seed_bank_mapping_matches_existing_rows` 失败：
+    # 它断言"重新导入 300 行种子应当全是 duplicate"，而污染后的那行会被当成**新题**插入。
+    #
+    # 教训：**验收脚本不要改共享的基础数据**。要造特殊状态就自己造一条。
+    drift_stem = f"【E2E 漂移演示 {tag}】下列关于施工组织设计的说法，正确的是？"
+    own_q = must(
+        call("POST", "/admin/questions", tok, {
+            "subject_id": SUBJECT_ID, "type": "judge", "stem": drift_stem,
+            "analysis": "E2E 专用题（可安全删除）", "difficulty": 3,
+            "score_default": 1, "status": "published", "source_type": "self",
+        }),
+        "造漂移用题",
+    )
+    own_qid = own_q["id"]
+    print(f"已造 E2E 专用题 {own_qid}（用于演示版本漂移，不动种子题库）")
+
     pub = must(
         call("POST", "/admin/exams", tok, {
             "subject_id": SUBJECT_ID,
@@ -117,28 +138,27 @@ def main() -> None:
             "pass_score": 60,
             "is_free": False,
             "sections": [
-                {"name": "一、判断题", "question_type": "judge", "question_count": 5, "score_per": 1, "sort_no": 0},
+                {"name": "一、判断题", "question_type": "judge",
+                 "question_count": 1, "score_per": 1, "sort_no": 0},
             ],
         }),
         "建已发布卷",
     )
     out["published"] = pub["id"]
-    must(call("POST", f"/admin/exams/{pub['id']}/auto-compose", tok,
-              {"rules": [{"type": "judge", "count": 5, "score": 1}], "seed": 42}), "组卷已发布卷")
+    must(call("POST", f"/admin/exams/{pub['id']}/questions", tok, {"question_ids": [own_qid]}),
+         "把漂移题加进卷面")
     must(call("POST", f"/admin/exams/{pub['id']}/publish", tok, {"allow_edit_after_publish": False}), "发布")
 
-    # 发布后改一道题 → 制造 version_drift
-    detail = must(call("GET", f"/admin/exams/{pub['id']}", tok), "取已发布卷详情")
-    first_q = detail["sections"][0]["questions"][0]["question_id"]
-    q = must(call("GET", f"/admin/questions/{first_q}", tok), "取题目详情")
+    # 发布后改这道**自己的**题 → 制造 version_drift（只影响这一条，不碰种子数据）
+    q = must(call("GET", f"/admin/questions/{own_qid}", tok), "取题目详情")
     must(
-        call("PUT", f"/admin/questions/{first_q}", tok, {
+        call("PUT", f"/admin/questions/{own_qid}", tok, {
             "version": q["version"],
-            "stem": (q["stem"] + "（E2E：发布后被修改过）")[:400],
+            "stem": drift_stem.rstrip("？") + "（发布后被改过）？",
         }),
         "改题制造漂移",
     )
-    print(f"已发布卷 {pub['id']} 已制造版本漂移（题 {first_q}）")
+    print(f"已发布卷 {pub['id']} 已制造版本漂移（E2E 专用题 {own_qid}）")
 
     # ---------------------------------------------------------------- 4) 已归档的卷
     arch = must(

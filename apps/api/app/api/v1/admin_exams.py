@@ -10,7 +10,8 @@
     POST   /admin/exams/{id}/validate      卷面校验              —— exam:read
     POST   /admin/exams/{id}/publish       发布（版本锁定）       —— exam:publish
     GET    /admin/exams/{id}               试卷详情              —— exam:read
-    PUT    /admin/exams/{id}               编辑试卷              —— exam:create
+    PUT    /admin/exams/{id}               编辑元数据（**不接受 sections**） —— exam:create
+    PUT    /admin/exams/{id}/sections      重建卷面结构（唯一入口） —— exam:create
     DELETE /admin/exams/{id}               归档（软删除）         —— exam:create
     POST   /admin/exams/{id}/restore       恢复（解除归档）       —— exam:publish
     POST   /admin/exams/{id}/questions     手动加题              —— exam:create
@@ -53,6 +54,8 @@ from app.schemas.admin_exam import (
     ExamPublishOut,
     ExamRemoveQuestionOut,
     ExamRestoreOut,
+    ExamSectionsReplaceIn,
+    ExamSectionsReplaceOut,
     ExamSoftDeleteOut,
     ExamUpdateIn,
     ExamValidateOut,
@@ -361,13 +364,17 @@ async def get_exam(exam_id: int, db: DbSession, me: CurrentUserDep) -> dict:
 @router.put(
     "/admin/exams/{exam_id}",
     response_model=Envelope[ExamDetail],
-    summary="编辑试卷",
+    summary="编辑试卷（仅元数据）",
     description=(
         "需要权限 `exam:create`。未传的字段沿用现值。\n\n"
-        "- 传 `sections` 会**整体替换**分段，并清空卷面题目（分段变了，题目归属就失效了）。\n"
-        "- 已发布的卷子不允许改卷面结构 → `40901`（除非发布时传了 "
-        "`allow_edit_after_publish=true`）。\n"
-        "- 展示性字段（标题 / 简介 / 时长）在任何状态下都可改。"
+        "**本接口只接受元数据**：标题 / 类型 / 年份 / 卷号 / 时长 / 及格线 / 简介 / 是否免费。\n\n"
+        "⚠️ **不接受 `sections`** —— 传了会返回 `40001` 且**不写库**。\n"
+        "原先它是本接口的一个可选字段，而一旦传入就会"
+        "`DELETE FROM exam_questions`（**整卷题目清空**）。\n"
+        "一个和 `title` 并列的字段带着这种副作用，签名上完全看不出来 ——"
+        "所以改成结构上不可能，而不是靠约定。\n\n"
+        "改卷面结构请用 `PUT /admin/exams/{id}/sections`（要求传 `expected_question_count`）。\n\n"
+        "展示性字段在任何状态下都可改（已发布的卷也一样）。"
     ),
     dependencies=[Depends(require_permission("exam:create"))],
 )
@@ -383,6 +390,42 @@ async def update_exam(
         payload=payload, ip=client_ip(request),
     )
     return ok(detail.model_dump(), message="已保存")
+
+
+@router.put(
+    "/admin/exams/{exam_id}/sections",
+    response_model=Envelope[ExamSectionsReplaceOut],
+    summary="重建卷面结构",
+    description=(
+        "需要权限 `exam:create`。**这是唯一允许改分段的入口。**\n\n"
+        "⚠️ 它会删掉这张卷现有的**全部** `exam_questions` 行再按新分段重建 ——\n"
+        "分段是卷面的骨架，换骨架必然要重排题目。**题目本身在题库里不受影响**，\n"
+        "但重建后要重新组卷或加题补回来。\n\n"
+        "**必须传 `expected_question_count`**（你读到的当前卷面题数，取自详情接口的 "
+        "`question_count`）：\n"
+        "- 不传 → `40001`（必填）；\n"
+        "- 与库里不一致 → `40901` + 「卷面已变化，请刷新后重试」，**不写库**。\n"
+        "这既是防误操作，也是**乐观并发**：两人同时改一张卷时，后提交的必然对不上，\n"
+        "不会把前一个人的题默默清掉。\n\n"
+        "已发布（且未开「允许发布后编辑」）的卷 → `40901`。\n\n"
+        "> 为什么这里**不再**走「净减少超过阈值就拦」那道兜底：\n"
+        "> 兜底提示就是把人指到本接口，本接口再拦一次就成了循环引用。\n"
+        "> 所以 `expected_question_count` 就是那道显式确认。"
+    ),
+    dependencies=[Depends(require_permission("exam:create"))],
+)
+async def replace_exam_sections(
+    exam_id: int,
+    payload: ExamSectionsReplaceIn,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    out = await exam_service.replace_exam_sections(
+        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
+        payload=payload, ip=client_ip(request),
+    )
+    return ok(out.model_dump(), message=out.message)
 
 
 @router.delete(

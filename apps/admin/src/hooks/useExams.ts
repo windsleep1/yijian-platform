@@ -15,6 +15,8 @@ import type {
   ExamPublishOut,
   ExamRemoveQuestionOut,
   ExamRestoreOut,
+  ExamSectionsReplaceIn,
+  ExamSectionsReplaceOut,
   ExamSoftDeleteOut,
   ExamUpdateIn,
   ExamValidateOut,
@@ -99,6 +101,22 @@ export function useUpdateExam(id: string) {
   return useMutation({
     mutationFn: (payload: ExamUpdateIn) =>
       request<ExamDetail>(`/admin/exams/${id}`, { method: "PUT", body: payload }),
+    onSuccess: () => invalidateAfterWrite(qc, id, { list: true }),
+  });
+}
+
+/**
+ * **重建卷面结构**（唯一入口）。
+ *
+ * ⚠️ 会清空这张卷现有的全部卷面题。调用方**必须**从详情里取 `question_count`
+ * 作为 `expected_question_count` 传进来 —— 后端据此做乐观并发校验，
+ * 对不上就 `40901`（"卷面已变化，请刷新后重试"）且不写库。
+ */
+export function useReplaceExamSections(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: ExamSectionsReplaceIn) =>
+      request<ExamSectionsReplaceOut>(`/admin/exams/${id}/sections`, { method: "PUT", body: payload }),
     onSuccess: () => invalidateAfterWrite(qc, id, { list: true }),
   });
 }

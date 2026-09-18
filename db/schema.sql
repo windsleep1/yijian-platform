@@ -1497,7 +1497,10 @@ INSERT INTO app_configs (id, config_key, config_value, group_name, description, 
   (7,'sms.code_ttl_sec',     '300',                            'security','短信验证码有效期（秒）',false),
   (8,'sms.daily_limit',      '10',                             'security','单手机号每日验证码上限',false),
   (9,'rate_limit.answer',    '120',                            'security','答题接口每分钟上限（次/用户）',false),
-  (10,'review.sm2',          '{"initial_ease":2.5,"min_ease":1.3,"intervals":[0,1,2,4,7,15,30,60]}', 'learning','记忆曲线参数',false)
+  (10,'review.sm2',          '{"initial_ease":2.5,"min_ease":1.3,"intervals":[0,1,2,4,7,15,30,60]}', 'learning','记忆曲线参数',false),
+  -- 坑 42 的结构防护：单次写操作允许净减少的卷面题数上限。
+  -- 老库靠 db/migrations/20260918-01-*.sql 补，这里是给新库用的。
+  (11,'exam.mass_question_loss_threshold','10', 'exam','单次写操作允许净减少的卷面题数上限；超过则拒绝，要求改用 PUT /admin/exams/{id}/sections 显式确认',false)
 ON CONFLICT (id) DO NOTHING;
 
 -- 12.7 字典

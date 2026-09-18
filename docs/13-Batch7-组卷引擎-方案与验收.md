@@ -35,6 +35,9 @@
 | ⑭ | POST | `/admin/questions/{id}/restore` | `question:delete` | **恢复题目**（与⑫对称，在题库路由下） |
 | ⑮ | POST | `/admin/exams/{id}/questions` | `exam:create` | **手动加题**（Pass 2 前置缺口，§3.9） |
 | ⑯ | DELETE | `/admin/exams/{id}/questions/{eq_id}` | `exam:create` | **移出一题**（同上） |
+| ⑰ | PUT | `/admin/exams/{id}/sections` | `exam:create` | **重建卷面结构**（唯一入口，需 `expected_question_count`，§3.10） |
+
+⚠️ **`PUT /admin/exams/{id}` 现在只接受元数据**，传 `sections` 会 `40001`（§3.10）。
 
 另外 `GET /admin/questions` 补了 `knowledge_point_id` 筛选参数（原只能按章节挑题），
 并在列表项里带出 `knowledge_point_id` / `knowledge_point_name`。
@@ -498,6 +501,75 @@ E2E 脚本：`tools/local-verify/seed-pass2a.py`（造 4 种状态的卷 + viewe
 > （只有 `archived` 这个**状态**，与"下线到草稿"不是一回事）。
 > 于是"已发布的卷要改卷面"目前只能改库 —— 见 §7 遗留事项。
 > 这属于**状态机枚举**的问题，与「跨批次契约审计」一起做更合适，故本批不动。
+
+### 3.10 破坏性变更的**结构防护**（坑 42 的正式修法）
+
+> **约定防不住副作用，结构防护才防得住。**
+> 上一版的对策是"前端提交前构造 payload，绝不回传读到的对象" —— 那是**约定**。
+> 一个人忘了，就再删一次整卷。所以这一节把它改成**结构上不可能**。
+
+#### ① 拆接口：`sections` 从元数据更新接口剥离
+
+| 接口 | 接受什么 |
+|---|---|
+| `PUT /admin/exams/{id}` | **只有元数据**（标题/类型/年份/卷号/时长/及格线/简介/是否免费） |
+| `PUT /admin/exams/{id}/sections` | **只有卷面结构**，且必须传 `expected_question_count` |
+
+元数据接口上：
+
+- `model_config = ConfigDict(extra="forbid")` —— 任何未知字段一律拒绝
+  （顺带防住将来新增的错字段，比如 `subjects_id`）；
+- 传 `sections` 会命中 `_reject_sections`，返回 **`40001`** 且**不写库**，
+  错误信息带**可执行的下一步**：告诉你该用哪个接口、要传什么参数。
+
+> 为什么保留一条"专门拒绝 `sections`"的分支，而不是让它走通用的
+> "Extra inputs are not permitted"：调用方需要知道**往哪走**。
+> 这一坑最缺的就是这个 —— 报错只说"不支持"，用户还是不知道正确做法。
+
+#### ② 显式确认：`expected_question_count`
+
+`sections` 接口要求传**调用方读到的当前卷面题数**（详情里的 `question_count`）：
+
+- 不传 → `40001`（必填）；
+- 与库里不一致 → **`40901` + 「卷面已变化，请刷新后重试」且不写库**。
+
+它同时是两件事：
+
+1. **防误操作** —— 你确认的是"我要重建的是**这一份**卷面"；
+2. **乐观并发** —— 两人同时改一张卷，后提交的必然对不上，
+   **不会把前一个人刚加的题默默清掉**。前端拿到 `40901` 后给了
+   「刷新并重填」的出口（而不是让用户对着同一堵墙反复点）。
+
+#### ③ diff 兜底：净减少超阈值就拒绝
+
+拆接口只解决了"调用方**故意**改卷面结构"这条路，防不住**副作用**：
+`POST /auto-compose` 传 `replace=true` 时也会先清空卷面再重建 ——
+它的语义是"重新抽题"，调用方未必意识到这会删掉手里已有的题。
+
+所以兜底**不看调用方想要什么，只看实际发生的结果**：
+
+```
+操作前数一次 exam_questions → 操作后数一次 → 净减少 > 阈值 就拦
+```
+
+- 阈值来自 `app_configs.exam.mass_question_loss_threshold`（默认 10，
+  种子 id=11；老库由 `db/migrations/20260918-01-*.sql` 补）；
+- **在 `commit` 之前判定** —— 抛异常 → `get_db` 回滚 → **一行都没写**。
+  放到 commit 之后就只能"删了再报错"，那是不可逆的；
+- 拒绝时把调用方指到 `/sections` 并**直接给出该传的参数值**
+  （`expected_question_count=<操作前的题数>`）；
+- 覆盖 `auto-compose`、`移题` 等所有会减少卷面行的写路径，
+  **`/sections` 自己除外** —— 兜底提示就是把人指到它，它再拦一次就成了循环引用。
+
+**配置读不到就用默认值继续保护，绝不因为配置缺失而放行。**
+配置值写坏（如 `"not-a-number"`）时同样回退默认值 —— 守卫的职责是"保护"，
+不该自己变成故障源。
+
+#### ④ 前端对应
+
+`ExamSectionsDialog` 走新接口并传 `expected_question_count`；
+冲突（`40901` + 卷面已变化）时展示独立提示 + **「刷新并重填」**按钮，
+而不是只弹一个会被忽略的 toast。
 
 ---
 

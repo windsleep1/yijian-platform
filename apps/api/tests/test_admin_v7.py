@@ -109,8 +109,29 @@ def created(client: httpx.Client, admin_h):
 
     `exams` 没有删除接口（本批 11 个接口里没有 `DELETE /admin/exams`），
     所以清理走直连 SQL；题目用软删除（保留痕迹，不物理删）。
+
+    ## ⚠️ `questions` 与 `borrowed` 是**两种语义**，别混用
+
+    - `questions` —— **本用例自己建的**测试题。清理 = 软删除（它们本来就是脏数据）。
+    - `borrowed` —— **从共享数据里借来的**（种子题库 6000 题）。
+      用例可能改了它的状态（比如"故意归档一道卷面题"来构造场景），
+      清理必须**恢复原状**，**绝不能删**。
+
+    踩过一次：这个夹具原先只有 `questions` 一种语义，
+    而 `test_exam_restore_rejects_published_with_archived_questions` 把
+    **借来的种子题**塞进了 `questions` —— 清理时把它软删除了，
+    于是共享的种子题库被**永久打出一个洞**。
+
+    最阴的是它**不会当场报错**：它破坏的是导入管道的去重基线
+    （`questions.content_hash` 的唯一边是 `WHERE is_deleted = false` 的部分索引），
+    而受影响的是**另一个文件**的 `test_admin_v5.py::test_seed_bank_mapping_matches_existing_rows`，
+    并且要**等下一次整体 run** 才暴露（同一次 run 里 v5 先跑，当时还是干净的）。
+    表现是"重编种子题导入时本该全是 duplicate，却多出一条 insert"。
+
+    教训：**验收脚本不要改共享的基础数据；万一必须改，就要负责改回来。**
+    夹具只提供"删"这一种清理动作，就是在诱导后来的人破坏共享数据。
     """
-    bag = SimpleNamespace(exams=[], questions=[], rules=[])
+    bag = SimpleNamespace(exams=[], questions=[], rules=[], borrowed=[])
     yield bag
 
     for rid in bag.rules:
@@ -128,6 +149,15 @@ def created(client: httpx.Client, admin_h):
             client.delete(f"{API}/admin/questions/{qid}", headers=admin_h, timeout=20)
         except Exception:  # noqa: BLE001
             pass
+    # 借来的 → **恢复**（不是删除）。逐个来，一条失败不影响其它条
+    for qid in bag.borrowed:
+        try:
+            b = client.post(f"{API}/admin/questions/{qid}/restore",
+                            headers=admin_h, timeout=20).json()
+            if b.get("code") != 0:
+                print(f"[created] ⚠️ 恢复借用的题目 {qid} 失败：{b.get('message')}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[created] ⚠️ 恢复借用的题目 {qid} 异常：{exc}")
 
 
 def make_question(client, admin_h, *, subject_id: int, qtype: str = "single",
@@ -1143,10 +1173,12 @@ def test_exam_restore_rejects_published_with_archived_questions(
                    {"rules": [{"type": "judge", "count": 3}], "seed": 42})["code"] == 0
     assert publish(client, admin_h, exam["id"])["code"] == 0
 
-    # 挑一道卷面题归档
+    # 挑一道卷面题归档。
+    # ⚠️ 这是**从种子题库里借来的题** —— 要用 `borrowed`（清理时恢复），
+    # 不能用 `questions`（清理时软删除，那会把共享数据打出一个洞）。
     detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
     victim = detail["sections"][0]["questions"][0]["question_id"]
-    created.questions.append(victim)
+    created.borrowed.append(victim)
     assert body(client.delete(f"{API}/admin/questions/{victim}", headers=admin_h))["code"] == 0
 
     assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
@@ -1556,3 +1588,272 @@ def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
         assert victim not in ids, "已删除的知识点不该出现在下拉里"
     finally:
         sql_exec("UPDATE knowledge_points SET is_deleted=false WHERE id=$1", victim)
+
+
+# ================================================================ N. 破坏性变更的结构防护（坑 42）
+# 原先 `PUT /admin/exams/{id}` 收到 `sections` 就会 DELETE FROM exam_questions（整卷清空）。
+# 靠"前端别乱传"是约定，防不住；这里验证**结构上不可能**。
+
+
+def test_metadata_update_rejects_sections_and_writes_nothing(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """元数据接口收到 `sections` → 40001，且**一行都不写**。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=4)
+    qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 4)
+    assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
+    before = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert before["question_count"] == 4, before
+
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h, json={
+        "title": "想顺手改个标题",
+        "sections": [
+            {"name": "换个分段", "question_type": "single",
+             "question_count": 1, "score_per": 1, "sort_no": 0},
+        ],
+    }))
+    assert b["code"] == 40001, b
+    # 错误信息要**可执行**：不只是"不支持"，而是告诉调用方该用哪个接口
+    assert "sections" in b["message"] and "/sections" in b["message"], b["message"]
+
+    # ⚠️ 关键：**连标题也没写进去**（整个请求被拒，不是"部分生效"）
+    after = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert after["title"] == before["title"], "被拒的请求不该写入任何字段"
+    assert after["question_count"] == 4, "卷面题数不该变"
+    assert len(after["sections"]) == len(before["sections"]), "分段不该变"
+
+
+def test_metadata_update_without_sections_succeeds(client: httpx.Client, admin_h, created) -> None:
+    """不带 `sections` 的元数据更新照常工作（不能被防护误伤）。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=3, multiple=2)
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h, json={
+        "title": f"换标题 {uuid.uuid4().hex[:4]}",
+        "duration_min": 145,
+        "pass_score": 66,
+        "is_free": True,
+    }))
+    assert b["code"] == 0, b
+    d = b["data"]
+    assert d["duration_min"] == 145 and d["pass_score"] == 66 and d["is_free"] is True, d
+    # 分段与卷面不受影响
+    assert len(d["sections"]) == 2 and d["question_count"] == 0, d
+
+
+def test_metadata_update_rejects_unknown_field(client: httpx.Client, admin_h, created) -> None:
+    """`extra="forbid"`：别的未知字段也一律拒绝（防住将来新加的错字段）。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=2)
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h,
+                        json={"title": "x", "subjects_id": 1001}))  # 故意拼错
+    assert b["code"] == 40001, b
+
+
+def test_sections_endpoint_requires_expected_count(client: httpx.Client, admin_h, created) -> None:
+    """sections 接口**不传** `expected_question_count` → 40001（必填）。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=2)
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
+        "sections": [
+            {"name": "新分段", "question_type": "single",
+             "question_count": 1, "score_per": 1, "sort_no": 0},
+        ],
+    }))
+    assert b["code"] == 40001, b
+    assert "expected_question_count" in b["message"], b["message"]
+
+    # 不写库
+    after = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert len(after["sections"]) == 1 and after["sections"][0]["question_count"] == 2, after
+
+
+def test_sections_endpoint_rejects_stale_expected_count(client: httpx.Client, admin_h, created) -> None:
+    """`expected_question_count` 与库里不一致 → 40901，且**一行不写**。
+
+    这是乐观并发：期间有人改过这张卷，后提交的必然对不上，
+    不会把前一个人刚加的题默默清掉。
+    """
+    exam = make_exam_with_sections(client, admin_h, created, single=6)
+    qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 6)
+    assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
+    detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert detail["question_count"] == 6, detail
+
+    # 拿着过期的 2（比如页面是加题之前打开的）去提交
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
+        "sections": [
+            {"name": "只留一段", "question_type": "single",
+             "question_count": 1, "score_per": 1, "sort_no": 0},
+        ],
+        "expected_question_count": 2,
+    }))
+    assert b["code"] == 40901, b
+    assert "卷面已变化" in b["message"] and "刷新" in b["message"], b["message"]
+
+    # 卷面纹丝不动
+    after = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert after["question_count"] == 6, "被拒的请求不该动卷面"
+    assert len(after["sections"]) == 1 and after["sections"][0]["question_count"] == 6, after["sections"]
+
+
+def test_sections_endpoint_replaces_and_reports_removed(client: httpx.Client, admin_h, created) -> None:
+    """expected 对得上 → 重建成功，并如实回报清掉了多少道卷面题。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=8)
+    qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 8)
+    assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
+
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
+        "sections": [
+            {"name": "一、单项选择题", "question_type": "single",
+             "question_count": 5, "score_per": 1, "sort_no": 0},
+            {"name": "二、判断题", "question_type": "judge",
+             "question_count": 5, "score_per": 1, "sort_no": 1},
+        ],
+        "expected_question_count": 8,
+    }))
+    assert b["code"] == 0, b
+    d = b["data"]
+    assert d["removed_questions"] == 8, d
+    assert d["question_count"] == 0, "重建后卷面是空的（要重新组卷/加题）"
+    assert [s["name"] for s in d["sections"]] == ["一、单项选择题", "二、判断题"], d["sections"]
+    assert "题目本身在题库里不受影响" in d["message"] or "已在题库" in d["message"], d["message"]
+
+    # 题目本身没被删
+    assert body(client.get(f"{API}/admin/questions/{qs[0]}", headers=admin_h))["code"] == 0
+
+
+def test_sections_endpoint_frozen_after_publish(client: httpx.Client, admin_h, created) -> None:
+    """已发布的卷不能重建卷面结构 → 40901。"""
+    exam = make_exam_with_sections(client, admin_h, created, judge=2)
+    assert add_questions(client, admin_h, exam["id"],
+                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
+        "sections": [{"name": "x", "question_type": "judge",
+                      "question_count": 1, "score_per": 1, "sort_no": 0}],
+        "expected_question_count": 2,
+    }))
+    assert b["code"] == 40901 and "已发布" in b["message"], b
+    after = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert after["question_count"] == 2, after
+
+
+def test_compose_mass_question_loss_is_blocked(client: httpx.Client, admin_h, created) -> None:
+    """**diff 兜底**：组卷若让卷面题数净减少超过阈值 → 40901，且整个交易回滚。
+
+    这是"拆接口"防不住的那一类 —— `auto-compose` 传 `replace=true` 的语义是
+    "重新抽题"，调用方未必意识到它会删掉手上已有的题。
+    所以兜底不看调用方"想要什么"，只看**实际发生的结果**。
+    """
+    exam = make_exam_with_sections(client, admin_h, created, single=20)
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 20, "score": 1}], "seed": 5,
+    }))
+    assert b["code"] == 0 and b["data"]["question_count"] == 20, b
+    rows_before = int(sql_fetch(
+        "SELECT count(*) AS n FROM exam_questions WHERE exam_id = $1", int(exam["id"])
+    )[0]["n"])
+    assert rows_before == 20, rows_before
+
+    # 换成"只要 2 道"，replace 默认 true → 会净减少 18 道（> 默认阈值 10）
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 6,
+    }))
+    assert b["code"] == 40901, b
+    assert "会删掉 18 道" in b["message"] and "/sections" in b["message"], b["message"]
+    assert "expected_question_count=20" in b["message"], "提示里要给出可执行的下一步参数"
+
+    # ⚠️ 关键：**交易整体回滚**，一行都没少
+    rows_after = int(sql_fetch(
+        "SELECT count(*) AS n FROM exam_questions WHERE exam_id = $1", int(exam["id"])
+    )[0]["n"])
+    assert rows_after == rows_before == 20, f"被拦下就该零副作用：{rows_before} -> {rows_after}"
+
+    # 阈值以内（20 → 15，减 5）应当放行
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 15, "score": 1}], "seed": 7,
+    }))
+    assert b["code"] == 0, f"减 5 道在阈值内，不该被拦：{b}"
+    assert b["data"]["question_count"] == 15, b["data"]
+
+
+def test_mass_loss_threshold_comes_from_app_configs(client: httpx.Client, admin_h, created) -> None:
+    """阈值真的读的是 `app_configs`，不是写死在代码里（改配置即改行为）。
+
+    判据要**能区分**：默认阈值是 10，所以"减 5 道"在默认值下本来就放行 ——
+    用它证明不了任何事。这里用 **3**（比 5 小 → 应当拦）和 **100**（比 5 大 → 应当放行）
+    两个方向各测一次，才能说明这个数字真的被读进去了。
+    """
+    rows = sql_fetch(
+        "SELECT config_value FROM app_configs WHERE config_key = 'exam.mass_question_loss_threshold'"
+    )
+    assert rows, "配置项 exam.mass_question_loss_threshold 不存在（迁移没跑到？）"
+
+    exam = make_exam_with_sections(client, admin_h, created, single=6)
+    assert body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 6, "score": 1}], "seed": 11,
+    }))["code"] == 0
+
+    def compose(count: int, seed: int) -> dict:
+        return body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h,
+                                json={"rules": [{"type": "single", "count": count, "score": 1}],
+                                      "seed": seed}))
+
+    try:
+        # ---- 阈值调小到 3：减 5 道（6 → 1）应当被拦（默认 10 下这是放行的）----
+        sql_exec(
+            "UPDATE app_configs SET config_value = '3'::jsonb "
+            "WHERE config_key = 'exam.mass_question_loss_threshold'"
+        )
+        b = compose(1, 12)
+        assert b["code"] == 40901, f"阈值 3 时减 5 道应当被拦（若放行说明没读配置）：{b}"
+        assert "超过阈值 3" in b["message"], b["message"]
+
+        # ---- 阈值调大到 100：同样减 5 道应当放行 ----
+        sql_exec(
+            "UPDATE app_configs SET config_value = '100'::jsonb "
+            "WHERE config_key = 'exam.mass_question_loss_threshold'"
+        )
+        b = compose(1, 13)
+        assert b["code"] == 0, f"阈值 100 时减 5 道不该被拦：{b}"
+        assert b["data"]["question_count"] == 1, b["data"]
+
+        # ---- 配置值写坏了也不能把写路径打断（回退默认 10）----
+        sql_exec(
+            "UPDATE app_configs SET config_value = '\"not-a-number\"'::jsonb "
+            "WHERE config_key = 'exam.mass_question_loss_threshold'"
+        )
+        b = compose(6, 14)  # 1 → 6，是增加，本来就不该拦
+        assert b["code"] == 0, f"配置值非法时应回退默认值继续工作，而不是报错：{b}"
+    finally:
+        sql_exec(
+            "UPDATE app_configs SET config_value = '10'::jsonb "
+            "WHERE config_key = 'exam.mass_question_loss_threshold'"
+        )
+
+
+def test_sections_endpoint_is_the_escape_hatch(client: httpx.Client, admin_h, created) -> None:
+    """兜底拦下的操作，走 /sections 给足确认后应当能做成（否则就是死路）。"""
+    exam = make_exam_with_sections(client, admin_h, created, single=20)
+    assert body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 20, "score": 1}], "seed": 21,
+    }))["code"] == 0
+
+    # 组卷兜底拒绝（减 18 > 10）
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 22,
+    }))
+    assert b["code"] == 40901, b
+
+    # 兜底提示指向的接口，照做就该成功
+    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
+        "sections": [{"name": "重来的单选段", "question_type": "single",
+                      "question_count": 2, "score_per": 1, "sort_no": 0}],
+        "expected_question_count": 20,
+    }))
+    assert b["code"] == 0, b
+    assert b["data"]["removed_questions"] == 20, b["data"]
+
+    # 之后按新分段（2 道）组卷就顺了
+    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 23, "replace": False,
+    }))
+    assert b["code"] == 0, b

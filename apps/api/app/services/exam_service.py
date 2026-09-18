@@ -86,6 +86,8 @@ from app.schemas.admin_exam import (
     ExamRemoveQuestionOut,
     ExamRestoreOut,
     ExamSectionDetail,
+    ExamSectionsReplaceIn,
+    ExamSectionsReplaceOut,
     ExamSectionIn,
     ExamSectionOut,
     ExamSoftDeleteOut,
@@ -104,6 +106,7 @@ from app.schemas.admin_exam import (
 logger = logging.getLogger("app.exam")
 
 #: 数据范围的判定复用题库那一份唯一事实源（避免两处各写一套过滤规则慢慢漂移）。
+from app.services import config_service  # noqa: E402
 from app.services.question_service import ScopeViewer, scope_subject_ids  # noqa: E402
 
 
@@ -623,9 +626,6 @@ async def update_exam(
         raise errors.bad_request("试卷已删除，无法编辑", 40001)
     _ensure_subject_visible(actor, int(row["subject_id"]), "试卷所属科目")
 
-    rc = _rule_config_of(row)
-    frozen = bool(rc.get("allow_edit_after_publish")) is False and row["status"] == "published"
-
     sets: list[str] = []
     params: dict[str, Any] = {"eid": exam_id}
     before: dict[str, Any] = {}
@@ -656,23 +656,11 @@ async def update_exam(
     if payload.is_free is not None:
         _set("is_free", "free", payload.is_free, bool(row["is_free"]))
 
-    if payload.sections is not None:
-        # 卷面结构变化会直接改变"这卷子考什么"，已发布且未开启改卷开关时拒绝。
-        if frozen:
-            raise errors.conflict(
-                "试卷已发布，卷面结构不可再改。"
-                "如需调整，请先下线（或发布时选择允许发布后编辑）后重新组卷。",
-                40901,
-            )
-        await db.execute(text("DELETE FROM exam_sections WHERE exam_id = :eid"), {"eid": exam_id})
-        await db.execute(text("DELETE FROM exam_questions WHERE exam_id = :eid"), {"eid": exam_id})
-        for idx, s in enumerate(sorted(payload.sections, key=lambda x: x.sort_no)):
-            await _insert_section(db, exam_id, seq=idx + 1, section=s)
-        await _refresh_exam_totals(db, exam_id)
-        before["sections"] = "旧分段"
-        after["sections"] = [s.model_dump(mode="json") for s in payload.sections]
+    # 这里**不再**有 `sections` 分支 —— 它已从 `ExamUpdateIn` 上彻底移除，
+    # 传进来会被 Pydantic 挡在进门之前（`extra="forbid"` + `_reject_sections`）。
+    # 别在这里再写一遍"如果传了 sections 就……"：那等于把已经拆掉的耦合又接回去。
 
-    if not sets and payload.sections is None:
+    if not sets:
         raise errors.bad_request("没有任何要修改的字段", 40001)
     if sets:
         sets.append("updated_at = now()")
@@ -868,6 +856,89 @@ async def get_exam_detail(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer
         can_publish=not deleted and row["status"] in ("draft", "reviewing"),
         can_unpublish=not deleted and row["status"] == "published",
         can_delete=not deleted,
+    )
+
+
+async def replace_exam_sections(
+    db: AsyncSession,
+    *,
+    actor: Actor,
+    actor_name: str,
+    exam_id: int,
+    payload: ExamSectionsReplaceIn,
+    ip: str | None = None,
+) -> ExamSectionsReplaceOut:
+    """重建卷面结构 —— **唯一**允许改分段的入口（坑 42 的结构防护）。
+
+    原先这件事混在 `PUT /admin/exams/{id}` 里：只要 body 里带了 `sections`，
+    就会 `DELETE FROM exam_questions WHERE exam_id = ...`。一个可选字段藏着
+    "整卷清空题目"的副作用，签名上完全看不出来。
+
+    现在拆到独立端点 + 两道闸：
+
+    1. **`expected_question_count` 必须与库里一致**，否则 `40901` 且不写库。
+       它同时干两件事：防误操作，以及**乐观并发** ——
+       两个人先后改同一张卷时，后者必然对不上，不会把前一个人的题默默清掉。
+    2. 净减少超过阈值时其他写路径会被 `_assert_no_mass_question_loss` 拦下，
+       并把调用方指到本接口 —— 所以这里**不再二次拦截**（否则提示会变成循环引用）。
+
+    ⚠️ **题目本身不受影响**：删的只是 `exam_questions` 里"这张卷的卷面行"。
+    但重建后需要重新组卷或加题把题补回来 —— 响应里的 `message` 会说明这一点。
+    """
+    row = await _load_exam_row(db, exam_id, for_update=True)
+    if row["is_deleted"]:
+        raise errors.not_found("试卷不存在", 40401)
+    _ensure_subject_visible(actor, int(row["subject_id"]), "试卷所属科目")
+    _assert_exam_mutable(row, action="重建卷面结构")
+
+    current = await _count_paper_rows(db, exam_id)
+    expected = payload.expected_question_count
+    if expected != current:
+        raise errors.conflict(
+            f"卷面已变化，请刷新后重试：你读到的是 {expected} 道题，当前是 {current} 道。"
+            "这一步会重建整个卷面，所以必须确认手上这份是最新的。",
+            40901,
+        )
+
+    #: 计划题数合计（用于 message；实际题数由 _refresh_exam_totals 重算为 0）
+    planned = sum(s.question_count for s in payload.sections)
+
+    await db.execute(text("DELETE FROM exam_sections WHERE exam_id = :eid"), {"eid": exam_id})
+    await db.execute(text("DELETE FROM exam_questions WHERE exam_id = :eid"), {"eid": exam_id})
+    for idx, s in enumerate(sorted(payload.sections, key=lambda x: x.sort_no)):
+        await _insert_section(db, exam_id, seq=idx + 1, section=s)
+    await _refresh_exam_totals(db, exam_id)
+
+    await _write_change_log(
+        db, entity_type="exam", entity_id=exam_id, action="update",
+        actor_id=actor.id, ip=ip,
+        change_log=(
+            f"重建卷面结构：{len(payload.sections)} 个分段、计划 {planned} 道题"
+            + (f"，清空原有 {current} 道卷面题" if current else "")
+        ),
+        before={"sections": "旧分段", "questions_removed": current},
+        after={
+            "sections": [s.model_dump(mode="json") for s in payload.sections],
+            "expected_question_count": expected,
+        },
+    )
+    await db.commit()
+
+    fresh = await _load_exam_row(db, exam_id)
+    sections_out = await _load_sections(db, exam_id)
+    msg = f"卷面结构已重建为 {len(payload.sections)} 个分段、计划 {planned} 道题。"
+    if current:
+        msg += (
+            f"原有 {current} 道卷面题已清空（**题目本身在题库里不受影响**），"
+            "请重新组卷或用「加题」补回来 —— 补之前校验会提示分段题数与计划不符。"
+        )
+    return ExamSectionsReplaceOut(
+        exam_id=exam_id,
+        removed_questions=current,
+        question_count=int(fresh["question_count"] or 0),
+        total_score=float(fresh["total_score"] or 0),
+        sections=[_section_out(s) for s in sections_out],
+        message=msg,
     )
 
 
@@ -1075,6 +1146,11 @@ async def compose_exam(
 
     rng = random.Random(payload.seed) if payload.seed is not None else random.Random()
 
+    #: 兜底守卫的基准：**动手之前**数一次卷面题数（坑 42）。
+    #: `replace=true` 会先清空再重建 —— 调用方的语义是"重新抽题"，
+    #: 未必意识到这会把手上已有的题删掉，所以这里要能从结果上拦住。
+    rows_before = await _count_paper_rows(db, exam_id)
+
     if payload.replace:
         await db.execute(text("DELETE FROM exam_questions WHERE exam_id = :eid"), {"eid": exam_id})
 
@@ -1205,6 +1281,13 @@ async def compose_exam(
         after={"filled": len(chosen), "requested": sum(r.count for r in rules),
                "shortfalls": shortfall_dump},
     )
+
+    # ---- 兜底：这次组卷把卷面题数砍掉太多？（坑 42）----
+    # 放在 commit **之前**：一旦拦下，交易整体回滚，一行都没写。
+    await _assert_no_mass_question_loss(
+        db, exam_id, before=rows_before, action="这次组卷"
+    )
+
     await db.commit()
 
     sections = await _load_sections(db, exam_id)
@@ -1271,6 +1354,72 @@ async def _refresh_exam_totals(db: AsyncSession, exam_id: int) -> None:
             "eid": exam_id,
         },
     )
+
+
+# ============================================================ 破坏性变更兜底（坑 42）
+
+
+async def _count_paper_rows(db: AsyncSession, exam_id: int) -> int:
+    """当前**卷面**有多少道题（`exam_questions` 行数，不是题目总数）。"""
+    return int(
+        await db.scalar(
+            text("SELECT count(*) FROM exam_questions WHERE exam_id = :eid"), {"eid": exam_id}
+        )
+        or 0
+    )
+
+
+async def _assert_no_mass_question_loss(
+    db: AsyncSession,
+    exam_id: int,
+    *,
+    before: int,
+    ack: bool = False,
+    action: str = "本次操作",
+) -> None:
+    """**diff 兜底**：写操作导致卷面题数净减少超过阈值就拒绝。
+
+    ## 为什么需要它（而不是只靠"拆接口"）
+
+    拆接口解决了"调用方**故意**改卷面结构"这条路，但防不住**副作用**：
+    `POST /auto-compose` 传 `replace=true` 时也会先清空卷面再重建 ——
+    那是个"重新抽题"的语义，调用方未必意识到它会删掉手里的题。
+
+    **约定（"前端别乱传"）防不住副作用，结构防护才防得住。**
+    所以这里不看调用方"想要什么"，只看**实际发生的结果**：
+    操作前后各数一次卷面行，净减少超阈值就拦。
+
+    ## 为什么在 commit 之前调用
+
+    交易里数、交易里判、交易里拦 —— 抛异常 → `get_db` 回滚 → **一行都没写**。
+    如果放到 commit 之后才数，就只能"删了再报错"，那是不可逆的。
+
+    ## `ack` 的语义
+
+    只有 `PUT /admin/exams/{id}/sections` 会传 `ack=True` ——
+    它要求调用方先给出 `expected_question_count`，那本身就是**显式确认**。
+    兜底提示把用户指到这个接口，所以它自己不能再被拦（否则提示循环）。
+
+    ## 阈值
+
+    来自 `app_configs.exam.mass_question_loss_threshold`（默认 10）。
+    读不到就用默认值继续保护，**不因为配置缺失而放行**。
+    """
+    if ack:
+        return
+    after = await _count_paper_rows(db, exam_id)
+    loss = before - after
+    if loss <= 0:
+        return
+    threshold = await config_service.mass_question_loss_threshold(db)
+    if loss > threshold:
+        raise errors.conflict(
+            f"{action}会删掉 {loss} 道卷面题（超过阈值 {threshold}），已在写入前拦下。"
+            f"结构性重建请改用 PUT /admin/exams/{exam_id}/sections，"
+            f"并传 expected_question_count={before} 显式确认。"
+            "（阈值来自配置 exam.mass_question_loss_threshold，可按需调整。）",
+            40901,
+        )
 
 
 # ============================================================ 卷面校验
@@ -1870,6 +2019,10 @@ async def remove_exam_question(
     if row is None:
         raise errors.not_found("卷面题目不存在（可能已被移走）", 40401)
 
+    #: 兜底守卫的基准（坑 42）。单次移题只能减 1 行，默认阈值 10 下必然放行 ——
+    #: 挂上它只是为了"任何写接口都过同一道闸"，而不是指望它在这里拦住什么。
+    rows_before = await _count_paper_rows(db, exam_id)
+
     await db.execute(
         text("DELETE FROM exam_questions WHERE id = :eqid"), {"eqid": exam_question_id}
     )
@@ -1881,6 +2034,7 @@ async def remove_exam_question(
         before={"exam_question_id": exam_question_id, "question_id": int(row["question_id"])},
         after=None,
     )
+    await _assert_no_mass_question_loss(db, exam_id, before=rows_before, action="移出题目")
     await db.commit()
 
     fresh = await _load_exam_row(db, exam_id)
@@ -1955,6 +2109,7 @@ __all__ = [
     "publish_exam",
     "relaxation_steps",
     "remove_exam_question",
+    "replace_exam_sections",
     "restore_exam",
     "soft_delete_exam",
     "update_exam",

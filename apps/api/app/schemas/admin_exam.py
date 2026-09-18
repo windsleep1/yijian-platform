@@ -33,9 +33,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.admin_question import QType
 from app.schemas.types import BigIntStr, BigIntStrOpt
@@ -223,7 +223,25 @@ class ExamCreateIn(BaseModel):
 
 
 class ExamUpdateIn(BaseModel):
-    """编辑试卷。未传的字段沿用现值。**已发布**的卷只允许改展示性字段。"""
+    """编辑试卷的**元数据**。未传的字段沿用现值。
+
+    ## ⚠️ 这里**不接受 `sections`** —— 结构防护，不是靠约定
+
+    原先 `sections` 是这个模型上的一个可选字段，而 `update_exam` 收到它就会
+    `DELETE FROM exam_questions WHERE exam_id = ...`（**整卷题目清空**）。
+    一个和 `title` / `duration_min` 并列的字段带着这种副作用，签名上完全看不出来 ——
+    前端"把详情对象原样回传"就中招了（坑 42）。
+
+    "前端别乱传"是**约定**，防不住；所以改成**结构上不可能**：
+
+    - `extra="forbid"`：任何未知字段一律拒绝（顺带防住将来新加的错字段）；
+    - `sections` 由 `_reject_sections` 单独给一条**可执行的错误信息** ——
+      不是笼统的 "Extra inputs are not permitted"，而是直接告诉你该用哪个接口。
+
+    改卷面结构请用 `PUT /admin/exams/{id}/sections`（需要 `expected_question_count`）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(None, min_length=1, max_length=200)
     type: ExamType | None = None
@@ -234,13 +252,66 @@ class ExamUpdateIn(BaseModel):
     pass_score: float | None = Field(None, ge=0, le=1000)
     intro_html: str | None = None
     is_free: bool | None = None
-    sections: list[ExamSectionIn] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_sections(cls, data: Any) -> Any:
+        """把 `sections` 拦下来，并给出**下一步该干什么**。
+
+        比通用的 "extra inputs not permitted" 多一句可执行的指引 ——
+        这正是本坑里最缺的东西（调用方知道错在哪，却不知道该往哪走）。
+        """
+        if isinstance(data, dict) and "sections" in data:
+            raise ValueError(
+                "sections 已从本接口剥离（它会整卷清空题目，必须显式确认）。"
+                "改卷面结构请用 PUT /admin/exams/{id}/sections，"
+                "并传 expected_question_count=<你读到的当前卷面题数>。"
+            )
+        return data
+
+
+class ExamSectionsReplaceIn(BaseModel):
+    """**重建卷面结构**（唯一允许的入口）。
+
+    这是全项目**破坏性最强**的写操作之一：它会删掉这张卷现有的全部
+    `exam_questions` 行再按新分段重建（分段是卷面的骨架，换骨架必然要重排题目）。
+    题目本身在题库里不受影响。
+
+    所以它要求**两重确认**：
+
+    1. `expected_question_count` —— 调用方读到的**当前卷面题数**。
+       与库里不一致就拒绝（"卷面已变化，请刷新后重试"）。
+       这既是防误操作，也是**乐观并发**：两个人同时改一张卷时，
+       后提交的那个一定对不上，不会把前一个人的题默默清掉。
+    2. 卷面题数净减少超过 `exam.mass_question_loss_threshold`（默认 10）时，
+       其他写路径会被兜底拦下并把调用方指到这里 —— 这里是**唯一的出口**，
+       所以不再二次拦截（否则提示会变成循环）。
+    """
+
+    sections: list[ExamSectionIn] = Field(..., min_length=1, max_length=30)
+    expected_question_count: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "调用方读到的**当前卷面题数**（GET 详情里的 `question_count`）。"
+            "与库里不一致则 40901 拒绝，不写库"
+        ),
+    )
 
     @model_validator(mode="after")
-    def _check_sections(self) -> "ExamUpdateIn":
-        if self.sections is not None:
-            _ensure_unique_sections(self.sections)
+    def _check_sections(self) -> "ExamSectionsReplaceIn":
+        _ensure_unique_sections(self.sections)
         return self
+
+
+class ExamSectionsReplaceOut(BaseModel):
+    exam_id: BigIntStr
+    #: 重建前**卷面**有多少道题（只统计卷面行，题目本身不受影响）
+    removed_questions: int
+    question_count: int
+    total_score: float
+    sections: list[ExamSectionOut] = Field(default_factory=list)
+    message: str
 
 
 class ExamSectionOut(BaseModel):
@@ -516,6 +587,8 @@ __all__ = [
     "ExamSectionDetail",
     "ExamSectionIn",
     "ExamSectionOut",
+    "ExamSectionsReplaceIn",
+    "ExamSectionsReplaceOut",
     "ExamSoftDeleteOut",
     "ExamStatus",
     "ExamType",

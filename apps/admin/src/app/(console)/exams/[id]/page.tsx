@@ -523,7 +523,12 @@ function ExamDetailBody(props: BodyProps) {
 
       <ExamBasicInfoDialog open={props.basicOpen} onOpenChange={props.setBasicOpen} exam={exam} />
 
-      <ExamSectionsDialog open={props.sectionsOpen} onOpenChange={props.setSectionsOpen} exam={exam} />
+      <ExamSectionsDialog
+        open={props.sectionsOpen}
+        onOpenChange={props.setSectionsOpen}
+        exam={exam}
+        onRefresh={props.refresh}
+      />
 
       {/* ---- 发布确认 ---- */}
       <ConfirmDialog
