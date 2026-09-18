@@ -1502,3 +1502,57 @@ def test_question_list_filters_by_knowledge_point(client: httpx.Client, admin_h)
     assert all(
         int(x["knowledge_point_id"]) == kp_id for x in b3["data"]["items"]
     ), "返回了别的知识点的题"
+
+
+def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
+    """知识点下拉（Pass 2「加题」面板的筛选数据源）。
+
+    在它之前**没有任何接口能列出知识点** —— 前端只能从题目里反推，
+    下拉里只会出现"当前页见过的"知识点，筛不干净。
+    """
+    # 权限与题库域其它只读接口一致：要 `question:read`。
+    # `viewer` 只有 `exam:read`，拿不到 —— 而它本来也打不开「加题」面板（没有 exam:create），
+    # 所以这个 403 不会造成"页面残废"。
+    u = fresh_user(client, nickname="B7 知识点下拉")
+    assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
+    vh = auth(u["access_token"])
+    b_denied = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=vh,
+                               params={"subject_id": JJ_SUBJECT_ID}))
+    assert b_denied["code"] == 40301 and "question:read" in b_denied["message"], b_denied
+
+    # 有 question:read 的人（教研）能拉到
+    r = fresh_user(client, nickname="B7 知识点下拉-教研")
+    assign_roles(client, admin_h, r["user"]["id"], ["researcher"],
+                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    rh = auth(r["access_token"])
+
+    b = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=rh,
+                        params={"subject_id": JJ_SUBJECT_ID}))
+    assert b["code"] == 0, b
+    items = b["data"]["items"]
+    assert items, "科目下应当有知识点"
+    for k in items[:5]:
+        assert k["id"] and k["name"] and k["chapter_id"], k
+        assert k["question_count"] >= 0, k
+        assert k["importance"] in (1, 2, 3), k
+
+    # 带 chapter_id 过滤 → 结果全都属于该章节
+    chapter_id = items[0]["chapter_id"]
+    b2 = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=rh,
+                         params={"chapter_id": chapter_id}))
+    assert b2["code"] == 0 and b2["data"]["items"], b2
+    assert all(str(k["chapter_id"]) == str(chapter_id) for k in b2["data"]["items"])
+    assert len(b2["data"]["items"]) <= len(items), "按章节过滤后不该变多"
+
+    # ⚠️ 已删除的知识点必须被硬过滤掉 —— 列出来等于给用户一个必然空手而归的筛选项
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能构造已删除的知识点")
+    victim = int(items[-1]["id"])
+    try:
+        sql_exec("UPDATE knowledge_points SET is_deleted=true WHERE id=$1", victim)
+        b3 = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=rh,
+                             params={"subject_id": JJ_SUBJECT_ID}))
+        ids = {int(k["id"]) for k in b3["data"]["items"]}
+        assert victim not in ids, "已删除的知识点不该出现在下拉里"
+    finally:
+        sql_exec("UPDATE knowledge_points SET is_deleted=false WHERE id=$1", victim)

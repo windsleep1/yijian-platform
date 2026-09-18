@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.deps import DbSession, require_permission
 from app.core.response import Envelope, ok
-from app.schemas.admin_question import ChapterTreeOut
+from app.schemas.admin_question import ChapterTreeOut, KnowledgePointListOut
 from app.services import question_service
 
 router = APIRouter(prefix="/admin/chapters", tags=["管理端 · 章节"])
@@ -57,3 +57,34 @@ async def chapter_tree(
 ) -> dict:
     tree = await question_service.list_chapter_tree(db, subject_id=subject_id)
     return ok(tree.model_dump())
+
+
+@router.get(
+    "/knowledge-points",
+    response_model=Envelope[KnowledgePointListOut],
+    summary="知识点列表（下拉数据源）",
+    description=(
+        "需要权限 `question:read`。**组卷「加题」面板按知识点筛题**用的数据源。\n\n"
+        "为什么放在 `/admin/chapters` 下：它与章节树是**同一角色** —— 科目域的"
+        "「下拉数据源」，服务于题库挑选场景，不是题目的附属物。\n\n"
+        "- `subject_id` / `chapter_id` 可叠加筛选；`keyword` 模糊匹配名称与编码。\n"
+        "- `question_count` 是**实时统计**（不含软删除），不是读"
+        "`knowledge_points.question_count` 冗余列 —— 那个列还没刷新任务，读了全是 0。\n"
+        "- **已删除的章节/知识点会被硬过滤**：列出一个已删除的知识点等于"
+        "给用户一个必然空手而归的筛选项。\n\n"
+        "> 关于权限粒度：本文件顶部的 TODO 说「等出现第二个消费方就该考虑改粒度」。\n"
+        "> 组卷加题确实算第二个消费方，但它**仍然是在挑题**（消费者还是题库域的），\n"
+        "> 所以 `question:read` 依然是对的。真正的触发条件是「想读章节但**没有**题库权限」的岗位。"
+    ),
+    dependencies=[Depends(require_permission("question:read"))],
+)
+async def knowledge_points(
+    db: DbSession,
+    subject_id: Annotated[int | None, Query(description="科目 ID")] = None,
+    chapter_id: Annotated[int | None, Query(description="章节 ID")] = None,
+    keyword: Annotated[str | None, Query(max_length=80, description="名称 / 编码模糊匹配")] = None,
+) -> dict:
+    out = await question_service.list_knowledge_points(
+        db, subject_id=subject_id, chapter_id=chapter_id, keyword=keyword
+    )
+    return ok(out.model_dump())

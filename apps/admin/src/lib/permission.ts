@@ -24,6 +24,26 @@ export const P = {
   questionPublish: "question:publish",
   /** 整批回滚（`admin` 角色刻意没有这个权限，只有 super_admin / researcher 有） */
   questionRollback: "question:rollback",
+
+  // ---- Batch 7 组卷 ----
+  /** 看试卷列表 / 详情 / 校验结果 */
+  examRead: "exam:read",
+  /**
+   * 建卷 / 改卷 / 组卷 / **加题移题** / **归档**。
+   *
+   * ⚠️ 归档复用 `exam:create` 而不是单独的 `exam:delete`：权限码是跨前后端契约，
+   * 加一条要同时改种子与前端常量；而"能建卷的人能归档自己的卷"是合理的权责边界。
+   */
+  examCreate: "exam:create",
+  /**
+   * 发布。
+   *
+   * ⚠️ **恢复（解除归档）也用它**，不是 `exam:create`：一份**已发布**的卷恢复后
+   * 立刻重新对外可见，这个动作的分量更接近发布。
+   */
+  examPublish: "exam:publish",
+  /** 阅卷（本批未开接口，先把权限码占位，避免以后各处手写字符串） */
+  examGrade: "exam:grade",
 } as const;
 
 export type PermissionCode = (typeof P)[keyof typeof P];
@@ -87,6 +107,9 @@ export function statusLabel(code: string): string {
  */
 export const MODULE_ENTRIES = [
   { perm: P.questionRead, href: "/questions", label: "题库管理" },
+  // Batch 7：试卷管理紧挨着题库（两侧都是"内容"模块），但排在题库之后 ——
+  // 顺序即优先级，教研登录后的落地页仍然应当是题库列表。
+  { perm: P.examRead, href: "/exams", label: "试卷管理" },
   // Batch 6：导入向导。入口权限仍是 `question:read`（列表/详情是只读接口），
   // 放在 /questions 之后 —— 顺序即优先级，扫码一样的落地页应当还是题库列表。
   { perm: P.questionRead, href: "/imports", label: "题库导入" },

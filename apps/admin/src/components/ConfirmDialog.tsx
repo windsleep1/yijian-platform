@@ -22,6 +22,16 @@ type Props = {
   cancelText?: string;
   destructive?: boolean;
   loading?: boolean;
+  /**
+   * 额外禁用确认键（如"必须先勾选『我明白』"）。
+   *
+   * 存在的理由：把"前置条件"做成**按钮禁用**而不是"点了没反应"。
+   * 早期做法是在 `onConfirm` 里 `if (!ack) return;` —— 用户点了按钮，
+   * 界面毫无变化，只会以为坏了。禁用键 + 旁边写清原因，才是可理解的交互。
+   */
+  confirmDisabled?: boolean;
+  /** 禁用确认键时显示的原因（会出现在按钮的 title 上） */
+  confirmDisabledReason?: string;
   onConfirm: () => void | Promise<void>;
 };
 
@@ -41,6 +51,8 @@ export function ConfirmDialog({
   cancelText = "取消",
   destructive = false,
   loading = false,
+  confirmDisabled = false,
+  confirmDisabledReason,
   onConfirm,
 }: Props) {
   return (
@@ -57,7 +69,8 @@ export function ConfirmDialog({
           <Button
             variant={destructive ? "destructive" : "default"}
             onClick={() => void onConfirm()}
-            disabled={loading}
+            disabled={loading || confirmDisabled}
+            title={confirmDisabled ? confirmDisabledReason : undefined}
           >
             {loading ? "处理中…" : confirmText}
           </Button>

@@ -51,6 +51,14 @@ type Props<T> = {
   emptyDescription?: string;
   rowKey: (r: T) => string;
   onRowClick?: (r: T) => void;
+  /**
+   * 每一行的附加 className。
+   *
+   * 存在的理由很具体：归档/恢复这类**行级异步操作**需要"整行淡出"来表示已完成
+   * （见 `useRowActionFeedback` + `RowActionMarker`），而表格本身不该知道
+   * "反馈状态"是什么概念 —— 它只接受一个 className 回调。
+   */
+  rowClassName?: (r: T) => string;
 };
 
 const PAGE_SIZES = [10, 20, 50, 100];
@@ -85,6 +93,7 @@ export function DataTable<T>({
   emptyDescription,
   rowKey,
   onRowClick,
+  rowClassName,
 }: Props<T>) {
   if (error) {
     return (
@@ -174,7 +183,7 @@ export function DataTable<T>({
               <TableRow
                 key={rowKey(row)}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
-                className={cn(onRowClick && "cursor-pointer")}
+                className={cn(onRowClick && "cursor-pointer", rowClassName?.(row))}
               >
                 {columns.map((c) => (
                   <TableCell key={c.key} className={cn(c.cellClassName)}>

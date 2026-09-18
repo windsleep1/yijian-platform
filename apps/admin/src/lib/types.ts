@@ -318,6 +318,12 @@ export type QuestionListItem = {
   subject_name: string | null;
   chapter_id: Id | null;
   chapter_name: string | null;
+  /**
+   * 知识点（Batch 7 Pass 2 补）。组卷「加题」要按知识点挑题，
+   * 而且**筛完得能看出这道题挂在哪个知识点上**，否则筛选形同虚设。
+   */
+  knowledge_point_id: Id | null;
+  knowledge_point_name: string | null;
   type: QType;
   /** 已按 160 字截断（后端 STEM_PREVIEW_LEN） */
   stem: string;
@@ -447,12 +453,38 @@ export type ChapterTreeOut = {
   items: SubjectChapterGroup[];
 };
 
+/** 知识点下拉项（Batch 7 Pass 2 补，供组卷「加题」面板按知识点筛题）。 */
+export type KnowledgePointItem = {
+  id: Id;
+  subject_id: Id;
+  chapter_id: Id;
+  chapter_name: string | null;
+  code: string;
+  name: string;
+  /** 1 低 / 2 中 / 3 高频 */
+  importance: number;
+  /** 该知识点下的题目数（实时统计，不含软删除） */
+  question_count: number;
+};
+
+export type KnowledgePointListOut = {
+  items: KnowledgePointItem[];
+};
+
+export type ListKnowledgePointsQuery = {
+  subject_id?: Id;
+  chapter_id?: Id;
+  keyword?: string;
+};
+
 export type ListQuestionsQuery = {
   page: number;
   page_size: number;
   /** 用字符串传（ID 是雪花 ID 的字符串形式），后端按 int 解析 */
   subject_id?: string;
   chapter_id?: string;
+  /** Batch 7 Pass 2 补：组卷「加题」按知识点挑题 */
+  knowledge_point_id?: string;
   type?: QType;
   difficulty?: number;
   status?: QStatus;
@@ -616,3 +648,287 @@ export type ListImportsQuery = {
   page_size: number;
   status?: ImportStatus;
 };
+
+// ---------------------------------------------------------------- 组卷 / 试卷（Batch 7）
+
+/** `exams.type`。与后端 `ExamType` 字面量一一对应。 */
+export type ExamType = "real" | "mock" | "chapter_test" | "sprint" | "daily" | "custom";
+
+/** `exams.status`。注意 `archived` 是**状态**，与 `is_deleted`（归档位）不是一回事。 */
+export type ExamStatus = "draft" | "reviewing" | "published" | "off" | "archived";
+
+/** `paper_rules.strategy`。本批后端只实现了 `random` 的语义，其余是占位。 */
+export type RuleStrategy = "random" | "weak_first" | "coverage" | "history_similar";
+
+export type RuleStatus = "on" | "off";
+
+/** 组卷规则里的一条抽题约束。 */
+export type RuleItem = {
+  type: QType;
+  count: number;
+  score: number;
+  /** `[min, max]` 难度区间，闭区间。 */
+  difficulty: number[] | null;
+  kp_ids: Id[];
+  chapter_ids: Id[];
+  year: number | null;
+  prefer_unused: boolean;
+};
+
+/** 组卷缺口。**绝不静默补题**，缺多少如实报出来。 */
+export type Shortfall = {
+  rule: RuleItem;
+  /** 规则的中文摘要，前端直接展示，不用自己拼 */
+  rule_label: string;
+  /** 该规则在 `rules` 数组里的下标（从 0 起） */
+  rule_index: number;
+  question_type: QType;
+  need: number;
+  got: number;
+  missing: number;
+  reason: string;
+};
+
+export type PaperRuleOut = {
+  id: Id;
+  name: string;
+  subject_id: Id;
+  subject_name: string | null;
+  type: ExamType;
+  duration_min: number;
+  rules: RuleItem[];
+  strategy: RuleStrategy;
+  status: RuleStatus;
+  planned_count: number;
+  planned_score: number;
+  created_by: Id | null;
+  created_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+  can_edit: boolean;
+  can_delete: boolean;
+};
+
+export type ListPaperRulesQuery = {
+  page: number;
+  page_size: number;
+  subject_id?: Id;
+  status?: RuleStatus;
+  type?: ExamType;
+};
+
+export type ExamSectionIn = {
+  name: string;
+  question_type: QType;
+  question_count: number;
+  score_per: number;
+  sort_no: number;
+};
+
+export type ExamSectionOut = {
+  id: Id;
+  seq: number;
+  name: string;
+  question_type: QType;
+  /** **计划**题数（卷面契约） */
+  question_count: number;
+  score_per: number;
+  section_score: number;
+  sort_no: number;
+  /** **实际**入卷题数 */
+  actual_count: number;
+  actual_score: number;
+};
+
+export type ExamSectionDetail = ExamSectionOut & {
+  questions: ExamQuestionItem[];
+};
+
+export type ExamQuestionItem = {
+  /** ⚠️ `exam_questions.id`（**卷面行 id**），移题用它，**不是** `question_id` */
+  id: Id;
+  question_id: Id;
+  section_id: Id | null;
+  seq: number;
+  score: number;
+  question_type: QType;
+  stem_preview: string;
+  difficulty: number | null;
+  chapter_id: Id | null;
+  /** 发布时锁定的版本；未发布为 null */
+  locked_version: number | null;
+  current_version: number | null;
+  /** 锁定版本 ≠ 当前版本（题目被改过） */
+  version_drift: boolean;
+};
+
+export type ExamValidateIssue = {
+  level: "error" | "warning";
+  code: string;
+  message: string;
+};
+
+export type ExamValidateOut = {
+  exam_id: Id;
+  /** 无 error 级问题才为 true；发布接口要求 true */
+  ok: boolean;
+  errors: ExamValidateIssue[];
+  warnings: ExamValidateIssue[];
+  question_count: number;
+  total_score: number;
+  checked_at: string;
+};
+
+export type ExamCreateIn = {
+  subject_id: Id;
+  title: string;
+  type: ExamType;
+  professional?: string | null;
+  exam_year?: number | null;
+  paper_no?: string | null;
+  duration_min: number;
+  pass_score: number;
+  intro_html?: string | null;
+  is_free: boolean;
+  sections: ExamSectionIn[];
+};
+
+export type ExamUpdateIn = Partial<Omit<ExamCreateIn, "subject_id">>;
+
+export type ExamListItem = {
+  id: Id;
+  subject_id: Id;
+  subject_name: string | null;
+  title: string;
+  type: ExamType;
+  status: ExamStatus;
+  exam_year: number | null;
+  paper_no: string | null;
+  question_count: number;
+  total_score: number;
+  pass_score: number;
+  duration_min: number;
+  difficulty: number;
+  has_subjective: boolean;
+  is_free: boolean;
+  is_deleted: boolean;
+  published_at: string | null;
+  updated_at: string;
+  created_by: Id | null;
+  created_by_name: string | null;
+};
+
+export type ExamDetail = ExamListItem & {
+  professional: string | null;
+  intro_html: string | null;
+  sections: ExamSectionDetail[];
+  /** 上次组卷留下的缺口。空数组 = 没缺口或还没组过卷 */
+  shortfalls: Shortfall[];
+  validation: ExamValidateOut | null;
+  created_at: string;
+  can_edit: boolean;
+  can_compose: boolean;
+  can_publish: boolean;
+  can_unpublish: boolean;
+  can_delete: boolean;
+};
+
+export type ListExamsQuery = {
+  page: number;
+  page_size: number;
+  subject_id?: Id;
+  type?: ExamType;
+  status?: ExamStatus;
+  keyword?: string;
+  /** 「显示已归档」—— 只有 true 时才传 */
+  include_deleted?: boolean;
+  order_by?: "updated_at" | "created_at" | "published_at" | "id";
+  order?: "asc" | "desc";
+};
+
+export type ExamComposeIn = {
+  rule_id?: Id | null;
+  rules?: RuleItem[] | null;
+  subject_id?: Id | null;
+  seed?: number | null;
+  replace?: boolean;
+  /** 组卷后把分段数字改成实际抽到的数量 */
+  apply_sections?: boolean;
+};
+
+export type ExamComposeOut = {
+  exam_id: Id;
+  status: ExamStatus;
+  question_count: number;
+  total_score: number;
+  duration_min: number;
+  sections: ExamSectionOut[];
+  shortfalls: Shortfall[];
+  message: string;
+  elapsed_ms: number;
+};
+
+export type ExamPublishIn = {
+  allow_edit_after_publish: boolean;
+};
+
+export type ExamPublishOut = {
+  exam_id: Id;
+  status: ExamStatus;
+  published_at: string;
+  question_count: number;
+  total_score: number;
+  locked_versions: number;
+  message: string;
+};
+
+export type ExamSoftDeleteOut = {
+  id: Id;
+  title: string;
+  previous_status: ExamStatus;
+  is_deleted: boolean;
+  question_count: number;
+  message: string;
+};
+
+export type ExamRestoreOut = {
+  id: Id;
+  title: string;
+  is_deleted: boolean;
+  status: ExamStatus;
+  /** 本来就是未归档状态（走了幂等分支，没有产生任何写入） */
+  already_active: boolean;
+  message: string;
+};
+
+export type ExamAddQuestionsIn = {
+  /** ⚠️ 字符串数组，**不要** `Number()`（雪花 ID 精度，见 lib/json-bigint.ts） */
+  question_ids: Id[];
+  section_id?: Id | null;
+};
+
+export type SkippedQuestion = {
+  question_id: Id;
+  reason: string;
+};
+
+export type ExamAddQuestionsOut = {
+  exam_id: Id;
+  added: number;
+  skipped: SkippedQuestion[];
+  question_count: number;
+  total_score: number;
+  sections: ExamSectionOut[];
+  message: string;
+};
+
+export type ExamRemoveQuestionOut = {
+  exam_id: Id;
+  exam_question_id: Id;
+  question_id: Id;
+  question_count: number;
+  total_score: number;
+  sections: ExamSectionOut[];
+  message: string;
+};
+

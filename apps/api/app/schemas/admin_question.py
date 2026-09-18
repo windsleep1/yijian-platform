@@ -366,6 +366,28 @@ class SubjectChapterGroup(BaseModel):
     chapters: list[ChapterNode] = Field(default_factory=list)
 
 
+class KnowledgePointItem(BaseModel):
+    """知识点下拉项（Batch 7 Pass 2 补）。
+
+    组卷「加题」面板要按知识点筛题 —— 章节比知识点粗得多，挑不细。
+    在那之前没有任何接口能列出知识点，所以只能靠"从题目里反推"，
+    那样下拉里只会出现当前页见过的知识点。
+    """
+
+    id: BigIntStr
+    subject_id: BigIntStr
+    chapter_id: BigIntStr
+    chapter_name: str | None = None
+    code: str
+    name: str
+    importance: int = Field(2, description="1 低 / 2 中 / 3 高频")
+    question_count: int = Field(0, description="该知识点下的题目数（实时统计，不含软删除）")
+
+
+class KnowledgePointListOut(BaseModel):
+    items: list[KnowledgePointItem] = Field(default_factory=list)
+
+
 class ChapterTreeOut(BaseModel):
     """章节树。
 
@@ -400,4 +422,6 @@ __all__ = [
     "ChapterNode",
     "SubjectChapterGroup",
     "ChapterTreeOut",
+    "KnowledgePointItem",
+    "KnowledgePointListOut",
 ]

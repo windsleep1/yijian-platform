@@ -5,6 +5,8 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { request } from "@/lib/api";
 import type {
   ChapterTreeOut,
+  KnowledgePointListOut,
+  ListKnowledgePointsQuery,
   ListQuestionsQuery,
   Page,
   QuestionBatchDeleteIn,
@@ -27,6 +29,7 @@ export const questionKeys = {
   questions: (q: ListQuestionsQuery) => ["questions", q] as const,
   question: (id: string) => ["question", id] as const,
   chapterTree: (subjectId: string) => ["chapter-tree", subjectId || "all"] as const,
+  knowledgePoints: (params: ListKnowledgePointsQuery) => ["knowledge-points", params] as const,
 };
 
 /** 题目列表。翻页/改筛选时保留上一页数据，避免表格闪白。 */
@@ -60,6 +63,23 @@ export function useChapterTree(subjectId = "") {
         query: subjectId ? { subject_id: subjectId } : undefined,
       }),
     // 科目/章节是低频变更的基础数据，比默认 staleTime 存久一点
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * 知识点下拉（组卷「加题」面板按知识点筛题用）。
+ *
+ * `enabled` 默认要求至少给了 `chapter_id` 或 `subject_id` ——
+ * 不带条件拉全量知识点在题库大的科目上是白白几百行，
+ * 而下拉本来也是"先选章节才选知识点"的联动顺序。
+ */
+export function useKnowledgePoints(params: ListKnowledgePointsQuery) {
+  const hasScope = !!params.chapter_id || !!params.subject_id;
+  return useQuery({
+    queryKey: questionKeys.knowledgePoints(params),
+    queryFn: () => request<KnowledgePointListOut>("/admin/chapters/knowledge-points", { query: params }),
+    enabled: hasScope,
     staleTime: 5 * 60_000,
   });
 }

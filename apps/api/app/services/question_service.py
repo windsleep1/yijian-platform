@@ -41,6 +41,8 @@ from app.schemas.admin_question import (
     MIN_MULTIPLE_CORRECT,
     ChapterNode,
     ChapterTreeOut,
+    KnowledgePointItem,
+    KnowledgePointListOut,
     QuestionBatchDeleteOut,
     QuestionCreateIn,
     QuestionDeleteOut,
@@ -1238,6 +1240,72 @@ async def list_chapter_tree(db: AsyncSession, *, subject_id: int | None = None) 
         )
 
     return ChapterTreeOut(subject_id=subject_id, total=total, items=groups)
+
+
+async def list_knowledge_points(
+    db: AsyncSession,
+    *,
+    subject_id: int | None = None,
+    chapter_id: int | None = None,
+    keyword: str | None = None,
+) -> KnowledgePointListOut:
+    """知识点下拉数据源（Batch 7 Pass 2 补）。
+
+    存在的理由：组卷「加题」面板要按知识点挑题，而在那之前**没有任何接口能列出知识点** ——
+    只能从题目里反推，那样下拉里只会出现"当前页见过的"知识点，筛不干净。
+    与章节树同一角色：**下拉数据源**，所以 `question_count` 同样是实时统计
+    （`knowledge_points.question_count` 冗余列同样没刷新，读了会全是 0）。
+
+    `is_deleted = false` 是硬过滤：已删除的知识点不该出现在筛选下拉里，
+    否则用户筛一个"已经不存在的知识点"，结果必然是空 —— 一个注定空手而归的选项。
+    """
+    conds: list[str] = ["kp.is_deleted = false", "c.is_deleted = false"]
+    params: dict[str, Any] = {}
+    if subject_id is not None:
+        conds.append("kp.subject_id = :sid")
+        params["sid"] = subject_id
+    if chapter_id is not None:
+        conds.append("kp.chapter_id = :cid")
+        params["cid"] = chapter_id
+    if keyword and keyword.strip():
+        conds.append("(kp.name ILIKE :kw OR kp.code ILIKE :kw)")
+        params["kw"] = f"%{keyword.strip()}%"
+
+    rows = (
+        await db.execute(
+            text(
+                "SELECT kp.id, kp.subject_id, kp.chapter_id, kp.code, kp.name, "
+                "       kp.importance, c.name AS chapter_name, "
+                "       COALESCE(cnt.n, 0) AS question_count "
+                "FROM knowledge_points kp "
+                "JOIN chapters c ON c.id = kp.chapter_id "
+                "LEFT JOIN ("
+                "    SELECT knowledge_point_id, count(*) AS n FROM questions "
+                "    WHERE is_deleted = false AND knowledge_point_id IS NOT NULL "
+                "    GROUP BY knowledge_point_id"
+                ") cnt ON cnt.knowledge_point_id = kp.id "
+                "WHERE " + " AND ".join(conds) + " "
+                "ORDER BY c.sort_no, kp.sort_no, kp.id"
+            ),
+            params,
+        )
+    ).mappings().all()
+
+    return KnowledgePointListOut(
+        items=[
+            KnowledgePointItem(
+                id=r["id"],
+                subject_id=r["subject_id"],
+                chapter_id=r["chapter_id"],
+                chapter_name=r["chapter_name"],
+                code=r["code"],
+                name=r["name"],
+                importance=r["importance"],
+                question_count=int(r["question_count"] or 0),
+            )
+            for r in rows
+        ]
+    )
 
 
 # ============================================================ 落库小工具
