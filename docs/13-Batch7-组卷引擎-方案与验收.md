@@ -7,7 +7,7 @@
 > **Pass 2 试卷管理前端**（`/exams`、`/exams/new`、`/exams/[id]`、`/paper-rules`，待开工）。
 > 本文覆盖 Pass 1 与前置修正；Pass 2 完成后在文末追加其章节。
 >
-> **当前状态**：后端 **48 个接口**，`run-smoke.ps1` **107 passed, 1 skipped**（无回归）。
+> **当前状态**：后端 **50 个接口**，`run-smoke.ps1` **118 passed, 1 skipped**（无回归）。
 
 前置：Batch 4 的题库 CRUD、Batch 5 的导入管道（题库里已有 6000 道已发布仿真题）。
 
@@ -37,6 +37,7 @@
 | ⑯ | DELETE | `/admin/exams/{id}/questions/{eq_id}` | `exam:create` | **移出一题**（同上） |
 | ⑰ | PUT | `/admin/exams/{id}/sections` | `exam:create` | **重建卷面结构**（唯一入口，需 `expected_question_count`，§3.10） |
 | ⑱ | POST | `/admin/paper-rules/preview` | `exam:read` | **规则试算**（dry-run，纯读不写库，§11.2） |
+| ⑲ | POST | `/admin/exams/{id}/unpublish` | `exam:publish` | **下线**（`published → off`，状态机补齐，见 `docs/14` §6） |
 
 ⚠️ **`PUT /admin/exams/{id}` 现在只接受元数据**，传 `sections` 会 `40001`（§3.10）。
 
@@ -543,19 +544,19 @@ Batch 7 Pass 1 只做了"自动组卷"，卷面的题**只能**由组卷产生 �
 ### 5.6 验收⑥ `run-smoke.ps1` 全绿，Batch 2–6 不回归
 
 ```
-107 passed, 1 skipped
+118 passed, 1 skipped
 ```
 
 | 测试文件 | 用例数 | 归属 |
 |---|---|---|
-| `test_admin_v3.py` | 8 | Batch 3 |
+| `test_admin_v3.py` | 14 | Batch 3 |
 | `test_admin_v4.py` | 12 | Batch 4 |
 | `test_admin_v5.py` | 14 | Batch 5 / 6 |
-| `test_admin_v7.py` | **53** | **Batch 7（Pass 1 21 + 前置修正 3 + 恢复 8 + 加题移题 5 + 知识点下拉 1 + 结构防护 10 + 规则试算 5）** |
+| `test_admin_v7.py` | **58** | **Batch 7（Pass 1 21 + 前置修正 3 + 恢复 8 + 加题移题 5 + 知识点下拉 1 + 结构防护 10 + 规则试算 5 + 下线 5 + 状态机审计后 9）** |
 | `test_idgen.py` | 15 | Batch 5 |
 | `test_smoke.py` | 6 | Batch 2 |
 
-上一批是 `54 passed, 1 skipped`；Batch 7 **+53**，无回归。
+上一批是 `54 passed, 1 skipped`；Batch 7 **+64**，无回归。
 （`1 skipped` 是 Batch 5 就有的 6000 行环境变量门控用例。）
 
 > ⚠️ **加 `viewer` 的 `exam:read` 会牵动 Batch 3 的用例** ——

@@ -858,7 +858,10 @@ CREATE TABLE exams (
   avg_score      NUMERIC(7,2) NOT NULL DEFAULT 0,
   is_free        BOOLEAN     NOT NULL DEFAULT false,
   status         VARCHAR(16) NOT NULL DEFAULT 'draft'
-                 CHECK (status IN ('draft','reviewing','published','off','archived')),
+                 -- 三态：draft → published → off →（重发）→ published，或 is_deleted 归档。
+                 -- 'archived' 已于 20260919-01 移除：它与 is_deleted 语义重复且从未被写入过
+                 -- （见 docs/14-状态机审计.md）。'reviewing'（送审）保留并标预留。
+                 CHECK (status IN ('draft','reviewing','published','off')),
   published_at   TIMESTAMPTZ,
   is_deleted     BOOLEAN     NOT NULL DEFAULT false,
   created_by     BIGINT      REFERENCES users(id),
@@ -1252,7 +1255,11 @@ CREATE TABLE dictionaries (
   dict_label  VARCHAR(96) NOT NULL,
   extra       JSONB       NOT NULL DEFAULT '{}'::jsonb,
   sort_no     INTEGER     NOT NULL DEFAULT 0,
-  status      VARCHAR(16) NOT NULL DEFAULT 'on',
+  status      VARCHAR(16) NOT NULL DEFAULT 'on'
+              -- 与 subjects / banners / paper_rules 等"启用位"表统一用 on/off。
+              -- 补于 20260919-02：此前是全库唯一没有 CHECK 的 status 列，
+              -- 写错一个值不会被拦住，而读路径全按 status='on' 过滤 → 那条字典会静默消失。
+              CHECK (status IN ('on','off')),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX uq_dict ON dictionaries(dict_type, dict_key);

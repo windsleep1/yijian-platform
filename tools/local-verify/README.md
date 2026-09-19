@@ -4,7 +4,7 @@
 > （Batch 2 起引入，后续批次持续复用；覆盖认证 / RBAC / 题库 CRUD / 导入管道）。
 > Redis 用 `fakeredis` 顶替（只模拟命令行为，其余代码路径 100% 真实）。
 >
-> 已在 Windows + PostgreSQL 16.15 + Python 3.13 上实测通过：**`107 passed, 1 skipped`**（Batch 7 时点）。
+> 已在 Windows + PostgreSQL 16.15 + Python 3.13 上实测通过：**`118 passed, 1 skipped`**（Batch 7 时点）。
 
 ---
 
@@ -89,12 +89,12 @@ tests/test_smoke.py::test_password_login_refresh_logout PASSED
 tests/test_smoke.py::test_unauthorized_access PASSED
 tests/test_smoke.py::test_rbac_flow PASSED
 tests/test_smoke.py::test_rate_limit_on_sms PASSED
-===================== 107 passed, 1 skipped in 52.25s =====================
+===================== 118 passed, 1 skipped in 59.16s =====================
 ```
 
 > 前面还会有 `test_admin_v3.py`（8）、`test_admin_v4.py`（12）、`test_admin_v5.py`（14）、
 > `test_admin_v7.py`（37）、`test_idgen.py`（15）。
-> **当前全量是 `107 passed, 1 skipped`** ——
+> **当前全量是 `118 passed, 1 skipped`** ——
 > 那个 `1 skipped` 是 `test_admin_v5.py` 里的 6000 行全量导入用例，需环境变量显式开启才会跑。
 
 > **`test_rbac_flow` 必须是 `PASSED` 而不是 `SKIPPED`。**

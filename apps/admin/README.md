@@ -190,7 +190,7 @@ student      无权限                         → 没有 user:read
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepRunning
-# 期望：107 passed, 1 skipped
+# 期望：118 passed, 1 skipped
 #   test_admin_v5.py  13 个  ← 导入管道（上传/校验/执行/发布/回滚/变更日志/数据范围）
 #   test_idgen.py     15 个  ← 雪花 ID 精度
 #   test_admin_v3/v4、test_smoke  ← Batch 2/3/4（不能回归）
@@ -253,7 +253,7 @@ Pass 2 前端未落地前，直接打接口验证：
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
-# 期望：107 passed, 1 skipped（其中 test_admin_v7.py 53 条是组卷用例）
+# 期望：118 passed, 1 skipped（其中 test_admin_v7.py 58 条是组卷用例）
 ```
 
 只跑组卷用例（复用已运行的 API）：
@@ -328,7 +328,7 @@ curl -s -X PUT "$BASE/admin/users/375228966664933376/roles" -H "$H" \
 curl -s -i "$BASE/admin/users/999999999999999999" -H "$H" | head -1
 ```
 
-Swagger 在 <http://localhost:8000/docs>，48 个接口都有中文 summary 和 description。
+Swagger 在 <http://localhost:8000/docs>，50 个接口都有中文 summary 和 description。
 
 ---
 
@@ -341,20 +341,21 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
 一条命令完成：起 PostgreSQL → 载入 schema → 重放 RBAC 种子 → 初始化超管 → 起 API → 跑 pytest → 收尾。
-**期望 `107 passed, 1 skipped`**：
+**期望 `118 passed, 1 skipped`**：
 
 ```
 tests/test_idgen.py      15 个   ← 雪花 ID 精度（Batch 5）
-tests/test_admin_v3.py    8 个   ← 用户详情 / viewer 流程 / 角色权限契约 / 审计筛选
+tests/test_admin_v3.py   14 个   ← 用户详情 / viewer 流程 / 角色权限契约 / 审计筛选 /
+                                  停用启用账号（三道守卫 + 留痕 + 权限墙）
 tests/test_admin_v4.py   12 个   ← 题库 CRUD（Batch 4）
 tests/test_admin_v5.py   14 个   ← 导入管道 + 变更日志（Batch 5/6）
                                   其中 1 条是 6000 行全量门控用例，默认 skip
-tests/test_admin_v7.py   53 个   ← 组卷引擎（Batch 7）：规则 CRUD / 组卷算法 / 缺口 /
+tests/test_admin_v7.py   58 个   ← 组卷引擎（Batch 7）：规则 CRUD / 组卷算法 / 缺口 /
                                   校验 / 版本锁定 / 数据范围 / viewer 只读 /
                                   试卷归档 + 恢复 / 题目恢复 / 手动加题移题
 tests/test_smoke.py       6 个   ← Batch 2 的认证链路 + RBAC（不能回归）
 ─────────────────────────────────────────────────────────────
-共 108 条 collected → 107 passed, 1 skipped
+共 119 条 collected → 118 passed, 1 skipped
 ```
 
 > `run-smoke.ps1` 用的是 8123 端口，并且**结束时会把 PostgreSQL 停掉**。

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.admin_audit import AuditLogItem
 from app.schemas.types import BigIntStr, BigIntStrOpt
@@ -38,6 +38,68 @@ class AssignRolesIn(BaseModel):
     @classmethod
     def model_validator_hint(cls) -> str:  # pragma: no cover - 仅用于文档说明
         return "scope_type != 'global' 时必须传 scope_id"
+
+
+class UserStatusUpdateIn(BaseModel):
+    """改用户状态。**只开放 `active` ↔ `disabled` 两个值。**
+
+    ## 为什么只开这两个（而不是把 4 个状态全开）
+
+    用户的目标是"**补齐管理员该有的入口**"，不是"补齐所有状态入口"。
+    `users.status` 的四个值里，只有两个属于管理员的日常操作：
+
+    | 值 | 谁写 | 为什么 |
+    |---|---|---|
+    | `active` / `disabled` | **管理员**（本接口） | 停用/恢复一个账号是日常运维动作 |
+    | `locked` | **系统自动** | 登录失败计数触发，管理员手工锁定会与自动解锁逻辑打架 |
+    | `deleted` | **注销流程** | 注销要处理订单/权益/数据留存，不能是"改个字段" |
+
+    传 `locked` / `deleted` 会 `40001` 拒绝并说明原因 ——
+    **不是"忘了实现"，是刻意的边界**。
+    """
+
+    status: Literal["active", "disabled"] = Field(..., description="只接受 active / disabled")
+    reason: str | None = Field(
+        None,
+        max_length=200,
+        description="停用原因（可选，写入 content_change_logs 与 audit_logs）",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _explain_system_only_states(cls, data: Any) -> Any:
+        """`locked` / `deleted` 要**说清归谁管**，而不是让 Pydantic 甩一句枚举不匹配。
+
+        ⚠️ 不加这一条会怎样：`Literal` 校验先命中，调用方只看到
+        「Input should be 'active' or 'disabled'」——**看不出这是刻意的边界**，
+        于是很容易被当成"忘了实现"，下一个人顺手把 `locked` 加进枚举就出事了。
+
+        这与 `ExamUpdateIn._reject_sections` 是同一个套路：
+        **被拒绝的输入，要把"为什么不给"和"该找谁"讲出来。**
+        """
+        if isinstance(data, dict):
+            v = data.get("status")
+            if v == "locked":
+                raise ValueError(
+                    "只接受 active / disabled。"
+                    "locked 不能由管理员设置：它由系统按登录失败次数自动写入，"
+                    "人工锁定会与自动解锁逻辑冲突。"
+                )
+            if v == "deleted":
+                raise ValueError(
+                    "只接受 active / disabled。"
+                    "deleted（注销）不走这个接口：注销涉及订单、权益与数据留存处理，"
+                    "是一个流程而不是改一个字段。"
+                )
+        return data
+
+
+class UserStatusOut(BaseModel):
+    user_id: BigIntStr
+    status: str
+    previous_status: str
+    reason: str | None = None
+    message: str
 
 
 class RoleBrief(BaseModel):
@@ -110,4 +172,6 @@ __all__ = [
     "AssignRolesOut",
     "UserScopeBrief",
     "AdminUserDetail",
+    "UserStatusUpdateIn",
+    "UserStatusOut",
 ]

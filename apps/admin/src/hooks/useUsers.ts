@@ -10,6 +10,8 @@ import type {
   AssignRolesOut,
   ListUsersQuery,
   Page,
+  UserStatusOut,
+  UserStatusUpdateIn,
 } from "@/lib/types";
 
 /** query key 集中定义，避免散落各处写错字符串导致缓存失效不生效。 */
@@ -58,6 +60,27 @@ export function useAssignRoles(userId: string) {
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["user", userId] });
+      void qc.invalidateQueries({ queryKey: ["users"] });
+      void qc.invalidateQueries({ queryKey: ["audit-logs"] });
+    },
+  });
+}
+
+/**
+ * 停用 / 启用账号。**只接受 `active` / `disabled`。**
+ *
+ * `id` 从变量里传（与 `useUpdatePaperRule` 同理）：用户列表要对**任意行**做行级操作，
+ * id 绑在 hook 上就只能每行调一次 hook。
+ *
+ * **不幂等**：已是目标状态时后端 `40901`。
+ */
+export function useUpdateUserStatus() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, payload }: { userId: string; payload: UserStatusUpdateIn }) =>
+      request<UserStatusOut>(`/admin/users/${userId}/status`, { method: "PATCH", body: payload }),
+    onSuccess: (_res, vars) => {
+      void qc.invalidateQueries({ queryKey: ["user", vars.userId] });
       void qc.invalidateQueries({ queryKey: ["users"] });
       void qc.invalidateQueries({ queryKey: ["audit-logs"] });
     },

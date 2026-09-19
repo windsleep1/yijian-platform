@@ -45,7 +45,18 @@ from app.schemas.types import BigIntStr, BigIntStrOpt
 # exams.type 的 CHECK 约束取值
 ExamType = Literal["real", "mock", "chapter_test", "sprint", "daily", "custom"]
 # exams.status 的 CHECK 约束取值
-ExamStatus = Literal["draft", "reviewing", "published", "off", "archived"]
+# exams.status 的 CHECK 约束取值。
+#
+# ⚠️ `archived` 已于 2026-09-19 移除（迁移 20260919-01）：
+#   它与 `is_deleted`（软删除 = 归档）**语义重复**，且全仓 grep 写入点 = 0 ——
+#   唯一提及它的地方是 `publish_exam` 里一句防御性判断，而 `is_deleted` 的检查
+#   在它之前已经生效，所以删掉**零功能损失**。
+#   判据：**语义重复的一律删；含义独立、将来明确要用的才叫"预留"。**
+#   （对照组：`users.disabled` 含义独立、登录拦截已实现 → 那是补入口，不是删值。）
+#
+# `reviewing`（送审）保留并标预留：含义独立，且 `can_compose` / `can_publish`
+# 都显式把它算作"可编辑、可发布"，将来做审核流程时直接启用。
+ExamStatus = Literal["draft", "reviewing", "published", "off"]
 # paper_rules.strategy 的 CHECK 约束取值
 RuleStrategy = Literal["random", "weak_first", "coverage", "history_similar"]
 # paper_rules.status 的 CHECK 约束取值
@@ -384,6 +395,18 @@ class PaperRulePreviewOut(BaseModel):
     message: str
 
 
+class ExamUnpublishOut(BaseModel):
+    """下线结果（`published → off`）。"""
+
+    exam_id: BigIntStr
+    status: ExamStatus
+    previous_status: ExamStatus
+    #: **保留**的发布时间（历史事实，下线不清空）；重新发布时会被覆盖
+    published_at: datetime | None = None
+    question_count: int = 0
+    message: str
+
+
 class ExamSectionsReplaceOut(BaseModel):
     exam_id: BigIntStr
     #: 重建前**卷面**有多少道题（只统计卷面行，题目本身不受影响）
@@ -669,6 +692,7 @@ __all__ = [
     "ExamSectionOut",
     "ExamSectionsReplaceIn",
     "ExamSectionsReplaceOut",
+    "ExamUnpublishOut",
     "ExamSoftDeleteOut",
     "ExamStatus",
     "ExamType",

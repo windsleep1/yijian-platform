@@ -4,11 +4,15 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import redis.asyncio as aioredis
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import not_found
+from app.core.errors import bad_request, conflict, not_found
+from app.core.idgen import next_id, to_inet
 from app.db.models import User, UserProfile
 from app.schemas.admin import (
     AdminUserDetail,
@@ -16,6 +20,7 @@ from app.schemas.admin import (
     AssignRolesOut,
     RoleBrief,
     UserScopeBrief,
+    UserStatusOut,
 )
 from app.schemas.auth import ProfileOut
 from app.services import rbac_service
@@ -160,6 +165,193 @@ async def assign_user_roles(
         user_id=target_user_id,
         roles=[RoleBrief(**r) for r in priv.roles],
         granted_permissions=priv.permissions,
+    )
+
+
+def _json(value: Any) -> str:
+    """JSONB 参数序列化。与 `exam_service._json` 同一口径（`ensure_ascii=False` + `default=str`）。"""
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+async def update_user_status(
+    db: AsyncSession,
+    *,
+    redis: aioredis.Redis | None,
+    actor_id: int,
+    actor_name: str | None,
+    target_user_id: int,
+    status: str,
+    reason: str | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> UserStatusOut:
+    """启用 / 停用账号。**只开放 `active` ↔ `disabled`。**
+
+    ## 边界：为什么 locked / deleted 不开管理员入口
+
+    用户的要求是"**补齐管理员该有的入口**"，不是"补齐所有状态入口"：
+    - `locked` —— **系统自动**（登录失败计数触发）。手工锁定会与自动解锁逻辑打架：
+      管理员锁了，用户下次登录成功又被自动解开，或者反过来永远锁死。
+    - `deleted`（注销）—— 要处理订单 / 权益 / 数据留存，是**一个流程**，不是一个字段。
+
+    这两类传进来会 `40001`，并说明"归谁管"。
+
+    ## 三道守卫（都是真实会出事的）
+
+    1. **不能改自己** —— 管理员手滑停用自己，就把自己锁在门外了。
+    2. **不能改 `super_admin`** —— 与「后台不允许提权」（`super_admin` 只能 CLI 授予）
+       同一个原则：超管的生命周期由运维命令行管，不然后台可以互相停用。
+    3. **不能改处于 `locked` / `deleted` 的账号** —— 见上，那两种状态不归本接口管。
+
+    ## 停用是**即时生效**的（这一点容易写错，见下方更正说明）
+
+    `deps.current_user` 对**每一个受保护请求**都会重新加载 user 并校验
+    `status in ("disabled", "locked")`（`deps.py` → `unauthorized("账号状态异常", 40305)`）。
+    所以停用后该用户的**下一个请求就会拿到 HTTP 401 / code 40305**，
+    **不需要等 access token 过期**。
+
+    > ⚠️ **更正**：本函数初版注释里写的是"已签发的 access token 在过期前仍然有效"，
+    > **那是错的** —— 依据是"`auth_service` 只在登录时检查 status"，
+    > 但漏看了 `deps.py` 里的请求级校验（两个地方各有一份 status 判断，
+    > 正好是硬约定 A 说的"同一判断散落多处"）。
+    > 写状态相关的能力说明前，**先把 status 的所有读路径 grep 一遍**。
+
+    另外做两件事（都不再是"为了阻断访问"，而是语义与兜底）：
+
+    - **吊销全部 refresh 会话**（`user_sessions.revoked_at = now()`）——
+      语义是"**停用即注销该用户的所有设备**"，否则设备列表/审计里他一直显示为已登录；
+      同时为将来把 status 校验挪到缓存留一道兜底。
+    - **清权限缓存**（不等 TTL）。
+
+    ## 幂等：**不幂等**
+
+    已是目标状态 → `40901`。与 `publish` / `archive` 一致：
+    **状态变更动作**重复执行说明调用方状态认知有问题，报错比静默吞掉好。
+    """
+    if status not in ("active", "disabled"):
+        raise bad_request(
+            "只允许设置 active / disabled。"
+            "locked 由系统按登录失败自动写，deleted 走注销流程 —— 这两个不由管理员接口改。",
+            40001,
+        )
+
+    target = (
+        await db.execute(
+            select(User).where(User.id == target_user_id, User.is_deleted.is_(False))
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise not_found("用户不存在", 40401)
+
+    # ---- 守卫 1：不能改自己 ----
+    if int(target_user_id) == int(actor_id):
+        raise bad_request(
+            "不能修改自己的账号状态 —— 停用后你会立刻失去后台访问权限，且无法自行恢复。"
+            "如确实需要，请让另一位管理员操作。",
+            40001,
+        )
+
+    # ---- 守卫 2：不能改 super_admin ----
+    actor_roles = await rbac_service.get_privileges(db, target_user_id, redis)
+    if any(r["code"] == "super_admin" for r in actor_roles.roles):
+        raise bad_request(
+            "不能通过后台修改超级管理员的状态。"
+            "super_admin 只能由运维命令行（seed-admin）授予与回收，"
+            "否则后台可以互相停用、乃至无人能登录。",
+            40001,
+        )
+
+    # ---- 守卫 3：locked / deleted 不归本接口管 ----
+    if target.status in ("locked", "deleted"):
+        raise conflict(
+            f"该账号当前是「{target.status}」，不通过本接口变更。"
+            + ("锁定由登录失败计数自动触发，登录成功会自动解除。"
+               if target.status == "locked"
+               else "注销要走注销流程（涉及订单与权益处理）。"),
+            40901,
+        )
+
+    if target.status == status:
+        raise conflict(
+            "该账号已经是目标状态，无需重复操作。", 40901
+        )
+
+    before_status = target.status
+    revoke_sessions = status == "disabled"
+
+    await db.execute(
+        text("UPDATE users SET status = :st, updated_at = now() WHERE id = :uid"),
+        {"st": status, "uid": target_user_id},
+    )
+
+    revoked = 0
+    if revoke_sessions:
+        # 停用 → 吊销全部未过期且未吊销的 refresh 会话
+        res = await db.execute(
+            text(
+                "UPDATE user_sessions SET revoked_at = now() "
+                "WHERE user_id = :uid AND revoked_at IS NULL AND expires_at > now()"
+            ),
+            {"uid": target_user_id},
+        )
+        revoked = res.rowcount or 0
+        await rbac_service.invalidate_privileges(redis, target_user_id)
+
+    change_log = f"{'停用' if status == 'disabled' else '启用'}用户"
+    if reason:
+        change_log += f"：{reason}"
+
+    # ---- 留痕 1：content_change_logs（用户明确要求，reason 记在这里）----
+    await db.execute(
+        text(
+            "INSERT INTO content_change_logs "
+            "  (id, entity_type, entity_id, action, diff, change_log, operator_id, operator_ip) "
+            "VALUES (:id, 'user', :uid, 'update', CAST(:diff AS jsonb), :log, :op, :ip)"
+        ),
+        {
+            "id": next_id(),
+            "uid": target_user_id,
+            "diff": _json(
+                {
+                    "before": {"status": before_status},
+                    "after": {"status": status, "reason": reason},
+                }
+            ),
+            "log": change_log[:500],
+            "op": actor_id,
+            "ip": to_inet(ip),
+        },
+    )
+
+    # ---- 留痕 2：audit_logs（与 assign_roles 一致，审计页能看到）----
+    await write_audit(
+        db,
+        actor_id=actor_id,
+        actor_name=actor_name,
+        action="user.update_status",
+        module="user",
+        entity_type="user",
+        entity_id=target_user_id,
+        before={"status": before_status},
+        after={"status": status, "reason": reason, "revoked_sessions": revoked},
+        method="PATCH",
+        path=f"/api/v1/admin/users/{target_user_id}/status",
+        ip=ip,
+        user_agent=user_agent,
+    )
+    await db.commit()
+
+    msg = f"已{'停用' if status == 'disabled' else '启用'}该账号。"
+    if revoked:
+        msg += f"同时注销了 {revoked} 个设备会话。"
+    if status == "disabled":
+        msg += "该用户的**下一个请求**即会被拒绝（HTTP 401 / 40305），无需等待令牌过期。"
+    return UserStatusOut(
+        user_id=target_user_id,
+        status=status,
+        previous_status=before_status,
+        reason=reason,
+        message=msg,
     )
 
 

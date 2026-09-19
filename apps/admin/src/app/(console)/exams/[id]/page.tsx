@@ -11,6 +11,7 @@ import {
   Lock,
   Pencil,
   Plus,
+  PowerOff,
   Send,
   ShieldCheck,
   Trash2,
@@ -19,6 +20,7 @@ import {
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { AddQuestionsDialog } from "@/components/AddQuestionsDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -42,6 +44,7 @@ import {
   usePublishExam,
   useRemoveExamQuestion,
   useRestoreExam,
+  useUnpublishExam,
   useValidateExam,
 } from "@/hooks/useExams";
 import { useRowActionFeedback } from "@/hooks/useRowActionFeedback";
@@ -86,6 +89,7 @@ export default function ExamDetailPage() {
   const query = useExam(id);
   const validate = useValidateExam(id ?? "");
   const publish = usePublishExam(id ?? "");
+  const unpublish = useUnpublishExam();
   const archive = useArchiveExam();
   const restore = useRestoreExam();
   const removeQuestion = useRemoveExamQuestion(id ?? "");
@@ -97,6 +101,7 @@ export default function ExamDetailPage() {
   const [publishOpen, setPublishOpen] = useState(false);
   const [allowEdit, setAllowEdit] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [unpublishOpen, setUnpublishOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{ eq: ExamQuestionItem; title: string } | null>(null);
 
@@ -187,6 +192,9 @@ export default function ExamDetailPage() {
       setAllowEdit={setAllowEdit}
       archiveOpen={archiveOpen}
       setArchiveOpen={setArchiveOpen}
+      unpublishOpen={unpublishOpen}
+      setUnpublishOpen={setUnpublishOpen}
+      unpublish={unpublish}
       restoreOpen={restoreOpen}
       setRestoreOpen={setRestoreOpen}
       removeTarget={removeTarget}
@@ -220,6 +228,9 @@ type BodyProps = {
   setAllowEdit: (v: boolean) => void;
   archiveOpen: boolean;
   setArchiveOpen: (v: boolean) => void;
+  unpublishOpen: boolean;
+  setUnpublishOpen: (v: boolean) => void;
+  unpublish: ReturnType<typeof useUnpublishExam>;
   restoreOpen: boolean;
   setRestoreOpen: (v: boolean) => void;
   removeTarget: { eq: ExamQuestionItem; title: string } | null;
@@ -230,7 +241,7 @@ type BodyProps = {
 };
 
 function ExamDetailBody(props: BodyProps) {
-  const { exam, validation, validating, onValidate, publish, archive, restore, removeQuestion, fb } = props;
+  const { exam, validation, validating, onValidate, publish, unpublish, archive, restore, removeQuestion, fb } = props;
   const { hasPermission } = props;
 
   const canCreate = hasPermission(P.examCreate);
@@ -319,7 +330,7 @@ function ExamDetailBody(props: BodyProps) {
                       !canPublish
                         ? `需要 ${P.examPublish} 权限`
                         : frozen
-                          ? "该卷已发布"
+                          ? "该卷已发布 —— 要改卷面请先「下线」"
                           : publishBlocked
                             ? `校验未通过（${errors} 个必须修的问题），修好才能发布`
                             : undefined
@@ -327,6 +338,31 @@ function ExamDetailBody(props: BodyProps) {
                   >
                     <Send className="h-3.5 w-3.5" />
                     发布
+                  </Button>
+                </Gate>
+
+                {/* 下线：**按 `can_unpublish` 渲染** —— 终于让这个字段名副其实。
+                    在此之前它一直是 true 却没接口可用，前端也只能装作没看见。 */}
+                <Gate
+                  allowed={canPublish}
+                  need={P.examPublish}
+                  hint="下线需要 exam:publish（已发布的卷下线等于让它重新生效的另一面）"
+                >
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!canPublish || !exam.can_unpublish}
+                    onClick={() => props.setUnpublishOpen(true)}
+                    title={
+                      !canPublish
+                        ? `需要 ${P.examPublish} 权限`
+                        : !exam.can_unpublish
+                          ? "只有「已发布」的卷才能下线"
+                          : "下线后卷不再对外可见；卷面与题目保留，可改完再重新发布"
+                    }
+                  >
+                    <PowerOff className="h-3.5 w-3.5" />
+                    下线
                   </Button>
                 </Gate>
 
@@ -609,6 +645,40 @@ function ExamDetailBody(props: BodyProps) {
             }),
           });
           refreshBoth();
+        }}
+      />
+
+      {/* ---- 下线确认 ---- */}
+      <ConfirmDialog
+        open={props.unpublishOpen}
+        onOpenChange={props.setUnpublishOpen}
+        title={`确认下线「${exam.title}」？`}
+        loading={unpublish.isPending}
+        confirmText="下线"
+        description={
+          <div className="space-y-2 text-sm">
+            <p>
+              将把这份已发布的试卷<strong>下线</strong>：不再对外可见，
+              之后可以继续编辑卷面，改完**重新发布**。
+            </p>
+            <p className="text-xs text-muted-foreground">
+              卷面与题目**原样保留**；「发布时间」不会被清空（那是"对外发布过"的历史记录），
+              重新发布时会更新成新的时间。
+            </p>
+            <p className="text-xs text-muted-foreground">
+              为什么是「下线」而不是「退回草稿」：退回草稿会让一份**发布过**的卷
+              看起来像"从没发布过"，发布时间就成了孤儿数据。
+            </p>
+          </div>
+        }
+        onConfirm={async () => {
+          props.setUnpublishOpen(false);
+          try {
+            const res = await unpublish.mutateAsync({ examId: exam.id });
+            toast.success("已下线", { description: res.message });
+          } catch {
+            // 统一错误 toast 由 MutationCache 负责
+          }
         }}
       />
 

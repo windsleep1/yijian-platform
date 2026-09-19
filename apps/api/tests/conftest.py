@@ -16,6 +16,8 @@ import os
 import random
 import string
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -111,6 +113,93 @@ def client() -> httpx.Client:
         )
     with httpx.Client(timeout=15) as c:
         yield c
+
+
+# ---------------------------------------------------------------- 直连库（测试公用）
+
+def _dsn() -> str | None:
+    """`DATABASE_URL` 转成 asyncpg 能用的 DSN；没设就返回 None（调用方自行 skip）。"""
+    url = os.environ.get("DATABASE_URL")
+    return url.replace("postgresql+asyncpg://", "postgresql://") if url else None
+
+
+def sql_exec(statement: str, *args):
+    """直连库执行一条 SQL。没设 `DATABASE_URL` 时返回 None。"""
+    dsn = _dsn()
+    if not dsn:
+        return None
+
+    import asyncpg
+
+    async def _run():
+        conn = await asyncpg.connect(dsn)
+        try:
+            return await conn.execute(statement, *args)
+        finally:
+            await conn.close()
+
+    return asyncio.run(_run())
+
+
+def sql_fetch(statement: str, *args):
+    """直连库查询，返回 `list[dict]`。没设 `DATABASE_URL` 时返回 None。"""
+    dsn = _dsn()
+    if not dsn:
+        return None
+
+    import asyncpg
+
+    async def _run():
+        conn = await asyncpg.connect(dsn)
+        try:
+            rows = await conn.fetch(statement, *args)
+            return [dict(r) for r in rows]
+        finally:
+            await conn.close()
+
+    return asyncio.run(_run())
+
+
+
+def fresh_user(client: httpx.Client, *, nickname: str = "测试用户") -> dict:
+    """注册一个**全新**用户，并把限流桶隔到自己的假 IP。
+
+    ## 为什么要伪造 `X-Forwarded-For`
+
+    短信验证码有**两道**每日限额：单手机号 10 次、**单 IP 20 次**
+    （`core/config.py` 的 `sms_daily_limit_per_phone` / `_per_ip`）。
+    全套用例要注册几十个用户，如果都从 `127.0.0.1` 出来，
+    跑到一半就会 `42902 今日验证码发送次数已达上限，请明天再试` ——
+    而这是**测试基建问题**，不是被测功能的问题，排查时极易误判。
+
+    所以每个用户分一个随机假 IP（`203.0.x.y`），各自一个桶（同 Batch 5 的做法）。
+
+    ⚠️ **新增需要注册用户的用例，请用这个，不要直接用 `register()`** ——
+    `register()` 走 `127.0.0.1` 的共享桶，那个桶的余量已经很紧。
+    """
+    ip = f"203.0.{random.randint(1, 254)}.{random.randint(2, 250)}"
+    h = {"X-Forwarded-For": ip}
+    phone = "13" + "".join(random.choice(string.digits) for _ in range(9))
+    b = body(
+        client.post(f"{API}/auth/sms/send", json={"phone": phone, "scene": "register"}, headers=h)
+    )
+    assert b["code"] == 0, b
+    b = body(
+        client.post(
+            f"{API}/auth/register",
+            headers=h,
+            json={
+                "phone": phone,
+                "code": b["data"]["dev_code"],
+                "password": TEST_PASSWORD,
+                "nickname": nickname,
+            },
+        )
+    )
+    assert b["code"] == 0, b
+    data = b["data"]
+    data["phone"] = phone  # 方便断言脱敏/明文
+    return data
 
 
 @pytest.fixture(scope="module")

@@ -137,6 +137,25 @@ export type AssignRolesIn = {
   expires_at?: string | null;
 };
 
+/**
+ * 改用户状态。**只接受 `active` / `disabled`。**
+ *
+ * `locked`（系统按登录失败次数自动写）与 `deleted`（注销流程）**刻意不开管理员入口** ——
+ * 后端会 `40001` 并说明归谁管。前端也**不要**把这两个值放进选择器。
+ */
+export type UserStatusUpdateIn = {
+  status: "active" | "disabled";
+  reason?: string | null;
+};
+
+export type UserStatusOut = {
+  user_id: Id;
+  status: string;
+  previous_status: string;
+  reason: string | null;
+  message: string;
+};
+
 export type RoleBrief = {
   id: Id;
   code: string;
@@ -654,8 +673,20 @@ export type ListImportsQuery = {
 /** `exams.type`。与后端 `ExamType` 字面量一一对应。 */
 export type ExamType = "real" | "mock" | "chapter_test" | "sprint" | "daily" | "custom";
 
-/** `exams.status`。注意 `archived` 是**状态**，与 `is_deleted`（归档位）不是一回事。 */
-export type ExamStatus = "draft" | "reviewing" | "published" | "off" | "archived";
+/**
+ * `exams.status`。
+ *
+ * ## ⚠️ 三态简化（2026-09-19，迁移 20260919-01）
+ *
+ * 生命周期是：`draft → published → off →（重发）→ published`，或直接 `is_deleted` 归档。
+ *
+ * `archived` **已删除** —— 它与 `is_deleted`（软删除 = 归档）**语义重复**，
+ * 且从未被任何接口写入过。之前前端把它渲染成筛选下拉里的「已停用」，
+ * 那是个**永远筛不出东西的选项**（与 `users.disabled` 同一类缺陷）。
+ *
+ * `reviewing`（送审）保留但**标预留**：审核流程未开，当前没有接口能写入。
+ */
+export type ExamStatus = "draft" | "reviewing" | "published" | "off";
 
 /** `paper_rules.strategy`。本批后端只实现了 `random` 的语义，其余是占位。 */
 export type RuleStrategy = "random" | "weak_first" | "coverage" | "history_similar";
@@ -975,6 +1006,17 @@ export type ExamRestoreOut = {
   status: ExamStatus;
   /** 本来就是未归档状态（走了幂等分支，没有产生任何写入） */
   already_active: boolean;
+  message: string;
+};
+
+/** 下线结果（`published → off`）。 */
+export type ExamUnpublishOut = {
+  exam_id: Id;
+  status: ExamStatus;
+  previous_status: ExamStatus;
+  /** **保留**的发布时间（历史事实）；重新发布时被覆盖 */
+  published_at: string | null;
+  question_count: number;
   message: string;
 };
 

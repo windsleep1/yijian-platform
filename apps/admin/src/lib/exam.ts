@@ -24,10 +24,12 @@ export function examTypeLabel(t: string): string {
 
 export const EXAM_STATUS_LABELS: Record<ExamStatus, string> = {
   draft: "草稿",
+  //: 预留：审核流程未开（docs/14 P1），当前无接口能写入该状态
   reviewing: "待审",
   published: "已发布",
   off: "已下线",
-  archived: "已停用",
+  // ⚠️ `archived` 已删（20260919-01）—— 与 is_deleted 语义重复且从未被写入。
+  // 之前它在筛选下拉里显示为「已停用」，是个永远筛不出东西的选项。
 };
 
 export function examStatusLabel(s: string): string {
@@ -45,8 +47,6 @@ export function examStatusVariant(s: ExamStatus): "default" | "secondary" | "suc
       return "secondary";
     case "off":
       return "outline";
-    case "archived":
-      return "destructive";
     default:
       return "outline";
   }

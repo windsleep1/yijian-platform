@@ -49,7 +49,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from .conftest import API, assign_roles, auth, body
+from .conftest import API, assign_roles, auth, body, fresh_user, sql_exec, sql_fetch, _dsn
 
 # 市政实务（教研演示账号的数据范围就是它）
 SZ_SUBJECT_ID = 2007
@@ -60,47 +60,6 @@ JJ_SUBJECT_ID = 1001
 
 
 # ================================================================ 基建
-
-
-def _dsn() -> str | None:
-    url = os.environ.get("DATABASE_URL")
-    return url.replace("postgresql+asyncpg://", "postgresql://") if url else None
-
-
-def sql_exec(statement: str, *args):
-    """直连库执行一条 SQL。没设 `DATABASE_URL` 时返回 None（调用方自行降级）。"""
-    dsn = _dsn()
-    if not dsn:
-        return None
-
-    import asyncpg
-
-    async def _run():
-        conn = await asyncpg.connect(dsn)
-        try:
-            return await conn.execute(statement, *args)
-        finally:
-            await conn.close()
-
-    return asyncio.run(_run())
-
-
-def sql_fetch(statement: str, *args):
-    dsn = _dsn()
-    if not dsn:
-        return None
-
-    import asyncpg
-
-    async def _run():
-        conn = await asyncpg.connect(dsn)
-        try:
-            rows = await conn.fetch(statement, *args)
-            return [dict(r) for r in rows]
-        finally:
-            await conn.close()
-
-    return asyncio.run(_run())
 
 
 @pytest.fixture
@@ -228,20 +187,6 @@ def new_rule(client, admin_h, *, subject_id: int, rules: list[dict], name: str |
         "subject_id": subject_id, "type": "mock",
         "duration_min": duration_min, "rules": rules,
     }, timeout=30))
-    assert b["code"] == 0, b
-    return b["data"]
-
-
-def fresh_user(client: httpx.Client, *, nickname: str = "组卷用例") -> dict:
-    """注册全新用户并把限流桶隔到自己的假 IP（同 Batch 5 的做法，避免挤爆全站配额）。"""
-    ip = f"203.0.{random.randint(1, 254)}.{random.randint(2, 250)}"
-    h = {"X-Forwarded-For": ip}
-    phone = "13" + "".join(random.choice(string.digits) for _ in range(9))
-    b = body(client.post(f"{API}/auth/sms/send", json={"phone": phone, "scene": "register"}, headers=h))
-    assert b["code"] == 0, b
-    b = body(client.post(f"{API}/auth/register", headers=h, json={
-        "phone": phone, "code": b["data"]["dev_code"], "password": "Passw0rd123", "nickname": nickname,
-    }))
     assert b["code"] == 0, b
     return b["data"]
 
@@ -2002,3 +1947,141 @@ def test_rule_preview_seed_is_reproducible(client: httpx.Client, admin_h) -> Non
     # 不带 seed → 允许不同（随机），但条数一致
     c = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=rules)["data"]
     assert c["total_got"] == a["total_got"], c
+
+
+# ================================================================ P. 下线（published → off）
+# 状态机补齐的第一件：在此之前"已发布的卷"是个死胡同 ——
+# 卷面冻结、不能改、也没有接口能退回去（`can_unpublish` 是空头承诺）。
+
+
+def unpublish(client, headers, exam_id: int) -> dict:
+    return body(client.post(f"{API}/admin/exams/{exam_id}/unpublish", headers=headers, timeout=60))
+
+
+def test_unpublish_roundtrip_and_published_at_semantics(
+    client: httpx.Client, admin_h, created
+) -> None:
+    """发布 → 下线 → 重发：状态往返正确，且 **`published_at` 语义不混乱**。
+
+    这是"为什么回 `off` 而不是 `draft`"的直接验证：
+    - 下线**保留** `published_at`（它是"对外发布过"的历史事实）；
+    - 重发**覆盖**它（重发是一次新的发布）；
+    - 而若回 `draft`，就分不清"没发过"和"发过又退回"了。
+    """
+    exam = make_exam_with_sections(client, admin_h, created, judge=2)
+    assert add_questions(client, admin_h, exam["id"],
+                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+
+    # ---- 发布 ----
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+    d1 = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert d1["status"] == "published" and d1["published_at"], d1
+    first_published_at = d1["published_at"]
+    assert d1["can_unpublish"] is True, "已发布时 can_unpublish 必须为 true（否则前端不会渲染按钮）"
+
+    # ---- 下线 ----
+    b = unpublish(client, admin_h, exam["id"])
+    assert b["code"] == 0, b
+    out = b["data"]
+    assert out["status"] == "off" and out["previous_status"] == "published", out
+    assert out["published_at"] == first_published_at, "下线应**保留**发布时间（历史事实）"
+
+    d2 = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert d2["status"] == "off", d2
+    assert d2["published_at"] == first_published_at, "下线不该清空 published_at"
+    assert d2["can_unpublish"] is False, "已下线时不该再显示下线按钮"
+    assert d2["can_compose"] is True, "off 态必须可编辑（can_compose 的原始设计意图）"
+    assert d2["can_publish"] is True, "off 态必须可重发"
+    # 卷面与题目原样保留
+    assert d2["question_count"] == 2, d2["question_count"]
+
+    # ---- 重发：published_at 被覆盖 ----
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+    d3 = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert d3["status"] == "published", d3
+    assert d3["published_at"] != first_published_at, "重发是一次新的发布，published_at 必须被覆盖"
+
+
+def test_unpublish_rejects_when_not_published(client: httpx.Client, admin_h, created) -> None:
+    """只有「已发布」能下线。草稿 / 已下线都 `40901`（**不幂等**，与 publish 对称）。"""
+    exam = make_exam_with_sections(client, admin_h, created, judge=2)
+
+    # 草稿：本来就对外不可见，无需下线
+    b = unpublish(client, admin_h, exam["id"])
+    assert b["code"] == 40901, b
+    assert "只有「已发布」" in b["message"] and "草稿" in b["message"], b["message"]
+
+    # 发布 → 下线 → **再下线**：不幂等
+    assert add_questions(client, admin_h, exam["id"],
+                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+    assert unpublish(client, admin_h, exam["id"])["code"] == 0
+    b = unpublish(client, admin_h, exam["id"])
+    assert b["code"] == 40901, "状态变更动作不幂等，重复执行应当报错（与 publish 对称）"
+    assert "已下线" in b["message"] or "只有" in b["message"], b["message"]
+    # 状态没被改坏
+    d = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+    assert d["status"] == "off", d
+
+
+def test_unpublish_keeps_locked_versions(client: httpx.Client, admin_h, created) -> None:
+    """下线**不动版本锁定**：卷面没变，锁仍成立；重发时才按当时版本重新锁。"""
+    exam = make_exam_with_sections(client, admin_h, created, judge=2)
+    qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2)
+    assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    def locked_map() -> dict:
+        d = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
+        return {q["question_id"]: q["locked_version"] for s in d["sections"] for q in s["questions"]}
+
+    before = locked_map()
+    assert all(v is not None for v in before.values()), before
+
+    assert unpublish(client, admin_h, exam["id"])["code"] == 0
+    assert locked_map() == before, "下线不该清掉锁定版本"
+
+
+def test_unpublish_permission_and_archived(client: httpx.Client, admin_h, created) -> None:
+    """权限 `exam:publish`；已归档（软删除）的卷 → `40401`。"""
+    exam = make_exam_with_sections(client, admin_h, created, judge=2)
+    assert add_questions(client, admin_h, exam["id"],
+                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+
+    # viewer 只有 exam:read → 40301（与「发布/归档」一致，都是写动作）
+    u = fresh_user(client, nickname="B7 下线权限")
+    assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
+    b = unpublish(client, auth(u["access_token"]), exam["id"])
+    assert b["code"] == 40301 and "exam:publish" in b["message"], b
+
+    # 归档后 → 40401（已有 delete 用例覆盖归档，这里只验证下线的这一侧）
+    assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
+    b = unpublish(client, admin_h, exam["id"])
+    assert b["code"] == 40401, b
+
+
+def test_unpublish_writes_change_log(client: httpx.Client, admin_h, created) -> None:
+    """下线要留痕（`content_change_logs` 的 before/after 都是 status）。"""
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能核对变更日志")
+
+    exam = make_exam_with_sections(client, admin_h, created, judge=2)
+    assert add_questions(client, admin_h, exam["id"],
+                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert publish(client, admin_h, exam["id"])["code"] == 0
+    assert unpublish(client, admin_h, exam["id"])["code"] == 0
+
+    rows = sql_fetch(
+        "SELECT action, diff, change_log FROM content_change_logs "
+        "WHERE entity_type = 'exam' AND entity_id = $1 ORDER BY created_at DESC LIMIT 1",
+        int(exam["id"]),
+    )
+    assert rows, "下线应当写一条 content_change_logs"
+    r = rows[0]
+    import json as _json_mod
+
+    diff = _json_mod.loads(r["diff"]) if isinstance(r["diff"], str) else r["diff"]
+    assert diff["before"]["status"] == "published", diff
+    assert diff["after"]["status"] == "off", diff
+    assert "下线" in (r["change_log"] or ""), r["change_log"]

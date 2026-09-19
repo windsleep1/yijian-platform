@@ -58,6 +58,7 @@ from app.schemas.admin_exam import (
     ExamSectionsReplaceIn,
     ExamSectionsReplaceOut,
     ExamSoftDeleteOut,
+    ExamUnpublishOut,
     ExamUpdateIn,
     ExamValidateOut,
     PaperRuleCreateIn,
@@ -494,6 +495,46 @@ async def delete_exam(
         reason=reason, ip=client_ip(request),
     )
     return ok(out.model_dump(), message="试卷已归档")
+
+
+@router.post(
+    "/admin/exams/{exam_id}/unpublish",
+    response_model=Envelope[ExamUnpublishOut],
+    summary="下线试卷（published → off）",
+    description=(
+        "需要权限 `exam:publish`。**发布之后唯一的结构性出路** ——\n"
+        "在此之前「已发布的卷」是个死胡同：卷面冻结、不能改、也没有接口能退回去。\n\n"
+        "## 为什么回 `off` 而不回 `draft`\n"
+        "1. `off` 就是为这个语义声明的（`can_compose` / `can_publish` 都显式把它算作可编辑、可发布）；\n"
+        "2. **回 `draft` 会让 `published_at` 语义混乱** —— 它是「对外发布过」的历史事实。\n"
+        "   从未发布的卷不该带着发布时间，而发布过又下线的卷**带着它是对的**；\n"
+        "   回 `draft` 就分不清「没发过」和「发过又退回」了。\n\n"
+        "## 保留什么、重发时怎么变\n"
+        "- `published_at` **保留**（历史事实）。**重新发布时由 `publish` 覆盖为当时的时间** ——"
+        "这就是「重发是一次新的发布」。\n"
+        "- `locked_version` **保留**（卷面没变，锁仍成立）；重发时 `publish` 会按"
+        "**当时的题目版本**重新锁定。若在 `off` 态改了卷面，组卷/改分段本身会清掉锁。\n\n"
+        "## 幂等：**不幂等**\n"
+        "已经是 `off` 时返回 `40901`，与「已发布不能再发布」**对称**。\n"
+        "判据（硬约定 C）：**状态变更动作**（publish / unpublish / 归档 / 禁用）重复执行说明"
+        "调用方状态认知有问题，报错比静默吞掉好；\n"
+        "而**回退动作**（`restore`）的判据是「目标状态已达成」，那个才该幂等。\n\n"
+        "> ⚠️ **TODO（C 端上线时必须补）**：届时若有 `exam_attempts.status='doing'` 指向本卷，\n"
+        "> 下线会让考生答到一半卷子消失 —— 必须拒绝并说明「有 N 人在考」。\n"
+        "> 现在不写：`exam_attempts` 还没有任何写入点，加了就是永不触发的死分支。"
+    ),
+    dependencies=[Depends(require_permission("exam:publish"))],
+)
+async def unpublish_exam(
+    exam_id: int,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    out = await exam_service.unpublish_exam(
+        db, actor=me, actor_name=me.display_name, exam_id=exam_id, ip=client_ip(request)
+    )
+    return ok(out.model_dump(), message=out.message)
 
 
 @router.post(

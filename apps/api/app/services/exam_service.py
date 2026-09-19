@@ -88,6 +88,7 @@ from app.schemas.admin_exam import (
     ExamSectionDetail,
     ExamSectionsReplaceIn,
     ExamSectionsReplaceOut,
+    ExamUnpublishOut,
     ExamSectionIn,
     ExamSectionOut,
     ExamSoftDeleteOut,
@@ -135,10 +136,11 @@ TYPE_LABELS: dict[str, str] = {
 
 STATUS_LABELS: dict[str, str] = {
     "draft": "草稿",
+    #: 预留：审核流程未开（见 docs/14 §P1），当前无接口能写入该状态
     "reviewing": "审核中",
     "published": "已发布",
     "off": "已下线",
-    "archived": "已归档",
+    # ⚠️ `archived` 已于 20260919-01 移除（与 is_deleted 语义重复且从未被写入）
 }
 
 #: 加权采样里"从未用过"的题拿到的权重倍数。
@@ -857,7 +859,16 @@ async def get_exam_detail(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer
         can_edit=not deleted
         and not (row["status"] == "published" and not rc.get("allow_edit_after_publish")),
         can_compose=not deleted and row["status"] in ("draft", "reviewing", "off"),
-        can_publish=not deleted and row["status"] in ("draft", "reviewing"),
+        # ⚠️ **`off` 必须能发布**（2026-09-19 修）。
+        # 原先是 `("draft", "reviewing")`，把 `off` 排除在外 ——
+        # 但 `publish_exam` 本身并**不**拒绝 `off`（它只拦 published），
+        # 且线下线（unpublish）的整个意义就是"下线 → 改 → 重新发布"（用户明确要求重发路径）。
+        # 于是出现**标志位与状态机自相矛盾**：接口能重发，但 `can_publish=false`
+        # 会让前端**不渲染「发布」按钮** → 用户根本回不到已发布态。
+        #
+        # 这类"标志位漏了一个状态"的 bug 很隐蔽：后端不报错、接口单测也过，
+        # 只有**把标志位也纳入断言**（像下面这条用例）才会暴露。
+        can_publish=not deleted and row["status"] in ("draft", "reviewing", "off"),
         can_unpublish=not deleted and row["status"] == "published",
         can_delete=not deleted,
     )
@@ -1753,8 +1764,10 @@ async def publish_exam(
 
     if row["status"] == "published":
         raise errors.conflict("试卷已经是发布状态，无需重复发布。", 40901)
-    if row["status"] in ("archived",):
-        raise errors.conflict("已归档的试卷不能发布。", 40901)
+    # 这里原有一句 `if row["status"] in ("archived",): 已归档的试卷不能发布` ——
+    # 已随 `archived` 状态一起删除（20260919-01）。它本来就是**死分支**：
+    # `archived` 从来没有写入点；而真正的"归档"（软删除）在上面
+    # `if row["is_deleted"]: 404` 那一句就已经拦住了。
 
     # ★ 强制走校验：不通过不允许发布
     check = await validate_exam(db, exam_id=exam_id, viewer=actor)
@@ -1811,6 +1824,90 @@ async def publish_exam(
         message=(
             f"已发布，{len(locks)} 道题都已锁定当前版本。"
             "之后即使题目被修改，本卷仍按锁定版本展示与判分。"
+        ),
+    )
+
+
+# ============================================================ 下线（published → off）
+
+
+async def unpublish_exam(
+    db: AsyncSession,
+    *,
+    actor: Actor,
+    actor_name: str,
+    exam_id: int,
+    ip: str | None = None,
+) -> ExamUnpublishOut:
+    """**下线**：`published → off`。发布之后唯一的结构性出路。
+
+    ## 为什么回 `off`，不回 `draft`
+
+    1. **`off` 就是为这件事声明的**：`can_compose` / `can_publish` 都显式把 `off`
+       算作"可编辑、可发布"（`draft` 也在，但 `off` 是专门表示"下线"的那个）。
+    2. **回 `draft` 会让 `published_at` 语义混乱** —— `published_at` 是"第一次/最近一次
+       对外发布的时间"，是一个**历史事实**。一份从未发布的卷不该带着发布时间，
+       而一份发布过又下线的卷**带着它是对的**。回 `draft` 就分不清
+       "没发过"和"发过又退回"了。
+
+    ## `published_at` 与版本锁定怎么处理
+
+    - **`published_at` 保留**（历史事实，不清空）—— 正因如此重发时必须**覆盖**它：
+      `publish_exam` 里那句 `published_at = now()` 天然做到了，无需额外改动。
+    - **`locked_version` 保留**：卷面没变，锁还成立；重发时 `publish_exam`
+      会按**当时的版本**重新锁定一遍，这正是"重发是一次新的发布"该有的行为。
+      而若在 `off` 态改了卷面（`can_compose` 允许），组卷/改分段本身会清掉锁，
+      两条路径都不留悬空锁。
+
+    ## 幂等：**不幂等**（已经是 `off` → `40901`）
+
+    与 `publish_exam`（已发布 → 40901）**对称**。判据是硬约定 C 里的语义分界：
+    - **状态变更动作**（publish / unpublish / archive / 禁用）→ 重复执行说明调用方
+      状态认知有问题，**报错比静默吞掉好**；
+    - **回退动作**（restore：把删除态复原）→ "目标状态已达成"就算成功，**幂等**。
+
+    ## TODO（C 端上线时必须补一条关联校验，硬约定 C）
+
+    届时若有**进行中的作答**（`exam_attempts.status = 'doing'`）指向本卷，
+    下线会让考生答到一半卷子消失。应拒绝并提示"有 N 人在考，等他们交卷或强制清场"。
+    **现在不写**：`exam_attempts` 当前 0 写入点，加了就是永不触发的死分支 ——
+    与刚被删掉的 `exams.archived` 是同一类问题。已记入 `docs/14` P1 预留清单。
+    """
+    row = await _load_exam_row(db, exam_id, for_update=True)
+    if row["is_deleted"]:
+        raise errors.not_found("试卷不存在", 40401)
+    _ensure_subject_visible(actor, int(row["subject_id"]), "试卷所属科目")
+
+    if row["status"] != "published":
+        raise errors.conflict(
+            f"只有「已发布」的试卷才能下线（当前是「{STATUS_LABELS.get(row['status'], row['status'])}」）。"
+            "草稿本来就不对外可见，无需下线。",
+            40901,
+        )
+
+    await db.execute(
+        text("UPDATE exams SET status = 'off', updated_at = now() WHERE id = :eid"),
+        {"eid": exam_id},
+    )
+    await _write_change_log(
+        db, entity_type="exam", entity_id=exam_id, action="update",
+        actor_id=actor.id, ip=ip,
+        change_log="下线试卷（published → off）",
+        before={"status": "published"}, after={"status": "off"},
+    )
+    await db.commit()
+
+    fresh = await _load_exam_row(db, exam_id)
+    return ExamUnpublishOut(
+        exam_id=exam_id,
+        status="off",
+        previous_status="published",
+        published_at=fresh.get("published_at"),
+        question_count=int(fresh["question_count"] or 0),
+        message=(
+            "已下线：试卷不再对外可见。"
+            "卷面与题目都原样保留，可以继续编辑或调整后再重新发布 ——"
+            "重新发布时会按**当时的**题目版本重新锁定。"
         ),
     )
 
@@ -2281,6 +2378,7 @@ __all__ = [
     "replace_exam_sections",
     "restore_exam",
     "soft_delete_exam",
+    "unpublish_exam",
     "update_exam",
     "update_paper_rule",
     "validate_exam",

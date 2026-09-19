@@ -18,6 +18,7 @@ import type {
   ExamSectionsReplaceIn,
   ExamSectionsReplaceOut,
   ExamSoftDeleteOut,
+  ExamUnpublishOut,
   ExamUpdateIn,
   ExamValidateOut,
   ListExamsQuery,
@@ -281,5 +282,22 @@ export function useDeletePaperRule() {
       ),
     // 审计日志变了，这个可以失效（它不在当前视图里，不会冲掉行级反馈）
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["audit-logs"] }),
+  });
+}
+
+/**
+ * **下线**试卷（`published → off`）。发布之后唯一的结构性出路。
+ *
+ * 与 `useArchiveExam` 同理：这是**行级**操作但作用在**详情页**上，
+ * 所以不做就地反馈，直接失效详情与列表（详情页会整块更新状态徽章与按钮组）。
+ *
+ * **不幂等**：已经是 `off` 时后端返回 `40901`（与「已发布不能再发布」对称）。
+ */
+export function useUnpublishExam() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ examId }: { examId: string }) =>
+      request<ExamUnpublishOut>(`/admin/exams/${examId}/unpublish`, { method: "POST" }),
+    onSuccess: (_res, vars) => invalidateAfterWrite(qc, vars.examId, { list: true }),
   });
 }
