@@ -110,6 +110,8 @@ export const MODULE_ENTRIES = [
   // Batch 7：试卷管理紧挨着题库（两侧都是"内容"模块），但排在题库之后 ——
   // 顺序即优先级，教研登录后的落地页仍然应当是题库列表。
   { perm: P.examRead, href: "/exams", label: "试卷管理" },
+  // 组卷规则是"试卷的模板"，紧跟试卷管理（入口权限同一个 `exam:read`）
+  { perm: P.examRead, href: "/paper-rules", label: "组卷规则" },
   // Batch 6：导入向导。入口权限仍是 `question:read`（列表/详情是只读接口），
   // 放在 /questions 之后 —— 顺序即优先级，扫码一样的落地页应当还是题库列表。
   { perm: P.questionRead, href: "/imports", label: "题库导入" },

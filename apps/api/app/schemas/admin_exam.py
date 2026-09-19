@@ -304,6 +304,86 @@ class ExamSectionsReplaceIn(BaseModel):
         return self
 
 
+class PaperRulePreviewIn(BaseModel):
+    """**试算**一组抽题规则能抽到多少题（dry-run，不写库）。
+
+    存在的理由：规则编辑页要在**保存之前**告诉用户"这条规则现在能抽到什么程度"。
+    没有它，用户只能"保存 → 建卷 → 组卷 → 发现题库不足 → 回来改"，
+    一轮下来要好几次往返，而且每次都会真实落库。
+
+    ⚠️ 判据必须和真正组卷**完全一致**（共用 `_draw_rule`）——
+    否则试算说"能抽满"、真组卷却报缺口，用户会彻底不信这个预览。
+    """
+
+    subject_id: int = Field(..., description="在哪个科目里抽题")
+    rules: list[RuleItem] = Field(..., min_length=1, max_length=30)
+    strategy: RuleStrategy = "random"
+    seed: int | None = Field(
+        None, ge=0, le=2**31 - 1,
+        description="传了就固定抽样结果（同一 seed + 同一题库 → 同一结果，方便对比调参）",
+    )
+    include_sample: bool = Field(True, description="是否回传抽到的题（前端展示抽题明细用）")
+    sample_limit: int = Field(12, ge=0, le=50, description="最多回传几道样例题")
+
+    @model_validator(mode="after")
+    def _check_rules(self) -> "PaperRulePreviewIn":
+        # 与建 / 改规则**同一条约束**：case_sub 不能单独抽题。
+        # 试算要能提前拦住它，否则用户在预览页看到"能抽满"，
+        # 保存时才被拒 —— 又白跑一趟，而这正是预览要消灭的往返。
+        _ensure_composable(self.rules)
+        return self
+
+    # 刻意**不**约束规则之间唯一：两条同题型的规则带不同筛选条件是很正常的用法
+    # （"单选（基础）20 道" + "单选（拔高）10 道"），去重反而挡住了合理配置。
+    # 题数 >0、题型合法这些由 `RuleItem` 自身约束。
+
+
+class PreviewQuestionItem(BaseModel):
+    """试算抽到的一道题（**不落库**，仅供预览）。"""
+
+    question_id: BigIntStr
+    question_type: QType
+    stem_preview: str = ""
+    difficulty: int | None = None
+    chapter_id: BigIntStrOpt = None
+    score: float
+    #: 这条题来自第几条规则（从 0 起）
+    rule_index: int
+    rule_label: str
+
+
+class RulePreviewItem(BaseModel):
+    """单条规则的试算结果。"""
+
+    rule_index: int
+    rule_label: str
+    question_type: QType
+    need: int
+    got: int
+    missing: int
+    score: float
+    #: 放宽阶梯每一档的候选数。前端可据此解释**为什么抽不到**
+    #: （例如"限定题型+难度+知识点时只有 3 道，放宽到只限题型也只有 12 道"）
+    stage_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class PaperRulePreviewOut(BaseModel):
+    ok: bool = Field(..., description="所有规则都凑够了才是 true")
+    subject_id: BigIntStr
+    total_need: int
+    total_got: int
+    total_missing: int
+    #: 按**实际抽到**的题算
+    total_score: float
+    #: 按**理论抽满**算（题库充足时的满分），用来对比"差了多少分"
+    planned_score: float
+    items: list[RulePreviewItem] = Field(default_factory=list)
+    shortfalls: list[Shortfall] = Field(default_factory=list)
+    sample: list[PreviewQuestionItem] = Field(default_factory=list)
+    duration_ms: int = 0
+    message: str
+
+
 class ExamSectionsReplaceOut(BaseModel):
     exam_id: BigIntStr
     #: 重建前**卷面**有多少道题（只统计卷面行，题目本身不受影响）
@@ -598,8 +678,12 @@ __all__ = [
     "PaperRuleCreateIn",
     "PaperRuleDeleteOut",
     "PaperRuleOut",
+    "PaperRulePreviewIn",
+    "PaperRulePreviewOut",
     "PaperRuleUpdateIn",
+    "PreviewQuestionItem",
     "RuleItem",
+    "RulePreviewItem",
     "RuleStatus",
     "RuleStrategy",
     "Shortfall",

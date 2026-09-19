@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, ClipboardList, ScrollText, ShieldCheck, Upload, Users, type LucideIcon } from "lucide-react";
+import { BookOpen, ClipboardList, ListChecks, ScrollText, ShieldCheck, Upload, Users, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 const ICONS: Record<string, LucideIcon> = {
   "/questions": BookOpen,
   "/exams": ClipboardList,
+  "/paper-rules": ListChecks,
   "/imports": Upload,
   "/users": Users,
   "/audit-logs": ScrollText,

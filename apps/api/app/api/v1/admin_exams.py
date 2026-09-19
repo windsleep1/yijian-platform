@@ -2,6 +2,7 @@
 
     GET    /admin/paper-rules              组卷规则列表          —— exam:read
     POST   /admin/paper-rules              新建组卷规则          —— exam:create
+    POST   /admin/paper-rules/preview      试算规则（dry-run）    —— exam:read
     PUT    /admin/paper-rules/{id}         编辑组卷规则          —— exam:create
     DELETE /admin/paper-rules/{id}         删除组卷规则（硬删）   —— exam:create
     GET    /admin/exams                    试卷列表              —— exam:read
@@ -62,6 +63,8 @@ from app.schemas.admin_exam import (
     PaperRuleCreateIn,
     PaperRuleDeleteOut,
     PaperRuleOut,
+    PaperRulePreviewIn,
+    PaperRulePreviewOut,
     PaperRuleUpdateIn,
 )
 from app.services import exam_service
@@ -132,6 +135,38 @@ async def create_paper_rule(
         db, actor=me, actor_name=me.display_name, payload=payload, ip=client_ip(request)
     )
     return ok(out.model_dump(), message="组卷规则已创建")
+
+
+@router.post(
+    "/admin/paper-rules/preview",
+    response_model=Envelope[PaperRulePreviewOut],
+    summary="试算组卷规则（dry-run，不写库）",
+    description=(
+        "需要权限 `exam:read`。**纯读接口，一行都不写。**\n\n"
+        "规则编辑页在**保存之前**用它回答两个问题：\n"
+        "1. 这条规则现在能抽到多少题（`items[].need/got/missing`）；\n"
+        "2. 题库够不够，不够的话**缺在哪一条规则上**（`shortfalls` + `message`）。\n\n"
+        "没有它，用户只能「保存 → 建卷 → 组卷 → 发现抽不满 → 回来改」，\n"
+        "一轮好几次往返，而且每次都会真实落库。\n\n"
+        "- **判据与真正组卷完全同源**（共用 `_draw_rule` 与 `build_shortfall`）：\n"
+        "  试算说能抽满而真组卷报缺口，是这类预览最致命的失败，用户会彻底不信它。\n"
+        "- `stage_counts` 给出**放宽阶梯每一档的候选数** —— 只说「缺 73 道」用户不知道该\n"
+        "  往哪儿使劲；给出「限定题型+难度+知识点时只有 3 道，放宽到只限题型也只有 12 道」，\n"
+        "  他立刻知道该补题库还是松条件。\n"
+        "- `sample` 是抽到的前 N 道题（**不落库**），前端用来展示抽题明细。\n"
+        "- 传 `seed` 可固定抽样结果（同一 seed + 同一题库 → 同一结果），方便对比调参。\n\n"
+        "> 数据范围照常收口：本接口回传题目明细，不校验就等于开了个绕过数据范围的读题口子。"
+    ),
+    # 只读试算，所以用 `exam:read`（与「卷面校验」同一个取舍）
+    dependencies=[Depends(require_permission("exam:read"))],
+)
+async def preview_paper_rule(
+    payload: PaperRulePreviewIn,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    out = await exam_service.preview_paper_rule(db, viewer=me, payload=payload)
+    return ok(out.model_dump(), message=out.message)
 
 
 @router.put(

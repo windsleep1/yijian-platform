@@ -76,6 +76,17 @@ type RunArgs<T> = {
   retryable?: boolean;
   /** 失败时行内文案前缀 */
   errorTitle?: string;
+  /**
+   * `true` = **这一行留在原地**，只是状态变了（启用/停用、发布下线这类开关式操作）。
+   *
+   * 默认 `false`：标记完了就延时移除（归档/恢复/删除这类"这一行该走了"的操作）。
+   *
+   * 为什么必须有这个开关：行级异步操作其实有**两种结局** ——
+   * "这条记录从当前视图消失"和"这条记录还在、但换了状态"。
+   * 早期只有前者，遇到"停用一条规则"就会**把还在列表里的行错误地移除**，
+   * 用户以为被删了。
+   */
+  keepRow?: boolean;
 };
 
 export type UseRowActionFeedbackOptions = {
@@ -131,6 +142,7 @@ export function useRowActionFeedback(opts: UseRowActionFeedbackOptions = {}) {
         successToast,
         retryable = false,
         errorTitle,
+        keepRow = false,
       } = args;
 
       clearTimer(id);
@@ -170,18 +182,35 @@ export function useRowActionFeedback(opts: UseRowActionFeedbackOptions = {}) {
         });
 
         // ---- 延时移除：先给正反馈，再让它走 ----
-        timers.current.set(
-          id,
-          setTimeout(() => {
-            timers.current.delete(id);
-            setDismissed((prev) => new Set(prev).add(id));
-            setFeedback((prev) => {
-              const next = { ...prev };
-              delete next[id];
-              return next;
-            });
-          }, removeDelayMs),
-        );
+        // `keepRow` 时**跳过**这一步：行还在（只是状态变了），移除它是错的。
+        if (!keepRow) {
+          timers.current.set(
+            id,
+            setTimeout(() => {
+              timers.current.delete(id);
+              setDismissed((prev) => new Set(prev).add(id));
+              setFeedback((prev) => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+              });
+            }, removeDelayMs),
+          );
+        } else {
+          // 留在原地的那些，2 秒后把行内标记收掉（"已停用"不该一直挂着），
+          // 但**不隐藏行**。
+          timers.current.set(
+            id,
+            setTimeout(() => {
+              timers.current.delete(id);
+              setFeedback((prev) => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+              });
+            }, 2000),
+          );
+        }
 
         return { ok: true, result };
       } catch (err) {

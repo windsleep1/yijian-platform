@@ -24,6 +24,8 @@ import type {
   ListPaperRulesQuery,
   Page,
   PaperRuleOut,
+  PaperRulePreviewIn,
+  PaperRulePreviewOut,
 } from "@/lib/types";
 
 /**
@@ -148,14 +150,24 @@ export function useRestoreExam() {
 
 // ---------------------------------------------------------------- 组卷 / 校验 / 发布
 
-export function useComposeExam(id: string) {
+/**
+ * 自动组卷。**id 从变量里传**，不在 hook 创建时绑定。
+ *
+ * 理由：「新建试卷 → 创建 → 立刻组卷」这条链路里，**exam id 是创建之后才有的**，
+ * 绑在 hook 上根本没法用（只能先建、再渲染一个拿得到 id 的组件、再组卷，
+ * 无谓地多一层）。列表/详情的其它写操作 id 是已知的，所以那几处保持绑定式。
+ */
+export function useComposeExam() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: ExamComposeIn) =>
-      request<ExamComposeOut>(`/admin/exams/${id}/auto-compose`, { method: "POST", body: payload }),
+    mutationFn: ({ examId, payload }: { examId: string; payload: ExamComposeIn }) =>
+      request<ExamComposeOut>(`/admin/exams/${examId}/auto-compose`, {
+        method: "POST",
+        body: payload,
+      }),
     // 组卷改变的是整个卷面（题数/总分/分段），不是"某一行"，
     // 所以要正常失效列表与详情 —— 这里没有就地反馈的诉求。
-    onSuccess: () => invalidateAfterWrite(qc, id, { list: true }),
+    onSuccess: (_res, vars) => invalidateAfterWrite(qc, vars.examId, { list: true }),
   });
 }
 
@@ -200,7 +212,7 @@ export function useRemoveExamQuestion(id: string) {
   });
 }
 
-// ---------------------------------------------------------------- 组卷规则（2b 会用，先就位）
+// ---------------------------------------------------------------- 组卷规则
 
 export function useCreatePaperRule() {
   const qc = useQueryClient();
@@ -211,15 +223,54 @@ export function useCreatePaperRule() {
   });
 }
 
-export function useUpdatePaperRule(id: string) {
+/**
+ * **试算**一组规则（dry-run，纯读）。
+ *
+ * 做成 mutation 而不是 query：它由用户动作显式触发（改完规则看一眼），
+ * 结果要就地展示，不该被 React Query 的缓存策略左右 —— 与「卷面校验」同一个取舍。
+ *
+ * 判据与真组卷**完全同源**（后端共用 `_draw_rule`），所以试算说能抽满，
+ * 真组卷就一定抽得满。
+ */
+export function usePreviewPaperRule() {
+  return useMutation({
+    mutationFn: (payload: PaperRulePreviewIn) =>
+      request<PaperRulePreviewOut>("/admin/paper-rules/preview", {
+        method: "POST",
+        body: payload,
+      }),
+  });
+}
+
+/**
+ * 编辑规则。**id 从变量里传**（而不是 hook 创建时绑定）。
+ *
+ * 理由很具体：规则列表页要做**行级的"启用/停用"**（每行一个按钮），
+ * 若 id 绑在 hook 上，就没法在同一个组件里对任意行走这个 mutation ——
+ * 而"每行各调一次 hook"是违反 Hooks 规则的。
+ * 之前的写法是绕开 React Query 直接用 `request()`，那等于丢掉了缓存与统一错误处理。
+ */
+export function useUpdatePaperRule() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: unknown) =>
+    mutationFn: ({ id, payload }: { id: string; payload: unknown }) =>
       request<PaperRuleOut>(`/admin/paper-rules/${id}`, { method: "PUT", body: payload }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["paper-rules"] }),
   });
 }
 
+/**
+ * 删除规则（**硬删除**）。
+ *
+ * ⚠️ **刻意不失效 `["paper-rules"]` 列表** —— 与归档/恢复同一条理由（坑 43）：
+ * 这是**行级**操作，走"就地反馈"（标记「已删除」→ 3 秒后从视图移除）。
+ * 一旦在这里失效列表，表格会立刻重新拉取 —— 服务端已经没这条了，
+ * 于是**行在标记出现之前就消失了**，用户只看到"点了下按钮，东西没了"。
+ *
+ * 那"缓存不就脏了？"——不会：`dismissed` 集合只在当前视图生效，
+ * 用户一翻页/改筛选就 `reset()`，届时重新拉取，服务端本来就没有这条，行自然不会回来。
+ * 也就是说**失效与否对最终结果没影响，只影响用户能不能看到反馈**。
+ */
 export function useDeletePaperRule() {
   const qc = useQueryClient();
   return useMutation({
@@ -228,6 +279,7 @@ export function useDeletePaperRule() {
         `/admin/paper-rules/${id}`,
         { method: "DELETE" },
       ),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["paper-rules"] }),
+    // 审计日志变了，这个可以失效（它不在当前视图里，不会冲掉行级反馈）
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["audit-logs"] }),
   });
 }

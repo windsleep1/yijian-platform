@@ -1857,3 +1857,148 @@ def test_sections_endpoint_is_the_escape_hatch(client: httpx.Client, admin_h, cr
         "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 23, "replace": False,
     }))
     assert b["code"] == 0, b
+
+
+# ================================================================ O. 规则试算 dry-run（Pass 2b）
+# 规则编辑页要在**保存之前**回答"这条规则现在能抽到多少题 / 题库够不够"。
+# 最关键的一条：**试算与真组卷的判据必须同源** —— 否则用户会彻底不信这个预览。
+
+
+def preview_rule(client, headers, *, subject_id: int, rules: list[dict],
+                 seed: int | None = None, include_sample: bool = True) -> dict:
+    payload: dict = {"subject_id": subject_id, "rules": rules, "include_sample": include_sample}
+    if seed is not None:
+        payload["seed"] = seed
+    return body(client.post(f"{API}/admin/paper-rules/preview", headers=headers,
+                            json=payload, timeout=60))
+
+
+def test_rule_preview_matches_actual_compose(client: httpx.Client, admin_h, created) -> None:
+    """**判据同源**：试算说多少，真组卷就得是多少（含缺口）。
+
+    这是这个预览存在的全部意义。两份实现漂移的那天，预览就变成了误导 ——
+    所以断言不看"格式对不对"，而是**拿试算结果和真组卷的结果逐项对比**。
+    """
+    rules = [
+        {"type": "single", "count": 15, "score": 1},
+        {"type": "judge", "count": 10, "score": 1},
+    ]
+    pv = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=rules, seed=2024)
+    assert pv["code"] == 0, pv
+    d = pv["data"]
+    assert d["total_need"] == 25, d
+    assert d["ok"] is True and d["total_missing"] == 0, d
+    assert d["total_got"] == d["total_need"] == 25, d
+    assert d["total_score"] == d["planned_score"] == 25.0, d
+    assert d["sample"], "默认要回传抽题明细"
+    assert "试算通过" in d["message"], d["message"]
+    # 放宽阶梯的候选数要给出（否则用户不知道"为什么抽不到"）
+    assert d["items"][0]["stage_counts"], d["items"][0]
+
+    # ---- 真组卷：同样的 rules + 同样的 seed ----
+    exam = make_exam_with_sections(client, admin_h, created, single=15, judge=10)
+    comp = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": rules, "seed": 2024,
+    }))
+    assert comp["code"] == 0, comp
+    assert comp["data"]["question_count"] == d["total_got"], (
+        f"试算说 {d['total_got']} 道，真组卷写了 {comp['data']['question_count']} 道 —— 判据不同源！"
+    )
+    assert comp["data"]["total_score"] == d["total_score"], comp["data"]
+    assert comp["data"]["shortfalls"] == [], "试算说没缺口，组卷也该没缺口"
+
+
+def test_rule_preview_reports_shortfall_consistently(client: httpx.Client, admin_h, created) -> None:
+    """题库不足时：试算的 `need/got/missing` 与真组卷的 `shortfalls` **完全一致**。"""
+    # 要 200 道案例题 —— 库里远没有这么多，必然缺口
+    rules = [{"type": "case", "count": 200, "score": 2}]
+    pv = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=rules, seed=99)
+    d = pv["data"]
+    assert d["ok"] is False and d["total_missing"] > 0, d
+    assert "题库不足" in d["message"] and str(d["total_missing"]) in d["message"], d["message"]
+    assert "不会用其它题目顶替" in d["message"], "要把'不凑数'说清楚"
+    it = d["items"][0]
+    assert it["need"] == 200 and it["got"] == 0 and it["missing"] == 200, it
+    # 理论满分 vs 实际得分 —— 让用户看到"差了多少分"
+    assert d["planned_score"] == 400.0 and d["total_score"] == 0.0, d
+
+    exam = make_exam_with_sections(client, admin_h, created, single=1)
+    comp = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
+        "rules": rules, "seed": 99,
+    }))
+    assert comp["code"] == 0, comp
+    sf = comp["data"]["shortfalls"]
+    assert len(sf) == 1, sf
+    assert (sf[0]["need"], sf[0]["got"], sf[0]["missing"]) == (200, 0, 200), sf
+    assert comp["data"]["question_count"] == d["total_got"], "与实际写入的题数必须一致"
+    assert d["total_missing"] == sf[0]["missing"], "试算与实际缺口不一致"
+
+
+def test_rule_preview_writes_nothing(client: httpx.Client, admin_h) -> None:
+    """**纯读接口**：跑完试算，exams / exam_questions / paper_rules 一行都不该变。"""
+    if _dsn() is None:
+        pytest.skip("需要 DATABASE_URL 才能核对行数")
+
+    def counts() -> tuple[int, int, int]:
+        return (
+            int(sql_fetch("SELECT count(*) AS n FROM exams")[0]["n"]),
+            int(sql_fetch("SELECT count(*) AS n FROM exam_questions")[0]["n"]),
+            int(sql_fetch("SELECT count(*) AS n FROM paper_rules")[0]["n"]),
+        )
+
+    before = counts()
+    pv = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[
+        {"type": "single", "count": 5, "score": 1},
+        {"type": "case", "count": 100, "score": 2},
+    ], seed=5)
+    assert pv["code"] == 0, pv
+    assert counts() == before, f"试算不该写库：{before} -> {counts()}"
+
+
+def test_rule_preview_validation_and_permission(client: httpx.Client, admin_h) -> None:
+    """入参校验 + 权限 + 数据范围。"""
+    # 题数必须是正数
+    b = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 0}])
+    assert b["code"] == 40001, b
+    # rules 不能为空
+    b = body(client.post(f"{API}/admin/paper-rules/preview", headers=admin_h,
+                         json={"subject_id": JJ_SUBJECT_ID, "rules": []}))
+    assert b["code"] == 40001, b
+    # case_sub 不能单独抽（与建规则同一条约束）
+    b = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "case_sub", "count": 3}])
+    assert b["code"] == 40001 and "case_sub" in b["message"], b
+    # 科目不存在
+    b = preview_rule(client, admin_h, subject_id=999999999, rules=[{"type": "single", "count": 1}])
+    assert b["code"] in (40001, 40401), b
+
+    # 无考试权限的用户 → 40301
+    u = fresh_user(client, nickname="B7 试算权限")
+    uh = auth(u["access_token"])
+    b = preview_rule(client, uh, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 1}])
+    assert b["code"] == 40301 and "exam:read" in b["message"], b
+
+    # 数据范围：教研只挂 A 科目，去试算别科目 → 40301
+    r = fresh_user(client, nickname="B7 试算范围")
+    assign_roles(client, admin_h, r["user"]["id"], ["researcher"],
+                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    rh = auth(r["access_token"])
+    b = preview_rule(client, rh, subject_id=JZ_SUBJECT_ID, rules=[{"type": "single", "count": 1}])
+    assert b["code"] == 40301, "试算会回传题目明细，必须按数据范围收口"
+    # 自己科目内可以
+    b = preview_rule(client, rh, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 1}])
+    assert b["code"] == 0, b
+
+
+def test_rule_preview_seed_is_reproducible(client: httpx.Client, admin_h) -> None:
+    """同一 `seed` + 同一题库 → 同一结果（用户调参时要能对照）。"""
+    rules = [{"type": "single", "count": 8, "score": 1}]
+    a = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=rules, seed=777)["data"]
+    b = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=rules, seed=777)["data"]
+    ids_a = [x["question_id"] for x in a["sample"]]
+    ids_b = [x["question_id"] for x in b["sample"]]
+    assert ids_a == ids_b, "同一 seed 两次试算抽到的题必须一样"
+    assert ids_a, a
+
+    # 不带 seed → 允许不同（随机），但条数一致
+    c = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=rules)["data"]
+    assert c["total_got"] == a["total_got"], c

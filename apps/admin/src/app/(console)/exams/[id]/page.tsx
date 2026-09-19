@@ -117,6 +117,24 @@ export default function ExamDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  /**
+   * `#add` → 自动打开「加题」面板。
+   *
+   * 「手动选题」模式的落点：`/exams/new` 建完空卷后跳到 `#add`，
+   * 用户直接就进了挑题面板，省掉"再点一下加题"。
+   *
+   * ⚠️ 用 hash 而不是 `?add=1`：App Router 下 `useSearchParams()`
+   * 在客户端组件里需要 Suspense 边界，否则整页会退化成客户端渲染。
+   * hash 读 `window.location` 就行，没有这个约束。
+   * 打开后**立刻清掉 hash**，否则刷新会重复弹面板。
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.location.hash !== "#add") return;
+    setAddOpen(true);
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }, []);
+
   if (authLoading) {
     return (
       <div className="space-y-4">

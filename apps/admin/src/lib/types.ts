@@ -717,6 +717,57 @@ export type ListPaperRulesQuery = {
   type?: ExamType;
 };
 
+/** 规则试算（dry-run，不写库）。 */
+export type PaperRulePreviewIn = {
+  subject_id: Id;
+  rules: RuleItem[];
+  strategy?: RuleStrategy;
+  /** 传了就固定抽样结果（同一 seed + 同一题库 → 同一结果），方便对比调参 */
+  seed?: number | null;
+  include_sample?: boolean;
+  sample_limit?: number;
+};
+
+export type PreviewQuestionItem = {
+  question_id: Id;
+  question_type: QType;
+  stem_preview: string;
+  difficulty: number | null;
+  chapter_id: Id | null;
+  score: number;
+  rule_index: number;
+  rule_label: string;
+};
+
+export type RulePreviewItem = {
+  rule_index: number;
+  rule_label: string;
+  question_type: QType;
+  need: number;
+  got: number;
+  missing: number;
+  score: number;
+  /** 放宽阶梯每一档的候选数 —— 用来解释"为什么抽不到" */
+  stage_counts: Record<string, number>;
+};
+
+export type PaperRulePreviewOut = {
+  ok: boolean;
+  subject_id: Id;
+  total_need: number;
+  total_got: number;
+  total_missing: number;
+  /** 按实际抽到的题算 */
+  total_score: number;
+  /** 按理论抽满算（题库充足时的满分） */
+  planned_score: number;
+  items: RulePreviewItem[];
+  shortfalls: Shortfall[];
+  sample: PreviewQuestionItem[];
+  duration_ms: number;
+  message: string;
+};
+
 export type ExamSectionIn = {
   name: string;
   question_type: QType;

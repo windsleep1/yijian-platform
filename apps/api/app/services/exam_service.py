@@ -97,8 +97,12 @@ from app.schemas.admin_exam import (
     PaperRuleCreateIn,
     PaperRuleDeleteOut,
     PaperRuleOut,
+    PaperRulePreviewIn,
+    PaperRulePreviewOut,
     PaperRuleUpdateIn,
+    PreviewQuestionItem,
     RuleItem,
+    RulePreviewItem,
     Shortfall,
     SkippedQuestion,
 )
@@ -1120,6 +1124,47 @@ async def _resolve_rules(
     ]
 
 
+async def _draw_rule(
+    db: AsyncSession,
+    *,
+    subject_id: int,
+    rule: RuleItem,
+    rng: random.Random,
+    excluded: set[int],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """**单条规则**的抽题：沿放宽阶梯逐档找，够数就停。
+
+    返回 `(抽到的行, 每一档的候选数)`。
+
+    ## 为什么抽成一个函数
+
+    这个循环原本只存在于 `compose_exam` 里。Pass 2b 要加"保存规则前试算
+    这条规则能抽到多少题"（dry-run），那份逻辑**必须和真正组卷完全一致** ——
+    否则试算说"能抽满"、真组卷却报缺口，用户会彻底不信这个预览。
+
+    两份实现漂移是迟早的事（改一处漏一处），所以抽出来给两边共用。
+    **预览的 `need/got/missing` 与组卷的 `shortfalls` 因此天然同源。**
+
+    `excluded` 是**跨规则**的去重集合（同一道题不能进两次卷面），
+    所以调用方要自己维护并传进来。
+    """
+    step_counts: dict[str, int] = {}
+    picked_rows: list[dict[str, Any]] = []
+    for stage, _desc in relaxation_steps(rule):
+        rows = await _candidates(
+            db, subject_id=subject_id, rule=rule, stage=stage, excluded=list(excluded)
+        )
+        step_counts[stage] = len(rows)
+        if len(rows) >= rule.count:
+            return weighted_sample(rows, rule.count, rng, prefer_unused=rule.prefer_unused), step_counts
+        # 这一档不够：先记下它作为当前最好的候选，继续放宽
+        picked_rows = rows
+
+    # 放宽到底还是不够 —— **绝不静默凑数**，抽到多少就是多少
+    got = min(len(picked_rows), rule.count)
+    return weighted_sample(picked_rows, got, rng, prefer_unused=rule.prefer_unused), step_counts
+
+
 async def compose_exam(
     db: AsyncSession,
     *,
@@ -1180,28 +1225,12 @@ async def compose_exam(
         return None
 
     for idx, rule in enumerate(rules):
-        step_counts: dict[str, int] = {}
-        picked_rows: list[dict[str, Any]] = []
-        for stage, _desc in relaxation_steps(rule):
-            rows = await _candidates(
-                db, subject_id=subject_id, rule=rule, stage=stage, excluded=list(picked_ids)
-            )
-            step_counts[stage] = len(rows)
-            if len(rows) >= rule.count:
-                picked_rows = weighted_sample(
-                    rows, rule.count, rng, prefer_unused=rule.prefer_unused
-                )
-                break
-            # 这一档不够：先记下它作为当前最好的候选，继续放宽
-            picked_rows = rows
-        got = min(len(picked_rows), rule.count)
+        picked_rows, step_counts = await _draw_rule(
+            db, subject_id=subject_id, rule=rule, rng=rng, excluded=picked_ids
+        )
+        got = len(picked_rows)
         if got < rule.count:
-            picked_rows = weighted_sample(picked_rows, got, rng, prefer_unused=rule.prefer_unused)
             shortfalls.append(build_shortfall(rule, idx, got, step_counts))
-        else:
-            picked_rows = weighted_sample(
-                picked_rows, rule.count, rng, prefer_unused=rule.prefer_unused
-            )
 
         section_id: int | None = None
         if payload.apply_sections:
@@ -1353,6 +1382,145 @@ async def _refresh_exam_totals(db: AsyncSession, exam_id: int) -> None:
             "diff": round(float(row["diff"] or 0), 1), "subj": bool(row["subj"]),
             "eid": exam_id,
         },
+    )
+
+
+# ============================================================ 规则试算（dry-run，不写库）
+
+
+async def preview_paper_rule(
+    db: AsyncSession,
+    *,
+    viewer: ScopeViewer,
+    payload: PaperRulePreviewIn,
+) -> PaperRulePreviewOut:
+    """**试算**一组规则能抽到什么程度。**纯读，一行都不写。**
+
+    Pass 2b 的规则编辑页要在保存前给出"这条规则现在能抽到多少题"，
+    以及"题库不足"的预警。没有它，用户只能
+    **保存 → 建卷 → 组卷 → 发现抽不满 → 回来改**，一轮好几次往返且每次都真实落库。
+
+    ## 三条刻意的设计
+
+    1. **判据与组卷完全同源**：共用 `_draw_rule`。试算说"能抽满"而真组卷报缺口，
+       是这类预览最致命的失败 —— 用户会彻底不信它。所以宁可不做，也不另写一份。
+    2. **数据范围照常收口**：走 `_ensure_subject_visible`。试算会**回传题目明细**，
+       不校验就等于开了一个"绕过数据范围的读题口子"。
+    3. **回传 `stage_counts`（放宽阶梯每档的候选数）**：
+       只说"缺 73 道"用户不知道该往哪儿使劲；给出"限定题型+难度+知识点时只有 3 道，
+       放宽到只限题型也只有 12 道"，他立刻知道该补题库还是松条件。
+    """
+    subject_id = payload.subject_id
+    _ensure_subject_visible(viewer, subject_id, "试算科目")
+    # 与建规则同一道校验：科目必须存在且启用。
+    # 少了它，用一个不存在的 subject_id 试算会得到"缺口 200 道"这种**误导性结论** ——
+    # 用户以为自己规则写错了，其实是科目根本不存在（或已停用）。
+    await _assert_subject_usable(db, subject_id)
+
+    started = _now()
+    rng = random.Random(payload.seed) if payload.seed is not None else random.Random()
+
+    items: list[RulePreviewItem] = []
+    shortfalls: list[Shortfall] = []
+    picked_ids: set[int] = set()
+    #: 先攒 (规则下标, 规则, 候选行)，题干**最后一次性查**（见函数末尾的说明）
+    sampled: list[tuple[int, RuleItem, dict[str, Any]]] = []
+
+    for idx, rule in enumerate(payload.rules):
+        rows, step_counts = await _draw_rule(
+            db, subject_id=subject_id, rule=rule, rng=rng, excluded=picked_ids
+        )
+        got = len(rows)
+        for r in rows:
+            picked_ids.add(int(r["id"]))
+
+        # 与组卷共用同一个 shortfall 构造器 —— 文案、字段含义都保持一致
+        if got < rule.count:
+            shortfalls.append(build_shortfall(rule, idx, got, step_counts))
+
+        items.append(
+            RulePreviewItem(
+                rule_index=idx,
+                rule_label=rule.label,
+                question_type=rule.type,
+                need=rule.count,
+                got=got,
+                missing=max(0, rule.count - got),
+                score=rule.score,
+                stage_counts=step_counts,
+            )
+        )
+
+        if payload.include_sample:
+            for r in rows:
+                if len(sampled) >= payload.sample_limit:
+                    break
+                sampled.append((idx, rule, r))
+
+    # ---- 样例题干：一次性批量查 ----
+    # ⚠️ 刻意**不**把 `q.stem` 塞进 `_CANDIDATE_SQL`：组卷路径也要用那份 SQL，
+    # 而候选集可能有几百行，为了预览多搬几百个题干的正文（每条都近千字）不值得。
+    # 样例最多 50 条，单独查一次最省。
+    stems: dict[int, str] = {}
+    if sampled:
+        ids = [int(r["id"]) for _, _, r in sampled]
+        rows = (
+            await db.execute(
+                text("SELECT id, stem FROM questions WHERE id = ANY(CAST(:ids AS bigint[]))"),
+                {"ids": ids},
+            )
+        ).mappings().all()
+        stems = {int(r["id"]): (r["stem"] or "") for r in rows}
+
+    sample = [
+        PreviewQuestionItem(
+            question_id=r["id"],
+            question_type=r["type"],
+            stem_preview=_stem_preview(stems.get(int(r["id"]))),
+            difficulty=r.get("difficulty"),
+            chapter_id=r.get("chapter_id"),
+            score=rule.score,
+            rule_index=idx,
+            rule_label=rule.label,
+        )
+        for idx, rule, r in sampled
+    ]
+
+    total_need = sum(i.need for i in items)
+    total_got = sum(i.got for i in items)
+    total_missing = sum(i.missing for i in items)
+    total_score = sum(i.got * i.score for i in items)
+    planned_score = sum(i.need * i.score for i in items)
+    ok = total_missing == 0
+
+    elapsed = int((_now() - started).total_seconds() * 1000)
+    if ok:
+        message = (
+            f"试算通过：{len(items)} 条规则共需 {total_need} 道题，题库都能满足，"
+            f"预计 {total_got} 题 / {total_score:g} 分。"
+        )
+    else:
+        worst = max(items, key=lambda i: i.missing)
+        message = (
+            f"⚠️ 当前题库不足：共缺 {total_missing} 道题"
+            f"（缺口最大的是「{worst.rule_label}」，缺 {worst.missing} 道）。"
+            f"仍可保存这条规则，但用它组卷会出现同样的缺口 —— "
+            f"系统**不会用其它题目顶替**。建议先补题库，或放宽该规则的筛选条件。"
+        )
+
+    return PaperRulePreviewOut(
+        ok=ok,
+        subject_id=subject_id,
+        total_need=total_need,
+        total_got=total_got,
+        total_missing=total_missing,
+        total_score=round(total_score, 2),
+        planned_score=round(planned_score, 2),
+        items=items,
+        shortfalls=shortfalls,
+        sample=sample,
+        duration_ms=elapsed,
+        message=message,
     )
 
 
@@ -2107,6 +2275,7 @@ __all__ = [
     "list_exams",
     "list_paper_rules",
     "publish_exam",
+    "preview_paper_rule",
     "relaxation_steps",
     "remove_exam_question",
     "replace_exam_sections",
