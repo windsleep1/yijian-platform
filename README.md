@@ -343,46 +343,60 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 
 ## 七、门禁（CI 与本地检查）
 
-**三道检查，两个阶段。**
-
-| 检查 | 命令 | 本阶段 | 第二阶段 |
+| 检查 | 命令 | 现在 | 说明 |
 |---|---|---|---|
-| 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | 不变 |
-| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 不变 |
-| 后端静态检查 | `ruff check apps/api` | **上报**（`continue-on-error`） | 转成拦截 |
-| 前端 lint | `npm run lint` | 只跑本地，**不上 CI** | 上 CI + 转成拦截 |
+| 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | — |
+| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | — |
+| 后端静态检查 | `ruff check apps/api` | **拦截** | 2026-09-20 存量清零后转的 |
+| 前端 lint | `npm run lint` | 只跑本地（规则全 warn，退出码 0） | 第二步转拦截并上 CI |
 
 CI 配置：`.github/workflows/ci.yml` —— push `main` 与 PR 触发，两个 job（后端 / 前端）。
 
-本地复刻 CI 的后端那一条（起真 PG → 建表 → 迁移 → 种子 → 起 API → pytest）：
+#### 两道跑的是**同一条链路**
+
+| 步骤 | CI | 本地 `run-smoke.ps1` |
+|---|---|---|
+| 建表 + 迁移 | `psql -f db/schema.sql` + `db/migrations/*.sql` | 同 |
+| 种子（RBAC + 超管） | `python -m app.cli seed-rbac / seed-admin` | 同 |
+| **题库种子** | `python tools/local-verify/seed-questions.py` | **同一个脚本** |
+| 起 API | `serve_fake_redis.py` | 同 |
+| 跑用例 | `pytest tests` | 同 |
+
+> 「题库种子」这一步**两边调的是同一个脚本**，不是各写一套 ——
+> 修坑 51 时最容易犯的错就是 CI 与本地各写一套，那两套迟早漂，
+> 于是又回到"本地绿、CI 红"的口径分歧（正是坑 51 的形态）。
 
 ```bash
+# 本地复刻 CI 的后端那一条（从零库也能全绿）
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
-### 为什么前端 lint / ruff 先只「上报」不「拦截」
+### 「门禁整顿第一步」的完成标准
 
-本阶段（门禁整顿**第一步**）的目标是**让门禁能真跑起来并吐出清单**，**不修存量问题**。
-存量还在的时候把门禁设成拦截，结果只有一个：CI 恒红。**一个恒红的门禁等于没有门禁** ——
-人很快就不看了，跟现在没配置 lint 的效果一样。所以：
+**三条同时成立**才算完成：
 
-- 前端：`.eslintrc.cjs` 里 `asWarn()` 把 `eslint:recommended` +
-  `@typescript-eslint/recommended` + `react-hooks` 的**每条规则都降成 warn**，
-  `npm run lint` 退出码为 0 但会打印清单（当前 **14 条 / 10 个文件**）。
-- 后端：ruff 走 `continue-on-error`（当前 **19 条**）。
+1. 本地 `run-smoke.ps1` **从零库可复现全绿**
+2. `ruff check` 是**拦截式**
+3. CI 每次 push 都跑**"全新环境"路径**
 
-**第二步（独立批）**：先把存量清掉、再让两道门禁**同时**转成拦截，与 `ruff format` /
-`prettier` 全仓格式化**分开提交**（格式化的大 diff 会把业务改动淹掉）。
+> 2026-09-20 状态：**①②③ 全部满足**。
+> （第一步开头时只满足 ③ —— 见 `apps/admin/docs/B端联调坑.md` 坑 51。）
 
-### ⚠️ 一个已知的口径分歧（第一步发现，**留到下一批修**）
+### 剩下的第二步（独立批）
 
-`run-smoke.ps1` **不灌题库种子**（`data/seed/questions.sql`），
-而 `db/schema.sql` 也不含 `questions` / `knowledge_points`。
-所以在**真正全新的库**上它会 **32 条失败**；它在开发机上一直绿，只是因为那个库早先被手工灌过。
+- eslint **14 条存量**清理 → 把 `.eslintrc.cjs` 的 `asWarn()` 去掉（warn → error）→ 挂上 CI
+- `prettier` / `ruff format` **全仓格式化**（**单独一个 commit** —— 格式化的大 diff
+  会把业务改动淹掉，必须分开）
+- 覆盖率阈值：从**当前实际值往上 5~10%**（**不要拍脑袋定 80%**）
+- `git pre-commit` hook（可选）
 
-CI 已经补上了这一步（生成 0.29s + 灌库 5s，自包含可复现），
-所以这条路径**每次 push 都会被覆盖到** —— 洞不会再被藏住。
-详见 `apps/admin/docs/B端联调坑.md` 坑 51。
+### 一条贯穿始终的判据（硬约定 H）
+
+**验收脚本本身也要被验收：把 `node_modules` / 数据库 / 缓存全删掉，它还能不能绿？**
+
+`npm run lint` 曾经是假门禁（无配置 → 交互式提问卡死，跑得动只因从来没真跑过），
+`run-smoke.ps1` 曾经是假验收（不灌题库，靠开发机脏库才绿）。
+两者都是"给的是通过、而不是失败"，而且只在"环境恰好脏"时成立。
 
 ---
 

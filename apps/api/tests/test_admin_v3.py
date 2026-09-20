@@ -23,6 +23,7 @@ Batch 3 管理后台接口验收（需要 API 已启动 + 已跑 `python -m app.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from .conftest import (
     ADMIN_PHONE,
@@ -34,7 +35,6 @@ from .conftest import (
     body,
     fresh_user,
     register,
-    sql_exec,
     sql_fetch,
     _dsn,
 )

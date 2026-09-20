@@ -31,7 +31,6 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
-    Text,
     func,
     text,
 )

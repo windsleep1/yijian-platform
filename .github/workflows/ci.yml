@@ -1,29 +1,34 @@
-# CI 门禁 —— 门禁整顿**第一步**（2026-09-20，用户定）
+# CI 门禁 —— 门禁整顿（2026-09-20 起）
 #
-# ## 只跑三件事
+# ## 跑什么
 #
 #     tsc --noEmit     前端类型
 #     pytest           后端全量用例（真 PostgreSQL）
 #     ruff check       后端静态检查
 #
 # **刻意不上 eslint**（`npm run lint`）—— 它还没进 CI，等第二步把规则从 warn 提成
-# error 之后再挂上来。现在挂上去只会得到一个恒绿或恒红的装饰品。
+# error 之后再挂上来。现在挂上去只会得到一个恒绿的装饰品。
 #
-# ## 拦截式 vs 上报式（本步的关键取舍）
+# ## 拦截式 vs 上报式
 #
-# | 检查 | 本步行为 | 第二步 |
+# | 检查 | 现在 | 后续 |
 # |---|---|---|
-# | `tsc --noEmit` | **拦截**（非 0 即失败） | 不变 |
+# | `tsc --noEmit` | **拦截** | 不变 |
 # | `pytest` | **拦截** | 不变 |
-# | `ruff check` | **上报**（`continue-on-error`） | 转成拦截 |
+# | `ruff check` | **拦截**（2026-09-20 转的） | 不变 |
+# | `npm run lint` | 只在本地（规则全 warn，退出码 0） | 存量清完 → 上 CI + 转拦截 |
 #
-# 为什么 ruff 先只上报：本步「**不修问题、只让门禁能跑**」。当前 ruff 有 19 条存量
-# （10 未使用导入 / 8 歧义变量名 `l` / 1 未定义名），直接设成拦截会让 CI 恒红 ——
-# **一个恒红的门禁等于没有门禁**，人很快就不看了。所以先让它把清单报出来，
-# 第二步连同 `ruff format` 一起清完、再转成拦截。
+# ruff 曾经是 `continue-on-error`（只上报）：存量 19 条在身时设拦截会让 CI 恒红，
+# 而**恒红的门禁等于没有门禁** —— 人很快就不看了，跟"没配置"效果一样（硬约定 H）。
+# 2026-09-20 存量清零（10 条 `--fix` + 8 条 `E741` 手动改名 + 1 条 `F821` 补 import），
+# 于是同批把它转成拦截式。
 #
-# 这与前端 eslint 的处理**对称**：eslint 的规则全设 warn（退出码 0），也是上报式。
-# 第二步两件事一起做：eslint 的 `asWarn()` 去掉、ruff 的 `continue-on-error` 去掉。
+# ## 每一步都在复刻 `run-smoke.ps1` 的链路
+#
+# 起 PG → 建表 → 迁移 → 种子(RBAC/超管) → **题库种子** → 起 API → pytest。
+# 「题库种子」这一步**调的是 `tools/local-verify/seed-questions.py`** ——
+# 与 `run-smoke.ps1` 同一个脚本。**修坑 51 时最容易犯的错是 CI 与本地各写一套**，
+# 那两套迟早漂，于是又回到"本地绿、CI 红"的口径分歧。
 
 name: CI
 
@@ -87,9 +92,12 @@ jobs:
       - name: 安装依赖
         run: pip install -r apps/api/requirements.txt
 
-      # ---- 三件事之一：ruff（本步「上报式」，见文件头表格）----
-      - name: ruff check（本步只上报，第二步转拦截）
-        continue-on-error: true
+      # ---- 三件事之一：ruff（**拦截式**）----
+      # 2026-09-20 转拦截：存量 19 条已清零（10 条 --fix + 8 条 E741 手动改名 +
+      # 1 条 F821 补 import），`ruff check apps/api` 现在是 "All checks passed!" 退出码 0。
+      # 在此之前它是 `continue-on-error`（只上报）—— 因为存量在身时设拦截会让 CI 恒红，
+      # 而**恒红的门禁等于没有门禁**（硬约定 H 的同一逻辑）。
+      - name: ruff check（拦截式）
         run: ruff check apps/api
 
       # ---- 建表 + 迁移：与 run-smoke.ps1 的第 2/3/3.5 步等价 ----
@@ -112,9 +120,9 @@ jobs:
           python -m app.cli seed-rbac
           python -m app.cli seed-admin
 
-      # ---- 题库种子：**CI 与本地口径在这里分叉，是刻意暴露出来的** ----
+      # ---- 题库种子：生成 + 灌库 ----
       #
-      # ## 为什么必须有这一步（2026-09-20 实测发现）
+      # ## 为什么必须有这一步（2026-09-20 实测发现，坑 51）
       #
       # `db/schema.sql` 只灌 subjects / chapters / RBAC，**不含 questions 与
       # knowledge_points**。题库来自 `db/seed/gen_seed_questions.py` 生成的
@@ -126,26 +134,14 @@ jobs:
       #     不灌题库 → 32 failed, 91 passed, 4 skipped
       #     灌了题库 → 126 passed, 1 skipped
       #
-      # 生成器**完全自包含、离线、可复现**（`--seed 20260915` 固定，跑一次 **0.29s**），
-      # 产出的 `questions.sql` 自带 `ON CONFLICT` 幂等，灌库约 5s。
+      # ## ⚠️ 逻辑**只有一份**（这一点比上面那条更重要）
       #
-      # ## ⚠️ 已知的口径分歧（不藏，明确记在这里）
-      #
-      # `tools/local-verify/run-smoke.ps1` **没有这一步**。它在开发机上一直绿，是因为
-      # 那个库早先被手工灌过种子题 —— 换句话说，那个脚本在**干净机器上会红 32 条**。
-      # 两者口径不一致是真问题，但**本批（门禁整顿第一步）不改 run-smoke**：
-      # 用户把本批范围限定为「让门禁能跑、不上新风格」，改验收脚本属于下一批的事。
-      # 现在 CI 每次 push 都会覆盖「全新库」这条路径，这个洞**再也不会因为
-      # "开发机恰好有数据"而被藏住** —— 这本身就是门禁在起作用。
+      # 本步**不写内联命令**，而是调 `tools/local-verify/seed-questions.py` ——
+      # `run-smoke.ps1` 调的是同一个脚本。
+      # 修坑 51 时最容易犯的错就是"CI 与本地各写一套"，那两套迟早漂，
+      # 于是又回到"本地绿、CI 红"的口径分歧（正是坑 51 的形态）。
       - name: 题库种子（生成 + 灌库）
-        run: |
-          set -euo pipefail
-          python db/seed/gen_seed_questions.py --format sql --out data/seed
-          psql -h 127.0.0.1 -U yijian -d yijian -v ON_ERROR_STOP=1 -q -f data/seed/questions.sql
-          psql -h 127.0.0.1 -U yijian -d yijian -tAc \
-            "SELECT 'questions=' || count(*) FROM questions"
-          psql -h 127.0.0.1 -U yijian -d yijian -tAc \
-            "SELECT 'knowledge_points=' || count(*) FROM knowledge_points"
+        run: python tools/local-verify/seed-questions.py --pg-port 5432
 
       # ---- 起 API：真 PostgreSQL + fakeredis 顶替 Redis ----
       # 为什么用 nohup + 重定向：长生命周期子进程若继承本 step 的 stdout，

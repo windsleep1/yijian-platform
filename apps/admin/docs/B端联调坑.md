@@ -2184,11 +2184,26 @@ psql -f data/seed/questions.sql                                     # ON CONFLIC
 `questions.sql` 自带 `INSERT INTO knowledge_points` + `INSERT INTO questions`，
 灌完是 **6000 题 / 20156 选项 / 52 知识点**。
 
-**⚠️ 本批的遗留（明确不藏）**
+**✅ 已修（2026-09-20 当天，同一批收尾）**
 
-`run-smoke.ps1` **仍未补这一步** —— 用户把本批范围限定在"让门禁能跑、不上新风格"，
-改验收脚本属于下一批。但因为 CI 每次 push 都会覆盖"全新库"这条路径，
-**这个洞不会再因为"开发机恰好有数据"被藏住**（这本身就是门禁在起作用）。
+生成 + 灌库抽成了 **`tools/local-verify/seed-questions.py`**，
+`run-smoke.ps1` 与 CI **调的是同一个脚本**。
+
+> **为什么一定要抽成脚本，而不是在两处各写两行命令** —— 修这条坑时最容易犯的错
+> 就是"CI 与本地各写一套"，那两套迟早漂，于是又回到"本地绿、CI 红"的口径分歧，
+> **也就是这条坑本身**。所以实现只有一份。
+
+抽成脚本时另外做了两个决定：
+
+1. **刻意不做"库里已有 6000 题就跳过"的快捷判断** —— 那正是假绿的成因：
+   "环境恰好 dirty"时跳过 → 行为与干净环境不同（而且它只看 `questions`，
+   漏了 `knowledge_points` 为空的情况）。SQL 自带 `ON CONFLICT`，无条件重跑约 5s，
+   **"自包含可复现" 值这 5 秒**。
+2. **脚本自带自查**：灌完立刻断言 `questions >= 6000` 且 `knowledge_points > 0`，
+   不满足就非 0 退出 —— 别等到 pytest 才红 32 条。
+
+**验收方式（照硬约定 H 来的）**：把数据库整个 `DROP DATABASE yijian WITH (FORCE)` 掉，
+再跑 `run-smoke.ps1` —— 从零库仍然 `126 passed, 1 skipped`。
 
 **顺带记住**：`data/` 整体 gitignored，所以 CI 与裸机**必须自己生成种子**，
 不能假设库里已经有题。

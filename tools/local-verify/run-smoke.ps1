@@ -123,6 +123,28 @@ try {
     }
     Write-Host "[local-verify] 使用 Python: $pyExe"
 
+    # ---------- 4.2 题库种子（生成 + 灌库）----------
+    # ⚠️ 为什么必须有这一步（坑 51）：`db/schema.sql` 只灌 subjects / chapters / RBAC，
+    #    **不含 questions 与 knowledge_points**；题库由 `db/seed/gen_seed_questions.py` 产出，
+    #    而生成物落在 `data/`（**gitignored**）。没有这一步，在**真正全新的库**上会有
+    #    32 条用例失败（组卷 / 加题 / 知识点下拉无题可抽）—— 本脚本过去一直绿，
+    #    只是因为开发机的库早先被手工灌过种子题。那是**假绿**（硬约定 H）。
+    #
+    # ⚠️ 生成 + 灌库的**逻辑只有一份**：CI（.github/workflows/ci.yml）调的是同一个脚本。
+    #    两边各写一套的话迟早漂，就又回到"本地绿、CI 红"的口径分歧。
+    #
+    # ⚠️ 刻意**不做**"库里已有 6000 题就跳过"的快捷判断 —— 那正是假绿的成因
+    #    （"环境恰好脏"时跳过 → 行为与干净环境不同）。SQL 自带 ON CONFLICT，无条件重跑即可。
+    Write-Host "[local-verify] 灌题库种子（生成 + 灌库，幂等，约 5s）..."
+    Push-Location $here
+    try {
+        & $pyExe (Join-Path $here "seed-questions.py") --pg-port $Port --db $DbName --db-user $DbUser --psql $psql
+        $rcSeedQ = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($rcSeedQ -ne 0) { Fail "题库种子灌入失败（gen_seed_questions.py / psql）" }
+
     # ---------- 4.5 初始化超管（等价于 docker-entrypoint.sh 里的 seed-admin）----------
     # schema.sql 只灌 roles/permissions，不含任何用户；超管由 app.cli 创建。
     # 不跑这一步，tests/test_smoke.py::test_rbac_flow 会因「超管登录失败」被 skip，

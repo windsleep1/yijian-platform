@@ -1,19 +1,28 @@
 # 本地验证（不依赖 Docker）
 
 > **CI 跑的是同一套。** `.github/workflows/ci.yml` 的后端 job 逐步复刻了
-> `run-smoke.ps1` 的链路（起 PG → 建表 → 迁移 → 种子 → 起 API → pytest），
-> 额外多一步**题库种子**（原因见下）。
+> `run-smoke.ps1` 的链路：起 PG → 建表 → 迁移 → 种子(RBAC/超管) → **题库种子** →
+> 起 API → pytest。**每一步两边都是同一个东西，不是各写一套。**
 >
-> ⚠️ **与 CI 的一处口径分歧（2026-09-20 发现，下一批修）**
+> ### 题库种子：`seed-questions.py`（两边共用的唯一实现）
 >
-> 本目录的 `run-smoke.ps1` **不灌题库种子**（`data/seed/questions.sql`），
-> 而 `db/schema.sql` 本身也不含 `questions` / `knowledge_points`。
-> 因此它在**真正全新的库**上会 **32 条失败**（`test_admin_v7.py` 的组卷 / 加题 /
-> 知识点下拉无题可抽）；它在开发机上一直绿，只是因为**那个库早先被手工灌过种子题**。
+> `db/schema.sql` 只灌 subjects / chapters / RBAC，**不含 `questions` /
+> `knowledge_points`**；题库由 `db/seed/gen_seed_questions.py` 产出，落在 `data/`
+> （**gitignored**）。**不灌它在全新库上会 32 条用例失败**（`test_admin_v7.py` 的
+> 组卷 / 加题 / 知识点下拉无题可抽）。
 >
-> CI 已补上这一步（`gen_seed_questions.py` 生成 0.29s + `psql -f` 约 5s，自包含可复现），
-> 所以这条路径**每次 push 都会被覆盖到**，不会再被"开发机恰好有数据"藏住。
-> 详见 `apps/admin/docs/B端联调坑.md` 坑 51。
+> 生成 + 灌库的逻辑**只有 `seed-questions.py` 一份**，CI 与 `run-smoke.ps1` 都调它 ——
+> 两边各写一套的话迟早漂，又回到"本地绿、CI 红"的口径分歧（正是坑 51 的形态）。
+>
+> ```bash
+> python tools/local-verify/seed-questions.py --pg-port 55432 --db yijian --db-user yijian
+> ```
+>
+> 幂等（SQL 自带 `ON CONFLICT`），约 5s；**刻意不做"库里已有 6000 题就跳过"的快捷判断**
+> —— 那正是假绿的成因（"环境恰好脏"时跳过 → 行为与干净环境不同）。
+>
+> 背景见 `apps/admin/docs/B端联调坑.md` 坑 51 与硬约定 H
+> （**验收脚本本身也要被验收：把缓存/库全删掉，它还能不能绿？**）。
 
 
 > 用途：在没有 Docker 的机器上，用**真实 PostgreSQL** 把后端跑起来并验收

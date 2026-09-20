@@ -73,10 +73,10 @@ def _validate_options(qtype: str, options: list[QuestionOptionIn]) -> None:
 
     labels = [o.label.strip().upper() for o in options]
     if len(set(labels)) != len(labels):
-        dup = next(l for l in labels if labels.count(l) > 1)
+        dup = next(lbl for lbl in labels if labels.count(lbl) > 1)
         raise ValueError(f"选项标号重复：{dup}")
 
-    correct = [l for l, o in zip(labels, options) if o.is_correct]
+    correct = [lbl for lbl, o in zip(labels, options) if o.is_correct]
     if qtype == "single":
         # 这就是 B 端特征①：单选题不能标两个正确答案
         if len(correct) != 1:

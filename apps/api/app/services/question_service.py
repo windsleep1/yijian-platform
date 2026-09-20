@@ -36,9 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import bad_request, conflict, forbidden, not_found
 from app.core.idgen import next_id
 from app.schemas.admin_question import (
-    MAX_OPTIONS,
-    MIN_OPTIONS,
-    MIN_MULTIPLE_CORRECT,
     ChapterNode,
     ChapterTreeOut,
     KnowledgePointItem,
@@ -682,7 +679,7 @@ async def create_question(
         await _ensure_chapter(db, payload.chapter_id, payload.subject_id)
 
     options = _normalize_options(payload.options)
-    hash_value = content_hash(payload.stem, [(l, c) for l, c, _, _ in options], payload.type)
+    hash_value = content_hash(payload.stem, [(lbl, c) for lbl, c, _, _ in options], payload.type)
 
     existing = await _find_hash_conflict(db, hash_value)
     if existing is not None:
@@ -748,8 +745,8 @@ async def create_question(
                 "source_type": payload.source_type, "source_name": payload.source_name,
                 "source_license": payload.source_license,
             },
-            [{"label": l, "content": c, "content_html": h, "is_correct": ic, "sort_no": i}
-             for i, (l, c, ic, h) in enumerate(options)],
+            [{"label": lbl, "content": c, "content_html": h, "is_correct": ic, "sort_no": i}
+             for i, (lbl, c, ic, h) in enumerate(options)],
             answer,
         ), "创建题目 v1", actor.id)
         await _record_change(
@@ -862,7 +859,7 @@ async def update_question(
 
     final_options = _normalize_options(list(final_options_in))
     final_stem = payload.stem if payload.stem is not None else row["stem"]
-    new_hash = content_hash(final_stem, [(l, c) for l, c, _, _ in final_options], final_type)
+    new_hash = content_hash(final_stem, [(lbl, c) for lbl, c, _, _ in final_options], final_type)
 
     dup = await _find_hash_conflict(db, new_hash, exclude_id=question_id)
     if dup is not None:
@@ -948,12 +945,12 @@ async def update_question(
             changed[key] = {"before": _jsonable(old_v), "after": _jsonable(new_v)}
     old_opts = [{"label": o["label"], "content": o["content"], "is_correct": o["is_correct"]}
                 for o in old_options]
-    new_opts = [{"label": l, "content": c, "is_correct": ic} for l, c, ic, _ in final_options]
+    new_opts = [{"label": lbl, "content": c, "is_correct": ic} for lbl, c, ic, _ in final_options]
     if old_opts != new_opts:
         changed["options"] = {"before": old_opts, "after": new_opts}
     if old_opts and old_opts != new_opts and "correct_labels" not in changed:
         old_correct = [o["label"] for o in old_options if o["is_correct"]]
-        new_correct = [l for l, _, ic, _ in final_options if ic]
+        new_correct = [lbl for lbl, _, ic, _ in final_options if ic]
         if old_correct != new_correct:
             changed["correct_labels"] = {"before": old_correct, "after": new_correct}
 
@@ -961,8 +958,8 @@ async def update_question(
     summary = "、".join(list(changed.keys())[:8]) or "无字段变化"
     await _insert_version(
         db, question_id, new_version,
-        _snapshot(new_row, [{"label": l, "content": c, "content_html": h, "is_correct": ic,
-                             "sort_no": i} for i, (l, c, ic, h) in enumerate(final_options)],
+        _snapshot(new_row, [{"label": lbl, "content": c, "content_html": h, "is_correct": ic,
+                             "sort_no": i} for i, (lbl, c, ic, h) in enumerate(final_options)],
                   final_answer),
         f"编辑题目：{summary}", actor.id,
     )
