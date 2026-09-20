@@ -7,6 +7,8 @@
 
 代码检查：`npm run typecheck`（`tsc --noEmit`）与 `npm run lint`（ESLint，
 配置在 `.eslintrc.cjs`）——**两道都是 CI 拦截式**。
+代码格式：`npm run format`（`prettier --write .`）与 `npm run format:check`（CI 拦截式），
+配置在 `prettier.config.mjs`（取值理由写在文件注释里）。
 
 > ⚠️ `npm run lint` 曾经是**假门禁**：脚本写着 `next lint`，但仓库里没有任何 eslint 配置、
 > `eslint` 也不在 devDependencies 里 —— 真跑会进「How would you like to configure ESLint?」
@@ -16,6 +18,21 @@
 > 2026-09-20 走完三步：① 补配置 → ② 14 条存量清零 → ③ **规则提级为 `error` 并挂上 CI**。
 > 现在 `npm run lint` 干净退出（`No ESLint warnings or errors`），
 > 且**再造一条违规它就会红**（变异验证过）。
+
+### shadcn/ui：组件是**手写**进来的，`components.json` 只是给以后用
+
+本项目**没有**用过 `npx shadcn@latest add` —— `src/components/ui/` 下的组件是按官方
+v3 结构**手写**的。`components.json` 的主要用途是"以后想再 add 组件时"（`aliases`
+必须与 `tsconfig.json` 的 `paths` 保持一致）。
+
+> 📌 这个说明原先写在 `components.json` **文件内部**，但用的是一段 `<!-- -->`
+> HTML 注释 —— **HTML 注释既不是合法 JSON、也不是合法 JSONC**，
+> 于是那份配置对它自己的用途（shadcn CLI 用 `JSON.parse` 读它）**是坏的**。
+> 是接入 prettier 时（解析报 `Unexpected character '，'`）才发现。
+> 现已改为纯 JSON，说明搬到这里。
+>
+> 教训同 `docs/B端联调坑.md`：**"能被人读到"和"能被工具读到"是两件事** ——
+> 往结构化文件里塞注释，等于把那个文件对工具废掉，而且**没有任何东西会报错**。
 
 ---
 
@@ -455,13 +472,13 @@ apps/admin/
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     52 条踩过的坑
+│  ├─ B端联调坑.md                     53 条踩过的坑
 │  └─ screenshots/                    人工走查截图存档（batch3 平铺 15 张 / batch4 13 /
 │                                     batch6 18 / batch7-pass2a 14 / batch7-pass2b 13 /
 │                                     batch7-state-machine 4）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 52 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+配套文档：**`docs/B端联调坑.md`** —— 53 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
 disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
 Batch 6 的回滚数字语义、模态框失败态、下载验真，
 Batch 7 的 `subjects` 无 `is_deleted`、SELECT 列与取值清单不一致、

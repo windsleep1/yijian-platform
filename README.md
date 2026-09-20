@@ -58,6 +58,14 @@ npm run dev                                       # 打开 http://localhost:3000
 - Batch 4 验收：`docs/10-Batch4-题库CRUD-方案与验收.md`（含 13 张端到端截图与实测缺陷记录）
 - Batch 5 验收：`docs/11-Batch5-导入管道-方案与验收.md`
 - Batch 6 验收：`docs/12-Batch6-导入向导-方案与验收.md`（含 18 张截图与实测缺陷记录）
+- Batch 7 验收：`docs/13-Batch7-组卷引擎-方案与验收.md`（组卷规则 / 试卷 CRUD / 实时试算）
+
+Batch 7 之后转为**整改批**（不带新功能，专治已有账）：
+
+- 「有状态没入口」审计：`docs/14-状态机审计.md`（29 张表逐个审，P0/P1/P2 分级 + 可复用 5 步方法）
+- 审计链立项：`docs/15-审计链补齐.md`（审核要记「人 + 时间 + 理由」）
+- 数据范围收口：`docs/16-数据范围收口.md`（题目八条入口统一走唯一判据）
+- 门禁整顿：`docs/17-门禁整顿.md`（假门禁 / ruff / CI / 覆盖率 / 全仓格式化）
 
 ### 界面速览（管理后台 · Batch 3 – 6）
 
@@ -96,6 +104,8 @@ yijian-platform/
 │   ├─ 13-Batch7-组卷引擎-方案与验收.md # Batch 7 组卷引擎（接口 / 算法 / 版本锁定 / 实时试算 / 实测缺陷）
 │   ├─ 14-状态机审计.md                # 29 张 status 表逐个审计（P0/P1/P2）+ 可复用的 5 步方法
 │   ├─ 15-审计链补齐.md                # 立项：审核要记「人 + 时间 + 理由」（与 C 端/支付批一起排）
+│   ├─ 16-数据范围收口.md              # 题目八条入口统一判据 + 变异验证证据
+│   ├─ 17-门禁整顿.md                  # 假门禁 / 覆盖率门槛 / 全仓格式化（本批验收）
 │   └─ samples/                        # 验收用样例文件（错误报告 / 走查 CSV）
 ├─ apps/
 │   ├─ api/                           # FastAPI 后端（Batch 2 起，逐批扩充）
@@ -124,7 +134,7 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 52 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 53 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
 │           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）
@@ -347,14 +357,39 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 |---|---|---|---|
 | 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | — |
 | 前端 lint | `npm run lint`（eslint） | **拦截** | 2026-09-20 存量 14 条清零 → 提级为 error → 上 CI |
+| 前端格式 | `npm run format:check`（prettier） | **拦截** | 配置 `apps/admin/prettier.config.mjs`，`printWidth 100` |
 | 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 126 passed, 1 skipped |
 | 后端静态检查 | `ruff check apps/api` | **拦截** | 2026-09-20 存量 19 条清零后转的 |
+| 后端格式 | `ruff format --check apps/api` | **拦截** | 配置 `ruff.toml`，`line-length 100` |
 | 后端覆盖率 | `coverage report` | **拦截**（门槛 65%） | 2026-09-20 起；依据见 `.coveragerc` |
 
 CI 配置：`.github/workflows/ci.yml` —— push `main` 与 PR 触发，两个 job（后端 / 前端）。
 
-> **格式检查（`prettier --check` / `ruff format --check`）故意还没挂**：
-> 它属于 Commit B「纯格式」，得先做一次全仓格式化再上 check，否则 CI 一上来就红。
+### 格式化的两个决定（都不是"默认值"）
+
+**① 行宽取 100，不是 prettier 默认的 80 / ruff 默认的 88。**
+依据是**实测现有代码**，不是偏好：
+
+```
+apps/admin/src  17537 行 → p95=79  p99=100  超过 80 列 4.7%  超过 100 列 0.9%
+apps/api        17623 行 → p95=83  p99=97   超过 88 列 2.9%  超过 100 列 0.5%
+```
+
+取 100 意味着格式化只需要碰 0.5%~0.9% 的行。**格式化的第一原则是"别让 diff 里混进样式噪音"** ——
+这个 commit 的 diff 本来就有几千行，再叠上"我喜欢的风格"就彻底读不出真变化了。
+两边同为 100，读代码时也不用在两种宽度之间切换。
+
+**② Markdown 与 `docs/` 被 `.prettierignore` 排除。**
+那些是**手写文档**：表格靠手工对齐、列表按语义断行、代码块里的输出是原样抄的。
+格式化它们**不带来任何工程收益**（没有编译器/运行时读它），
+只会产出几百行无信息量的 diff。prettier 只管**代码与配置**（ts/tsx/js/mjs/json/css）。
+
+### 顺手：`.gitattributes`（`* text=auto eol=lf`）
+
+本机 `core.autocrlf=true`，于是"工作区 CRLF、index LF"——格式化器和 diff 工具在这种
+混合状态下容易把「改了一行」看成「整个文件都变了」。写死 `eol=lf` 让三处
+（index / 工作区 / CI）统一。加之前核对过：**index 里 208 个文本文件本来就全是 LF**，
+所以这个文件没有产生任何 renormalize 差异（`git add --renormalize .` 后 `git status` 无新增）。
 
 ### 覆盖率：为什么是 65%，以及为什么它必须先在 API 进程里量
 
@@ -449,11 +484,13 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -NoCov
 - `app/cli.py` 控制台输出改纯 ASCII（硬约定 I：跨宿主打印别赌默认代码页）
 - 覆盖率门禁（API 进程采集 + `.coveragerc` 单一门槛来源）
 
-**Commit B「纯格式」**（独立 commit，未做）
+**Commit B「纯格式」**（已完成）
 
-- `prettier` / `ruff format` **全仓格式化**
-- CI 加 `prettier --check` + `ruff format --check`
-- （可选）`git pre-commit` hook
+- `prettier`（前端）+ `ruff format`（后端）全仓格式化 —— **90 文件 / +3638 −1631**
+- CI 加 `npm run format:check` + `ruff format --check`（均拦截式）
+- `.gitattributes`（`* text=auto eol=lf`）防"整个文件都变了"的假 diff
+- 语义等价性验证：**52 个 Python 文件格式化前后 AST 完全一致**；前端 `next build` 通过
+- （可选）`git pre-commit` hook —— **本批未做**，理由见 `docs/17`
 
 > **为什么要拆**：A 是逻辑改动、B 是风格改动。混在一起时 diff 里
 > **分不出"哪些是逻辑变化、哪些只是换了排版"**，评审时只能整体信任或整体怀疑。
