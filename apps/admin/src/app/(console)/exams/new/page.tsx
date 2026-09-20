@@ -12,7 +12,6 @@ import {
   RuleEditor,
   draftsToRules,
   emptyRuleDraft,
-  plannedFromDrafts,
   validateDrafts,
   type RuleDraft,
 } from "@/components/RuleEditor";
@@ -155,8 +154,6 @@ export default function NewExamPage() {
     },
     { count: 0, score: 0 },
   );
-  const rulePlanned = plannedFromDrafts(drafts);
-
   const sectionInvalid = sections.some(
     (s) => !s.name.trim() || !(Number(s.question_count) > 0) || !(Number(s.score_per) > 0),
   );

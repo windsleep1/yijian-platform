@@ -9,6 +9,20 @@
     python -m app.cli seed-questions 导入种子题库（幂等，依赖 db/seed/questions.sql）
 """
 
+# ---------------------------------------------------------------- 关于输出语言
+#
+# ⚠️ **本文件所有控制台输出一律用英文（纯 ASCII），这是刻意的，别翻译回中文。**
+#
+# 原因（硬约定 I）：这是运维命令，输出会穿过
+#     Python stdout → PowerShell → 工具调用宿主 / CI runner
+# 多层边界。链路上各方对编码的假设**不一致**（本机系统 ACP 是 UTF-8、
+# PS 5.1 按 936 读写、再外层的宿主按 936 解码），而**最外层改不了** ——
+# 结果日志里中文全变成 `[cli] RBAC 绉嶅瓙宸查噸鏀`，让"核对验收日志"这一步失效。
+#
+# 判据：**最外层那一端的编码你改不了，就让它成为唯一假设，其余各方向它对齐。**
+# 中文注释 / docstring 不受影响（按 UTF-8 读源码，与 console 编码无关），
+# 所以**只有 `_log()` 与 argparse 文案需要英文**；写进库的数据（如超管昵称）也不需要改。
+
 from __future__ import annotations
 
 import argparse
@@ -70,12 +84,12 @@ async def _wait_db(timeout: int) -> int:
         try:
             conn = await asyncpg.connect(settings.dsn, timeout=5)
             await conn.close()
-            _log("PostgreSQL 已就绪")
+            _log("PostgreSQL ready")
             return 0
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             await asyncio.sleep(1.5)
-    _log(f"等待 PostgreSQL 超时（{timeout}s）：{last_err}")
+    _log(f"timed out waiting for PostgreSQL after {timeout}s: {last_err}")
     return 1
 
 
@@ -89,12 +103,12 @@ async def _wait_redis(timeout: int) -> int:
         while time.monotonic() < deadline:
             try:
                 await client.ping()
-                _log("Redis 已就绪")
+                _log("Redis ready")
                 return 0
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
                 await asyncio.sleep(1.5)
-        _log(f"等待 Redis 超时（{timeout}s）：{last_err}")
+        _log(f"timed out waiting for Redis after {timeout}s: {last_err}")
         return 1
     finally:
         await client.aclose()
@@ -105,27 +119,27 @@ async def _wait_redis(timeout: int) -> int:
 async def _init_db() -> int:
     schema_file = _resolve_schema_file()
     if schema_file is None:
-        _log("未找到 db/schema.sql，跳过建表")
+        _log("db/schema.sql not found; skipping init-db")
         return 0
 
     conn = await _raw_conn()
     try:
         exists = await conn.fetchval("SELECT to_regclass('public.users')")
         if exists is not None:
-            _log(f"数据库结构已存在（{exists}），跳过 {schema_file.name}")
+            _log(f"schema already present ({exists}); skipping {schema_file.name}")
             return 0
 
-        _log(f"执行 {schema_file} ...")
+        _log(f"applying {schema_file} ...")
         sql = schema_file.read_text(encoding="utf-8")
         await conn.execute(sql)
 
         tables = await conn.fetchval(
             "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"
         )
-        _log(f"建表完成，public schema 下共 {tables} 张表/视图")
+        _log(f"schema applied; {tables} tables/views in public schema")
         return 0
     except Exception as exc:  # noqa: BLE001
-        _log(f"建表失败：{exc}")
+        _log(f"init-db failed: {exc}")
         return 1
     finally:
         await conn.close()
@@ -157,21 +171,21 @@ async def _seed_rbac() -> int:
     """
     schema_file = _resolve_schema_file()
     if schema_file is None:
-        _log("未找到 db/schema.sql，跳过 seed-rbac")
+        _log("db/schema.sql not found; skipping seed-rbac")
         return 0
 
     sql = schema_file.read_text(encoding="utf-8")
     start = sql.find(_RBAC_START)
     end = sql.find(_RBAC_END)
     if start < 0 or end < 0 or end <= start:
-        _log(f"schema.sql 里找不到切片标记（{_RBAC_START} / {_RBAC_END}），跳过 seed-rbac")
+        _log(f"slice markers ({_RBAC_START} / {_RBAC_END}) not found; skipping seed-rbac")
         return 1
     # 从标记**行尾**开始切，避免把标记行本身带进待执行的 SQL（它已经是个完整注释，
     # 但注释一多容易出意外；明确跳过更稳）。
     block = sql[sql.index("\n", start) + 1 : end].strip()
 
     if ";" not in block:
-        _log(f"切片结果里没有可执行语句（长度 {len(block)}），标记可能被误改，拒绝执行")
+        _log(f"slice has no executable statement (len={len(block)}); markers look edited -- refusing")
         return 1
 
     conn = await _raw_conn()
@@ -182,7 +196,8 @@ async def _seed_rbac() -> int:
         after = await conn.fetchval("SELECT count(*) FROM roles")
         after_perm = await conn.fetchval("SELECT count(*) FROM role_permissions")
         _log(
-            f"RBAC 种子已重放：roles {before} → {after}，role_permissions {before_perm} → {after_perm}"
+            f"RBAC seed replayed: roles {before} -> {after}, "
+            f"role_permissions {before_perm} -> {after_perm}"
         )
         rows = await conn.fetch(
             "SELECT r.code, count(rp.permission_id) AS n "
@@ -190,13 +205,13 @@ async def _seed_rbac() -> int:
             "GROUP BY r.code ORDER BY min(r.sort_no)"
         )
         for row in rows:
-            _log(f"  - {row['code']}: {row['n']} 个权限")
+            _log(f"  - {row['code']}: {row['n']} permissions")
         return 0
     except Exception as exc:  # noqa: BLE001
         # 这是运维命令，失败时必须给全栈信息，否则只能对着 "xxx failed" 猜。
         import traceback
 
-        _log(f"RBAC 种子重放失败：{exc}")
+        _log(f"RBAC seed replay failed: {exc}")
         _log(traceback.format_exc())
         return 1
     finally:
@@ -209,10 +224,10 @@ async def _seed_admin() -> int:
     phone = (settings.admin_init_phone or "").strip()
     password = settings.admin_init_password or ""
     if not phone:
-        _log("未配置 ADMIN_INIT_PHONE，跳过")
+        _log("ADMIN_INIT_PHONE not set; skipping seed-admin")
         return 0
     if len(password) < 8:
-        _log("ADMIN_INIT_PASSWORD 长度需 >= 8，跳过（请在 .env 中修改）")
+        _log("ADMIN_INIT_PASSWORD must be >= 8 chars; skipping (fix it in .env)")
         return 1
 
     from sqlalchemy import select
@@ -224,7 +239,7 @@ async def _seed_admin() -> int:
     async with SessionLocal() as db:
         role = await rbac_service.get_role_by_code(db, "super_admin")
         if role is None:
-            _log("roles 表中没有 super_admin，请先执行 init-db")
+            _log("no super_admin role in table; run init-db first")
             return 1
 
         user = (
@@ -246,16 +261,16 @@ async def _seed_admin() -> int:
             await db.flush()
             db.add(UserProfile(user_id=user.id, exam_level="yijian"))
             await db.flush()
-            _log(f"已创建超管账号 {phone}")
+            _log(f"created super admin {phone}")
         else:
             user.password_hash = hash_password(password)
             user.status = "active"
             user.is_deleted = False
-            _log(f"超管账号 {phone} 已存在，已重置密码并激活")
+            _log(f"super admin {phone} exists; password reset and account activated")
 
         await rbac_service.ensure_role_assigned(db, user_id=user.id, role_code="super_admin")
         await db.commit()
-        _log("super_admin 角色已就绪")
+        _log("super_admin role is ready")
     return 0
 
 
@@ -264,28 +279,30 @@ async def _seed_admin() -> int:
 async def _seed_questions() -> int:
     seed_file = _resolve_seed_file()
     if seed_file is None:
-        _log("未找到 data/seed/questions.sql，跳过（可先运行 db/seed/gen_seed_questions.py）")
+        _log("data/seed/questions.sql not found; skipping "
+             "(run db/seed/gen_seed_questions.py first)")
         return 0
 
     conn = await _raw_conn()
     try:
         has_subjects = await conn.fetchval("SELECT count(*) FROM subjects")
         if not has_subjects:
-            _log("subjects 表为空，请先执行 init-db")
+            _log("subjects table is empty; run init-db first")
             return 1
 
         existing = await conn.fetchval("SELECT count(*) FROM questions")
         if existing:
-            _log(f"题库已有 {existing} 道题，跳过导入（如需重导请先清空 questions）")
+            _log(f"question bank already has {existing} rows; skipping import "
+             "(truncate questions to re-import)")
             return 0
 
-        _log(f"导入 {seed_file.name} ...")
+        _log(f"importing {seed_file.name} ...")
         await conn.execute(seed_file.read_text(encoding="utf-8"))
         total = await conn.fetchval("SELECT count(*) FROM questions")
-        _log(f"题库导入完成，共 {total} 道题")
+        _log(f"question bank imported; {total} questions total")
         return 0
     except Exception as exc:  # noqa: BLE001
-        _log(f"题库导入失败：{exc}")
+        _log(f"question import failed: {exc}")
         return 1
     finally:
         await conn.close()
@@ -294,12 +311,12 @@ async def _seed_questions() -> int:
 # ---------------------------------------------------------------- 入口
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="app.cli", description="一建通后端运维命令")
+    parser = argparse.ArgumentParser(prog="app.cli", description="Yijian backend operations CLI")
     parser.add_argument(
         "command",
         choices=["wait-db", "wait-redis", "init-db", "seed-rbac", "seed-admin", "seed-questions"],
     )
-    parser.add_argument("--timeout", type=int, default=120, help="等待类命令的超时秒数")
+    parser.add_argument("--timeout", type=int, default=120, help="timeout in seconds for wait-* commands")
     args = parser.parse_args(argv)
 
     if args.command == "wait-db":

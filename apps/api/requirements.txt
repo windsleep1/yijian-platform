@@ -17,10 +17,15 @@ httpx>=0.27,<0.29
 pytest>=8.0,<9.0
 pytest-asyncio>=0.23,<0.25
 
-# 门禁与本地验收（`run-smoke.ps1` 与 CI 都装这两个）
+# 门禁与本地验收（`run-smoke.ps1` 与 CI 都装这三个）
 #   ruff      —— 静态检查（配置在仓库根 `ruff.toml`）。之前只在本地临时装过，
 #                没进清单 → CI 上 `ruff check` 会直接 command not found。
 #   fakeredis —— 本地/CI 起 API 时顶替 Redis（`tools/local-verify/serve_fake_redis.py`）。
 #                `run-smoke.ps1` 的解释器探测里一直要求它，但清单里没有 —— 同样会漏。
+#   coverage  —— 覆盖率门禁。**注意是 `coverage` 而不是 `pytest-cov`**：
+#                用例是通过 HTTP 打到**另一个进程**的，覆盖率必须在那边的
+#                API 进程里采集（见 serve_fake_redis.py 的 `--coverage`），
+#                pytest-cov 量的是测试自己的进程，数字会低到没有意义。
 ruff>=0.6,<1.0
 fakeredis>=2.23,<3.0
+coverage>=7.6,<8.0

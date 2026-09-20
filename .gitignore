@@ -33,6 +33,12 @@ venv/
 .ruff_cache/
 *.egg-info/
 
+# 覆盖率数据（跑 run-smoke.ps1 / CI 时在仓库根生成，每次都不一样，不入库）
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 # Node
 node_modules/
 .next/

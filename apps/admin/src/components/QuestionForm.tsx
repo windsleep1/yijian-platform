@@ -148,7 +148,7 @@ export function QuestionForm({
 }: Props) {
   const patch = (p: Partial<QuestionDraft>) => onDraftChange({ ...draft, ...p });
 
-  const groups: SubjectChapterGroup[] = tree?.items ?? [];
+  const groups: SubjectChapterGroup[] = useMemo(() => tree?.items ?? [], [tree?.items]);
   const currentGroup = useMemo(
     () => groups.find((g) => g.subject.id === draft.subject_id),
     [groups, draft.subject_id],

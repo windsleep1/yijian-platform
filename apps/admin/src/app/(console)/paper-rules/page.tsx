@@ -11,7 +11,6 @@ import { PaperRuleDialog } from "@/components/PaperRuleDialog";
 import { RowActionMarker, rowClassFor } from "@/components/RowActionMarker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -36,7 +35,6 @@ import { formatDateMinute } from "@/lib/format";
 import { P } from "@/lib/permission";
 import { qTypeLabel } from "@/lib/question";
 import type { ExamType, PaperRuleOut, RuleStatus } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 /**
  * 组卷规则管理。

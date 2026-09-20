@@ -3,11 +3,9 @@
 import {
   Archive,
   ArchiveRestore,
-  CheckCircle2,
   ChevronRight,
   Eye,
   FileText,
-  Info,
   Lock,
   Pencil,
   Plus,
@@ -19,7 +17,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { AddQuestionsDialog } from "@/components/AddQuestionsDialog";

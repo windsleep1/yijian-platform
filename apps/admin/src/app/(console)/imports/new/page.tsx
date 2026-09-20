@@ -12,7 +12,6 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -94,7 +93,6 @@ const ACCEPT = ".csv,.json,text/csv,application/json";
  */
 export default function NewImportPage() {
   const { hasPermission, isLoading: authLoading } = useAuth();
-  const router = useRouter();
 
   const [step, setStep] = useState(0);
   // "不可跳步"靠 maxReached：只有到达过的步骤可点回去

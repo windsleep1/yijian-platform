@@ -5,14 +5,17 @@
 
 技术栈：Next.js 14（App Router）+ TypeScript + Tailwind + shadcn/ui + TanStack Query v5。
 
-代码检查：`npm run typecheck`（`tsc --noEmit`，CI 拦截式）与 `npm run lint`
-（ESLint，配置在 `.eslintrc.cjs`）。
+代码检查：`npm run typecheck`（`tsc --noEmit`）与 `npm run lint`（ESLint，
+配置在 `.eslintrc.cjs`）——**两道都是 CI 拦截式**。
 
-> ⚠️ `npm run lint` 之前是**假门禁**：脚本写着 `next lint`，但仓库里没有任何 eslint 配置、
+> ⚠️ `npm run lint` 曾经是**假门禁**：脚本写着 `next lint`，但仓库里没有任何 eslint 配置、
 > `eslint` 也不在 devDependencies 里 —— 真跑会进「How would you like to configure ESLint?」
 > **交互式提问**，在 CI / 脚本里直接卡死。也就是说它跑得动只是因为它从来没真跑过
-> （同一族问题见 `docs/B端联调坑.md` 坑 44 / 51）。现已补齐配置；
-> 规则**暂全部设为 `warn`**（当前 14 条存量），第二步再提为 `error` 并挂上 CI。
+> （同一族问题见 `docs/B端联调坑.md` 坑 44 / 51）。
+>
+> 2026-09-20 走完三步：① 补配置 → ② 14 条存量清零 → ③ **规则提级为 `error` 并挂上 CI**。
+> 现在 `npm run lint` 干净退出（`No ESLint warnings or errors`），
+> 且**再造一条违规它就会红**（变异验证过）。
 
 ---
 
@@ -452,13 +455,13 @@ apps/admin/
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     50 条踩过的坑
+│  ├─ B端联调坑.md                     52 条踩过的坑
 │  └─ screenshots/                    人工走查截图存档（batch3 平铺 15 张 / batch4 13 /
 │                                     batch6 18 / batch7-pass2a 14 / batch7-pass2b 13 /
 │                                     batch7-state-machine 4）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 50 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+配套文档：**`docs/B端联调坑.md`** —— 52 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
 disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
 Batch 6 的回滚数字语义、模态框失败态、下载验真，
 Batch 7 的 `subjects` 无 `is_deleted`、SELECT 列与取值清单不一致、

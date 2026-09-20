@@ -5,7 +5,7 @@
  * 外加几个"把后端的数字变成人话"的小函数。页面里不写 `status === "draft" ? "草稿" : ...`。
  */
 
-import type { ExamSectionOut, ExamStatus, ExamType, QType, RuleStatus, RuleStrategy } from "./types";
+import type { ExamSectionOut, ExamStatus, ExamType, RuleStatus, RuleStrategy } from "./types";
 
 // ---------------------------------------------------------------- 枚举 → 中文
 

@@ -1,34 +1,37 @@
 # CI 门禁 —— 门禁整顿（2026-09-20 起）
 #
-# ## 跑什么
+# ## 跑什么（全部**拦截式**）
 #
-#     tsc --noEmit     前端类型
-#     pytest           后端全量用例（真 PostgreSQL）
-#     ruff check       后端静态检查
+#     ruff check                   后端静态检查
+#     pytest                       后端全量用例（真 PostgreSQL）
+#     coverage report              后端覆盖率（门槛 = `.coveragerc` 的 fail_under）
+#     npm run lint                 前端 eslint（规则全 error）
+#     tsc --noEmit                 前端类型
 #
-# **刻意不上 eslint**（`npm run lint`）—— 它还没进 CI，等第二步把规则从 warn 提成
-# error 之后再挂上来。现在挂上去只会得到一个恒绿的装饰品。
+# ## 拦截式 vs 上报式（演进的痕迹，留着有用）
 #
-# ## 拦截式 vs 上报式
-#
-# | 检查 | 现在 | 后续 |
+# | 检查 | 第一步 | 现在 |
 # |---|---|---|
 # | `tsc --noEmit` | **拦截** | 不变 |
 # | `pytest` | **拦截** | 不变 |
-# | `ruff check` | **拦截**（2026-09-20 转的） | 不变 |
-# | `npm run lint` | 只在本地（规则全 warn，退出码 0） | 存量清完 → 上 CI + 转拦截 |
+# | `ruff check` | 上报（`continue-on-error`） | **拦截**（存量 19 条清零后转的） |
+# | `npm run lint` | 不在 CI（本地全 warn，退出码 0） | **拦截**（存量 14 条清零 + 提级后上来的） |
+# | `coverage report` | 无 | **拦截**（门槛依据见 `.coveragerc`） |
 #
-# ruff 曾经是 `continue-on-error`（只上报）：存量 19 条在身时设拦截会让 CI 恒红，
-# 而**恒红的门禁等于没有门禁** —— 人很快就不看了，跟"没配置"效果一样（硬约定 H）。
-# 2026-09-20 存量清零（10 条 `--fix` + 8 条 `E741` 手动改名 + 1 条 `F821` 补 import），
-# 于是同批把它转成拦截式。
+# 两步都遵循同一条取舍：**存量没清完之前只上报，不清完就设拦截会让 CI 恒红，
+# 而恒红的门禁等于没有门禁**（硬约定 H）——
+# 人很快就不看了，跟"没配置"效果完全一样。
+#
+# 格式检查（`prettier --check` / `ruff format --check`）**不在本批**：
+# 它属于 Commit B「纯格式」，要先做一次全仓格式化再挂 check，否则 CI 一上来就红。
 #
 # ## 每一步都在复刻 `run-smoke.ps1` 的链路
 #
-# 起 PG → 建表 → 迁移 → 种子(RBAC/超管) → **题库种子** → 起 API → pytest。
+# 起 PG → 建表 → 迁移 → 种子(RBAC/超管) → **题库种子** → 起 API → pytest → 覆盖率。
 # 「题库种子」这一步**调的是 `tools/local-verify/seed-questions.py`** ——
-# 与 `run-smoke.ps1` 同一个脚本。**修坑 51 时最容易犯的错是 CI 与本地各写一套**，
-# 那两套迟早漂，于是又回到"本地绿、CI 红"的口径分歧。
+# 与 `run-smoke.ps1` 同一个脚本；`--coverage/--shutdown-file` 也是同一套参数。
+# **修坑 51 时最容易犯的错是 CI 与本地各写一套**，那两套迟早漂，
+# 于是又回到"本地绿、CI 红"的口径分歧。
 
 name: CI
 
@@ -143,15 +146,24 @@ jobs:
       - name: 题库种子（生成 + 灌库）
         run: python tools/local-verify/seed-questions.py --pg-port 5432
 
-      # ---- 起 API：真 PostgreSQL + fakeredis 顶替 Redis ----
+      # ---- 起 API：真 PostgreSQL + fakeredis 顶替 Redis + **覆盖率采集** ----
       # 为什么用 nohup + 重定向：长生命周期子进程若继承本 step 的 stdout，
       # Actions 会等这个管道 EOF 才认为 step 结束 —— 表现为**卡住直到超时**。
-      - name: 起 API 并等待就绪
+      #
+      # 为什么覆盖率在**这个进程**里采：用例是 HTTP 打到它的，业务代码全跑在那边；
+      # 在 pytest 进程里跑 `--cov=app` 只会量到测试自己导入的几个纯函数模块。
+      #
+      # ⚠️ `--shutdown-file`：收尾不能靠 kill（进程直接消失、atexit 不跑 →
+      #    覆盖率数据一个字都写不出来）。改成"放哨兵文件 → 进程自己收尾写盘"。
+      - name: 起 API 并等待就绪（带覆盖率采集）
         working-directory: tools/local-verify
         run: |
           set -euo pipefail
+          rm -f "$GITHUB_WORKSPACE/.coverage" /tmp/yijian-cov-stop
           nohup python serve_fake_redis.py --pg-port 5432 --api-port 8123 \
-            --log-file /tmp/yijian-api.log > /tmp/yijian-api.out 2>&1 &
+            --log-file /tmp/yijian-api.log \
+            --coverage --cov-data-file "$GITHUB_WORKSPACE/.coverage" \
+            --shutdown-file /tmp/yijian-cov-stop > /tmp/yijian-api.out 2>&1 &
           for i in $(seq 1 40); do
             if curl -sf http://127.0.0.1:8123/api/v1/health > /dev/null; then
               echo "API 已就绪"
@@ -168,6 +180,31 @@ jobs:
       - name: pytest
         working-directory: apps/api
         run: pytest tests -q
+
+      # ---- 覆盖率门禁（拦截式）----
+      # 先让 API 优雅退出（放哨兵 → 它自己 cov.save()），再出报告。
+      # ⚠️ 顺序反了就拿到一个 0% 的假数字而不是报错 —— 那是最难发现的一种假绿。
+      # 门槛（fail_under）在仓库根 `.coveragerc`，与本地 `run-smoke.ps1` **同一个来源**。
+      - name: 覆盖率门禁
+        run: |
+          set -euo pipefail
+          touch /tmp/yijian-cov-stop
+          for i in $(seq 1 60); do
+            if ! curl -sf http://127.0.0.1:8123/api/v1/health > /dev/null; then
+              echo "API 已优雅退出，覆盖率数据已落盘"
+              break
+            fi
+            sleep 1
+          done
+          if [ ! -s .coverage ]; then
+            echo "::error::覆盖率数据文件为空 —— 采集没生效，本次数字不可信"
+            tail -20 /tmp/yijian-api.log || true
+            exit 1
+          fi
+          coverage report --data-file .coverage --skip-covered
+          # 门禁本体就是上面这一句：`fail_under` 写在 `.coveragerc` 的 [report] 里，
+          # `coverage report` 会自动读它，低于门槛就以非 0 退出。
+          # **不在命令行再写一遍数字** —— 门槛只有一个来源（与本地 run-smoke.ps1 共用）。
 
   # ================================================================ 前端
   frontend:
@@ -186,6 +223,17 @@ jobs:
       - name: 安装依赖
         working-directory: apps/admin
         run: npm ci
+
+      # ---- eslint（拦截式，2026-09-20 起）----
+      # 这是它**第一次**成为真门禁：以前 `npm run lint` 连配置都没有，
+      # 跑起来会进「How would you like to configure ESLint?」交互式提问 ——
+      # 在 CI 里等于直接卡死（坑 44）。补配置后先全设 warn 跑出清单，
+      # 14 条存量清完再提级为 error，此刻才挂上来。
+      #
+      # ⚠️ eslint 用的是 devDependencies，所以必须放在 `npm ci` 之后。
+      - name: npm run lint（拦截式）
+        working-directory: apps/admin
+        run: npm run lint
 
       # ---- 三件事之三：tsc（拦截式）----
       - name: tsc --noEmit

@@ -16,6 +16,9 @@ param(
     [string]$Python  = "python",
     [string]$DbName  = "yijian",
     [string]$DbUser  = "yijian",
+    # 覆盖率门槛**不在本文件里写数字** —— 单一来源是仓库根 `.coveragerc` 的 `fail_under`，
+    # `coverage report` 会自己按它判退出码。这里只负责"跑报告 + 看退出码"。
+    [switch]$NoCoverage,
     [switch]$KeepRunning
 )
 
@@ -100,7 +103,7 @@ try {
     # ---------- 4. 选一个「真的装了依赖」的 Python ----------
     # 教训：PATH 上的 `python` 很可能是 Anaconda 之类，未必有 fastapi/asyncpg/fakeredis。
     # 这里按优先级逐个探测，第一个能 import 全部依赖的才用。
-    $probe = "import fastapi, sqlalchemy, asyncpg, fakeredis, uvicorn, pytest, httpx"
+    $probe = "import fastapi, sqlalchemy, asyncpg, fakeredis, uvicorn, pytest, httpx, coverage"
     $cands = New-Object System.Collections.Generic.List[string]
     if ($Python -and $Python -ne "python") { $cands.Add($Python) }
     if ($env:YIJIAN_PYTHON) { $cands.Add($env:YIJIAN_PYTHON) }
@@ -119,7 +122,7 @@ try {
     }
     if (-not $pyExe) {
         # 注意：这里必须写成单行 —— PowerShell 5.1 在命令参数位置不接受跨行的括号表达式。
-        Fail "未找到满足依赖的 Python（需 fastapi/sqlalchemy/asyncpg/fakeredis/uvicorn/pytest/httpx）。可用 -Python <绝对路径> 指定，或先在目标解释器执行： pip install -r apps/api/requirements.txt fakeredis pytest httpx"
+        Fail "未找到满足依赖的 Python（需 fastapi/sqlalchemy/asyncpg/fakeredis/uvicorn/pytest/httpx/coverage）。可用 -Python <绝对路径> 指定，或先在目标解释器执行： pip install -r apps/api/requirements.txt"
     }
     Write-Host "[local-verify] 使用 Python: $pyExe"
 
@@ -190,16 +193,33 @@ try {
     }
     Write-Host "[local-verify] 端口 $ApiPort 空闲，预检通过"
 
-    # ---------- 5. 起 API（真 PG + fakeredis）----------
+    # ---------- 5. 起 API（真 PG + fakeredis，默认带覆盖率采集）----------
     $apiLog = Join-Path $env:TEMP "yijian-api.log"
+
+    # 覆盖率：**在 API 进程里采集**（用例是 HTTP 打到它的，业务代码全跑在那边；
+    # 在 pytest 进程里跑 --cov=app 只会量到测试自己，数字低到没意义）。
+    # 数据落在仓库根，被 .gitignore 排除。
+    $covDataFile = Join-Path $repo ".coverage"
+    $covStopFile = Join-Path $env:TEMP "yijian-cov-stop"
+    if (-not $NoCoverage) {
+        Remove-Item -Path $covDataFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $covStopFile -Force -ErrorAction SilentlyContinue
+    }
 
     Write-Host "[local-verify] 启动 API :$ApiPort ..."
     # 用 ProcessStartInfo + UseShellExecute=$true 让 API 进程「完全脱离」当前 stdio。
     # 否则这个长生命周期子进程会占着调用方的 stdout 管道句柄，调用方要等它退出才拿到 EOF（卡死）。
     # 既然脱离了 stdio，API 日志由 serve_fake_redis.py 自己写入 --log-file。
+    $apiArgs = "`"$(Join-Path $here 'serve_fake_redis.py')`" --pg-port $Port --api-port $ApiPort --log-file `"$apiLog`""
+    if (-not $NoCoverage) {
+        # ⚠️ --shutdown-file 是必须的：本脚本收尾用的是 Stop-Process -Force（硬杀），
+        #    进程直接消失、atexit 不跑 → coverage 一个字都写不出来。改成"放哨兵文件 →
+        #    进程自己收尾"（见 serve_fake_redis.py 的说明）。
+        $apiArgs += " --coverage --cov-data-file `"$covDataFile`" --shutdown-file `"$covStopFile`""
+    }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName         = $pyExe
-    $psi.Arguments        = "`"$(Join-Path $here 'serve_fake_redis.py')`" --pg-port $Port --api-port $ApiPort --log-file `"$apiLog`""
+    $psi.Arguments        = $apiArgs
     $psi.WorkingDirectory = $here
     $psi.UseShellExecute  = $true
     $psi.WindowStyle      = [System.Diagnostics.ProcessWindowStyle]::Hidden
@@ -235,7 +255,49 @@ try {
     }
     if ($rc -ne 0) { Fail "pytest 未全部通过（exit=$rc，详见 $pytestLog）" }
 
-    # 收尾前确认：本次 pytest 打的确实是刚起的那个进程（pid 已随 finally 停止）。
+    # ---------- 7. 覆盖率门禁 ----------
+    # ⚠️ 顺序很关键：**必须先让 API 优雅退出**（放哨兵 → 它自己 cov.save() 写盘），
+    #    再出报告。若直接跳到 finally 的 Stop-Process -Force，数据文件是空的，
+    #    报告会变成 0%（而不是报错）—— 正是硬约定 H 说的"假绿"的另一种形态。
+    if (-not $NoCoverage) {
+        Write-Host "[local-verify] 停止 API 并落盘覆盖率 ..."
+        Set-Content -Path $covStopFile -Value "stop" -Encoding ascii
+        $waited = 0
+        while (-not $apiProc.HasExited -and $waited -lt 40) {
+            Start-Sleep -Milliseconds 500
+            $waited++
+        }
+        if (-not $apiProc.HasExited) {
+            Fail "API 收到哨兵后 20s 仍未退出 —— 覆盖率数据可能没落盘，不要相信本次覆盖率"
+        }
+        if (-not (Test-Path $covDataFile) -or (Get-Item $covDataFile).Length -eq 0) {
+            Fail "覆盖率数据文件为空（$covDataFile）—— 采集没生效，本次数字不可信"
+        }
+
+        Write-Host ""
+        Write-Host "[local-verify] 覆盖率（门槛见仓库根 .coveragerc 的 fail_under）..."
+        # 报告从仓库根跑：数据文件里的路径是相对的，换目录会报 "No data to report"。
+        Push-Location $repo
+        try {
+            $covOut = & $pyExe -m coverage report --data-file $covDataFile --skip-covered 2>&1
+            $covRc  = $LASTEXITCODE
+            $covOut | Out-String | Set-Content -Path (Join-Path $env:TEMP "yijian-coverage.log") -Encoding UTF8
+            # 总览行单独打一次，避免被逐文件明细淹没
+            ($covOut | Select-String -Pattern "^TOTAL") | ForEach-Object { Write-Host "  $($_.Line)" -ForegroundColor Cyan }
+            if ($covRc -ne 0) {
+                Write-Host "[local-verify] 逐文件明细（$env:TEMP\yijian-coverage.log）："
+                $covOut | Select-Object -Last 12 | ForEach-Object { Write-Host "  $_" }
+            }
+        } finally {
+            Pop-Location
+        }
+        if ($covRc -ne 0) {
+            Fail "覆盖率低于 .coveragerc 里的 fail_under（exit=$covRc，详见 $env:TEMP\yijian-coverage.log）"
+        }
+    } else {
+        Write-Host "[local-verify] 按 -NoCoverage 跳过覆盖率采集"
+    }
+
     Write-Host ""
     Write-Host "[local-verify] 全部通过。" -ForegroundColor Green
 }

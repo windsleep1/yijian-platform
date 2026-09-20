@@ -124,7 +124,7 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 50 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 52 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
 │           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）
@@ -346,32 +346,76 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 | 检查 | 命令 | 现在 | 说明 |
 |---|---|---|---|
 | 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | — |
-| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | — |
-| 后端静态检查 | `ruff check apps/api` | **拦截** | 2026-09-20 存量清零后转的 |
-| 前端 lint | `npm run lint` | 只跑本地（规则全 warn，退出码 0） | 第二步转拦截并上 CI |
+| 前端 lint | `npm run lint`（eslint） | **拦截** | 2026-09-20 存量 14 条清零 → 提级为 error → 上 CI |
+| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 126 passed, 1 skipped |
+| 后端静态检查 | `ruff check apps/api` | **拦截** | 2026-09-20 存量 19 条清零后转的 |
+| 后端覆盖率 | `coverage report` | **拦截**（门槛 65%） | 2026-09-20 起；依据见 `.coveragerc` |
 
 CI 配置：`.github/workflows/ci.yml` —— push `main` 与 PR 触发，两个 job（后端 / 前端）。
 
-#### 两道跑的是**同一条链路**
+> **格式检查（`prettier --check` / `ruff format --check`）故意还没挂**：
+> 它属于 Commit B「纯格式」，得先做一次全仓格式化再上 check，否则 CI 一上来就红。
+
+### 覆盖率：为什么是 65%，以及为什么它必须先在 API 进程里量
+
+2026-09-20 首次实测（44 文件 / 4305 语句 / 未覆盖 1479）：
+
+```
+schemas       925 语句   14 未覆盖   98.5%
+db            152 语句   10 未覆盖   93.4%
+core          398 语句   59 未覆盖   85.2%
+api           322 语句   51 未覆盖   84.2%
+services     2286 语句 1153 未覆盖   49.6%   ← 大头；缺的是 Batch 8+ 还没写的代码
+(顶层)        222 语句  192 未覆盖   13.5%   ← cli.py / main.py，只有启动路径被跑到
+---------------------------------------------------------------
+TOTAL        4305 语句 1479 未覆盖   **65.64%**
+```
+
+**⚠️ 一个量错地方的陷阱**：用例是**通过 HTTP** 打到独立 uvicorn 进程的
+（`tests/conftest.py` 里就是个普通 `httpx.Client`，base_url 来自 `AI_BASE`）。
+所以在 pytest 进程里跑 `pytest --cov=app` 只量得到测试自己导入的几个纯函数模块，
+数字低得没有意义。**覆盖率必须在 API 进程里采**：
+
+```bash
+# run-smoke.ps1 与 CI 都是这么做的（同一套参数）
+serve_fake_redis.py --coverage --cov-data-file <repo>/.coverage \
+                    --shutdown-file <tmp>/yijian-cov-stop
+```
+
+`--shutdown-file` 是必需的：收尾若用 `Stop-Process -Force` / `kill`，进程直接消失、
+`atexit` 不跑，**覆盖率数据一个字都写不出来**。改成"放哨兵文件 → 进程自己收尾写盘"。
+
+**门槛 65% 的来历**：实测 65.64%，取"实测值下方一点点"作为**棘轮** ——
+任何让覆盖率掉 1 个点以上的改动都会红。
+（用户原本要求「实测值 +5~10%」即 71%，但 71% > 65.64% 会让门槛一落地就恒红，
+与"run-smoke 从零库仍绿"冲突。取值理由写在 `.coveragerc` 里，不藏。）
+
+**抬门槛的办法**：每批新增业务代码后重测，实测值比门槛高出 3pp 就把 `fail_under`
+提到「实测值 − 1」。**目标 71%**（`services` 补 Batch 8+ 用例，或给 `cli.py` 补 CLI 直测）。
+
+### 两道跑的是**同一条链路**
 
 | 步骤 | CI | 本地 `run-smoke.ps1` |
 |---|---|---|
 | 建表 + 迁移 | `psql -f db/schema.sql` + `db/migrations/*.sql` | 同 |
 | 种子（RBAC + 超管） | `python -m app.cli seed-rbac / seed-admin` | 同 |
 | **题库种子** | `python tools/local-verify/seed-questions.py` | **同一个脚本** |
-| 起 API | `serve_fake_redis.py` | 同 |
+| 起 API | `serve_fake_redis.py` | 同（含 `--coverage`） |
 | 跑用例 | `pytest tests` | 同 |
+| **覆盖率门禁** | `coverage report`（门槛读 `.coveragerc`） | **同**（同一份门槛） |
 
-> 「题库种子」这一步**两边调的是同一个脚本**，不是各写一套 ——
-> 修坑 51 时最容易犯的错就是 CI 与本地各写一套，那两套迟早漂，
+> 「题库种子」这一步**两边调的是同一个脚本**，覆盖率门槛**两边读同一个 `.coveragerc`**
+> —— 不是各写一套。修坑 51 时最容易犯的错就是 CI 与本地各写一套，那两套迟早漂，
 > 于是又回到"本地绿、CI 红"的口径分歧（正是坑 51 的形态）。
 
 ```bash
 # 本地复刻 CI 的后端那一条（从零库也能全绿）
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
+# 只想跑用例、不要覆盖率门禁：
+powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -NoCoverage
 ```
 
-### 「门禁整顿第一步」的完成标准
+### 「门禁整顿第一步」的完成标准（已完成）
 
 **三条同时成立**才算完成：
 
@@ -380,15 +424,23 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 3. CI 每次 push 都跑**"全新环境"路径**
 
 > 2026-09-20 状态：**①②③ 全部满足**。
-> （第一步开头时只满足 ③ —— 见 `apps/admin/docs/B端联调坑.md` 坑 51。）
 
-### 剩下的第二步（独立批）
+### 第二步：拆两个 commit
 
-- eslint **14 条存量**清理 → 把 `.eslintrc.cjs` 的 `asWarn()` 去掉（warn → error）→ 挂上 CI
-- `prettier` / `ruff format` **全仓格式化**（**单独一个 commit** —— 格式化的大 diff
-  会把业务改动淹掉，必须分开）
-- 覆盖率阈值：从**当前实际值往上 5~10%**（**不要拍脑袋定 80%**）
-- `git pre-commit` hook（可选）
+**Commit A「逻辑改动」**（已完成）
+
+- eslint 14 条存量清理（10 未使用变量 / 3 hooks 依赖 / 1 多余转义）→ warn 提成 error → 挂上 CI
+- `app/cli.py` 控制台输出改纯 ASCII（硬约定 I：跨宿主打印别赌默认代码页）
+- 覆盖率门禁（API 进程采集 + `.coveragerc` 单一门槛来源）
+
+**Commit B「纯格式」**（独立 commit，未做）
+
+- `prettier` / `ruff format` **全仓格式化**
+- CI 加 `prettier --check` + `ruff format --check`
+- （可选）`git pre-commit` hook
+
+> **为什么要拆**：A 是逻辑改动、B 是风格改动。混在一起时 diff 里
+> **分不出"哪些是逻辑变化、哪些只是换了排版"**，评审时只能整体信任或整体怀疑。
 
 ### 一条贯穿始终的判据（硬约定 H）
 
@@ -397,6 +449,9 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 `npm run lint` 曾经是假门禁（无配置 → 交互式提问卡死，跑得动只因从来没真跑过），
 `run-smoke.ps1` 曾经是假验收（不灌题库，靠开发机脏库才绿）。
 两者都是"给的是通过、而不是失败"，而且只在"环境恰好脏"时成立。
+
+> **推论（新建"一键验收"脚本时先问）**：**它依赖哪些不在版本控制里的东西？**
+> `data/`、`.env`、手工灌的数据、本机已装的全局包 —— 任何一项都会让它变成假绿。
 
 ---
 

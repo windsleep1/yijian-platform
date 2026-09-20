@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, Info, Loader2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -75,7 +75,6 @@ export function AssignRolesDialog({
   }, [open, user.roles]);
 
   const roles = rolesQuery.data ?? [];
-  const roleMap = useMemo(() => new Map(roles.map((r) => [r.code, r])), [roles]);
 
   const added = selected.filter((c) => !user.roles.includes(c));
   const removed = user.roles.filter((c) => !selected.includes(c));

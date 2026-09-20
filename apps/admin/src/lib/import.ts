@@ -157,7 +157,6 @@ export function isExecuted(b: Pick<ImportBatch, "status" | "success_rows" | "upd
  */
 export function importStatusFlow(b: ImportBatch): { steps: FlowStep[]; failedAt: number | null } {
   const executed = isExecuted(b);
-  const done = b.status === "done";
 
   const steps: FlowStep[] = [
     { key: "created", label: "建批次", hint: "pending", stage: "pending", state: "todo" },

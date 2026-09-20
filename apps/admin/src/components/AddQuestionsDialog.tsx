@@ -151,7 +151,7 @@ function PickerBody({
     setPicked([]);
   }, [chapterId, kpId, qtype, difficulty, keyword]);
 
-  const rows = query.data?.items ?? [];
+  const rows = useMemo(() => query.data?.items ?? [], [query.data?.items]);
   const total = query.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 

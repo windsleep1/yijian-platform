@@ -85,8 +85,18 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
 脚本会依次：初始化并启动 PG → 建库 → 载入 `db/schema.sql`（仅首次建库）
-→ **应用 `db/migrations/*.sql`** → **初始化超管** → 起 API（真 PG + fakeredis）
-→ 跑 `pytest tests -v` → 收尾停止服务。
+→ **应用 `db/migrations/*.sql`** → **灌题库种子** → **初始化超管**
+→ 起 API（真 PG + fakeredis，**带覆盖率采集**）→ 跑 `pytest tests -v`
+→ **停 API 并出覆盖率报告（门槛门禁）** → 收尾停止服务。
+
+加 `-NoCoverage` 可跳过覆盖率采集（只测用例）；`-KeepRunning` 保留 PG 不关。
+
+> ⚠️ **题库种子这一步不能省**（坑 51）：`db/schema.sql` 只灌
+> subjects / chapters / RBAC，**不含 `questions` 与 `knowledge_points`** ——
+> 题库由生成器产出、落在 gitignored 的 `data/`。少了它，在**真正全新的库**上
+> 会 **32 条用例失败**（组卷 / 加题 / 知识点下拉无题可抽）。
+> 本脚本过去一直绿，只因开发机的库早先被手工灌过 —— 那是**假绿**（硬约定 H）。
+> 生成 + 灌库的逻辑抽在 `seed-questions.py`，**CI 调的是同一个脚本**。
 
 > ⚠️ **为什么迁移是单独一步**：`db/schema.sql` **只在首次建库时**载入 ——
 > 脚本会先查 `to_regclass('public.users')`，库已存在就**整段跳过**。
@@ -102,8 +112,9 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 
 | 文件 | 内容 |
 |---|---|
-| `%TEMP%\yijian-api.log` | uvicorn 启动日志 + 每个请求的访问日志（由 `serve_fake_redis.py` 自己落盘） |
+| `%TEMP%\yijian-api.log` | uvicorn 启动日志 + 每个请求的访问日志（由 `serve_fake_redis.py` 自己落盘）。**收尾时会多一行 `[cov] data saved to ...`** —— 那是覆盖率落盘的凭据；没有它说明进程是被硬杀的，本次覆盖率不可信 |
 | `%TEMP%\yijian-pytest.log` | pytest 完整输出（UTF-16，`Get-Content -Encoding Unicode` 读） |
+| `%TEMP%\yijian-coverage.log` | 覆盖率逐文件明细（门槛没通过时会打印尾部 12 行） |
 
 期望输出结尾（pytest 按文件名排序，`test_smoke.py` 在最后，所以摘要行跟在它后面）：
 
@@ -127,6 +138,38 @@ tests/test_smoke.py::test_rate_limit_on_sms PASSED
 > 如果看到 `SKIPPED (超管登录失败...)`，说明**超管没初始化**（`db/schema.sql` 只灌角色/权限，
 > 不含任何用户）——这也是为什么 `run-smoke.ps1` 里有一步 `python -m app.cli seed-admin`，
 > 它在 Docker 里由 `apps/api/docker-entrypoint.sh` 负责。
+
+---
+
+### 覆盖率门禁（2026-09-20 起）
+
+**为什么必须在 API 进程里采**：用例是**通过 HTTP** 打到独立 uvicorn 的
+（`apps/api/tests/conftest.py` 里就是个普通 `httpx.Client`，base_url 来自 `AI_BASE`）。
+所以 `pytest --cov=app` 只量得到测试自己导入的几个纯函数模块 —— 数字低得没意义。
+**业务代码全跑在 API 那个进程里，就在那里采。**
+
+**为什么需要哨兵文件**：收尾若用 `Stop-Process -Force` / `kill`，进程直接消失、
+`atexit` 不跑 → 覆盖率数据**一个字都写不出来**（而报告会显示 0% 而不是报错，
+是最难发现的一种假绿）。所以改成本脚本放一个哨兵文件，API 自己收尾写盘：
+
+```powershell
+# 手工分步跑时同样适用
+python serve_fake_redis.py --pg-port 55432 --api-port 8123 `
+  --coverage --cov-data-file "..\..\.coverage" --shutdown-file "$env:TEMP\yijian-cov-stop"
+# …跑完 pytest 之后：
+Set-Content -Path "$env:TEMP\yijian-cov-stop" -Value stop -Encoding ascii
+# 等 API 自己退出，再从**仓库根**出报告（数据里的路径是相对的，换目录会报 No data）
+cd ..\..
+python -m coverage report --data-file .coverage --skip-covered
+```
+
+**门槛只有一个来源**：仓库根 `.coveragerc` 的 `fail_under`（当前 **65**）。
+`run-smoke.ps1` 与 CI 都不在命令行重写数字，只检查 `coverage report` 的退出码。
+门槛的取值依据（实测 65.64% → 取"实测值下方一点点"作棘轮）写在 `.coveragerc` 里。
+
+> 首次实测：44 文件 / 4305 语句 / 未覆盖 1479 → **65.64%**。
+> `services` 只有 49.6%（缺的是 Batch 8+ 还没写的代码），`(顶层)` 13.5%
+> （`cli.py` / `main.py` 只有启动路径被跑到）。
 
 ---
 
