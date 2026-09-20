@@ -6,7 +6,7 @@ import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "一建通 · 管理后台",
-  description: "一级建造师学习备考平台 · 管理后台 v0.1（Batch 6）",
+  description: "一级建造师学习备考平台 · 管理后台 v0.1（Batch 7）",
 };
 
 /**

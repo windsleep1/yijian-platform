@@ -33,7 +33,7 @@ import uuid
 import httpx
 import pytest
 
-from .conftest import API, auth, body, register
+from .conftest import API, assign_roles, auth, body, fresh_user, register
 
 JS_MAX_SAFE_INT = 2**53 - 1
 
@@ -653,3 +653,298 @@ def test_question_permission_wall(client: httpx.Client, sz) -> None:
 
     # 无 Token → 401（40100 = 未携带凭据）
     assert body(client.get(f"{API}/admin/questions"))["code"] in (40100, 40101)
+
+
+# ================================================================ 8. 数据范围收口（题目全部入口）
+#
+# 收口前只有 `list_questions` 套了数据范围过滤 —— **列表看不见，但照着 id 直接请求
+# 就能读到、改到、删掉别的科目的题**。"列表过滤"防的是"翻到"，防不了"猜到"。
+#
+# 本组把八条入口逐个钉住。用 `researcher` 而不是 `viewer`：种子里 researcher 拿满了
+# `question` 模块的 read/create/update/delete，八条入口它**全部打得通**，
+# 正是"越权"要测的那个面（viewer 连 `question:read` 都没有，测不出范围这件事）。
+
+SZ_SUBJECT_ID = 2007      # 市政实务
+JZ_SUBJECT_ID = 2001      # 建筑实务（越权对照）
+
+
+def _scoped_headers(
+    client: httpx.Client,
+    admin_h: dict[str, str],
+    *,
+    nickname: str,
+    scope_type: str = "subject",
+    scope_id: int | None = SZ_SUBJECT_ID,
+) -> dict[str, str]:
+    """造一个只挂单个科目范围的 researcher，返回认证头。"""
+    u = fresh_user(client, nickname=nickname)
+    ar = assign_roles(
+        client, admin_h, u["user"]["id"], ["researcher"],
+        scope_type=scope_type, scope_id=scope_id,
+    )
+    assert ar["code"] == 0, ar
+    return auth(u["access_token"])
+
+
+def _exists(client: httpx.Client, admin_h: dict[str, str], tag: str) -> bool:
+    """按内容里的唯一 tag 查这道题在不在（admin 视角，不受范围影响）。"""
+    b = body(
+        client.get(
+            f"{API}/admin/questions", headers=admin_h,
+            params={"keyword": tag, "page_size": 5},
+        )
+    )
+    assert b["code"] == 0, b
+    return b["data"]["total"] > 0
+
+
+def _tag_of(payload: dict) -> str:
+    """取出 `_q` 放在题干开头的那个唯一 tag（`【自动化】<tag> 关于施工…`）。
+
+    ⚠️ 不能写 `stem.split()[1]` —— 那是**题干后半句**（所有题都一样），
+    拿它去 `keyword` 查会把全库的题都命中，于是"越权新建没落库"这个断言永远为假。
+    """
+    return payload["stem"].split(" ", 1)[0].replace("【自动化】", "")
+
+
+def _make(
+    client: httpx.Client, admin_h: dict[str, str], *,
+    subject_id: int, chapter_id: int | None = None,
+) -> tuple[str, str]:
+    """建一道题，返回 `(id, tag)`。tag 用来按内容定位，不依赖 id 之外的线索。"""
+    payload = _q(subject_id=subject_id, chapter_id=chapter_id)
+    b = body(client.post(f"{API}/admin/questions", headers=admin_h, json=payload))
+    assert b["code"] == 0, b
+    return b["data"]["id"], _tag_of(payload)
+
+
+def _drop(client: httpx.Client, admin_h: dict[str, str], qid: str) -> None:
+    """软删清场（已删的再删返回 40001，忽略即可）。"""
+    body(client.delete(f"{API}/admin/questions/{qid}", headers=admin_h))
+
+
+def test_scope_detail_wall(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+    """**详情**：按 id 直接请求别的科目的题 → `40301`。
+
+    报 `40301` 而不是 `40401`：题确实存在，只是不归你 —— 报 404 会让排查的人
+    以为 id 写错了，去找一个并不存在的问题。
+    """
+    sz_id, sz_chapter = sz
+    jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
+    my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
+    h = _scoped_headers(client, admin_h, nickname="范围-详情")
+
+    b = body(client.get(f"{API}/admin/questions/{my_qid}", headers=h))
+    assert b["code"] == 0, b
+    assert b["data"]["subject_id"] == str(sz_id), b["data"]["subject_id"]
+
+    b = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=h))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+
+    _drop(client, admin_h, my_qid)
+    _drop(client, admin_h, jz_qid)
+
+
+def test_scope_create_wall(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+    """**新建**：往别科目建题 → `40301`，且**库里一道都没多**（零副作用）。"""
+    sz_id, sz_chapter = sz
+    h = _scoped_headers(client, admin_h, nickname="范围-新建")
+
+    payload = _q(subject_id=JZ_SUBJECT_ID)
+    tag = _tag_of(payload)
+    b = body(client.post(f"{API}/admin/questions", headers=h, json=payload))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+    # 关键：不是"先写进去再报错"
+    assert not _exists(client, admin_h, tag), "越权新建居然落了库"
+
+    ok_payload = _q(subject_id=sz_id, chapter_id=sz_chapter)
+    b = body(client.post(f"{API}/admin/questions", headers=h, json=ok_payload))
+    assert b["code"] == 0, b
+    _drop(client, admin_h, b["data"]["id"])
+
+
+def test_scope_update_wall_including_moving_subject(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
+    """**编辑**：改别科目的题 → 40301；把自己科目题**搬到**别科目 → 也 40301。
+
+    后者不能漏 —— 否则可以把题"搬进"一个自己没被授权的科目，
+    等于绕过新建时的那道闸。
+    """
+    sz_id, sz_chapter = sz
+    jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
+    my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
+    h = _scoped_headers(client, admin_h, nickname="范围-编辑")
+
+    # ---- 改别科目的题 ----
+    detail = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))["data"]
+    b = body(client.put(f"{API}/admin/questions/{jz_qid}", headers=h,
+                        json={"version": detail["version"], "stem": "越权改的题干"}))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+    after = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))["data"]
+    assert after["stem"] == detail["stem"], "越权编辑居然改了内容"
+
+    # ---- 把自己的题搬去别的科目 ----
+    mine = body(client.get(f"{API}/admin/questions/{my_qid}", headers=admin_h))["data"]
+    b = body(client.put(f"{API}/admin/questions/{my_qid}", headers=h,
+                        json={"version": mine["version"], "subject_id": JZ_SUBJECT_ID}))
+    assert b["code"] == 40301 and "目标科目" in b["message"], b
+    after = body(client.get(f"{API}/admin/questions/{my_qid}", headers=admin_h))["data"]
+    assert after["subject_id"] == str(sz_id), "题被搬走了"
+
+    # 本科目内改动照常
+    b = body(client.put(f"{API}/admin/questions/{my_qid}", headers=h,
+                        json={"version": mine["version"], "stem": mine["stem"] + "（教研改）"}))
+    assert b["code"] == 0, b
+
+    _drop(client, admin_h, my_qid)
+    _drop(client, admin_h, jz_qid)
+
+
+def test_scope_delete_and_restore_wall(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
+    """**删除 / 恢复**：两条都要拦，且恢复的**幂等分支也拦得住**。
+
+    幂等分支（"本来就没删"→ 200 + already_active）必须排在范围闸**之后** ——
+    否则越权者能靠"这道题没被删"拿到一个 200，等于用返回值确认了对象存在。
+    """
+    sz_id, sz_chapter = sz
+    jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
+    h = _scoped_headers(client, admin_h, nickname="范围-删恢复")
+
+    b = body(client.delete(f"{API}/admin/questions/{jz_qid}", headers=h))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+    assert body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))["code"] == 0, (
+        "越权删除居然成功了"
+    )
+
+    # 未删态的幂等分支：也不许提前返回 200
+    b = body(client.post(f"{API}/admin/questions/{jz_qid}/restore", headers=h, json={}))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+
+    # 已删态
+    _drop(client, admin_h, jz_qid)
+    b = body(client.post(f"{API}/admin/questions/{jz_qid}/restore", headers=h, json={}))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+    detail = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))["data"]
+    assert detail["is_deleted"] is True, "越权恢复居然成功了"
+
+    # 自己科目的题，删/恢复都正常
+    my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
+    assert body(client.delete(f"{API}/admin/questions/{my_qid}", headers=h))["code"] == 0
+    assert body(client.post(f"{API}/admin/questions/{my_qid}/restore",
+                            headers=h, json={}))["code"] == 0
+    _drop(client, admin_h, my_qid)
+
+
+def test_scope_batch_delete_is_all_or_nothing(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
+    """**批量删除**：混入一道越权的 → **整批 40301**，不是"把那条塞进 skipped"。
+
+    这是本组最容易被做成"看起来更友好、实际更弱"的一处：若把越权降级成 `skipped`，
+    批量入口就比单条入口（40301）**更容易绕过**，而且越权尝试会被照常写进审计日志
+    当作正常操作。判据（硬约定 C）：要不要"放过"看目标状态是否已达成 —— 越权不满足。
+    """
+    sz_id, sz_chapter = sz
+    my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
+    jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
+    h = _scoped_headers(client, admin_h, nickname="范围-批量删")
+
+    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h,
+                         json={"ids": [my_qid, jz_qid]}))
+    assert b["code"] == 40301, b
+    assert "整批未执行" in b["message"] and jz_qid in b["message"], b["message"]
+    for qid in (my_qid, jz_qid):
+        d = body(client.get(f"{API}/admin/questions/{qid}", headers=admin_h))["data"]
+        assert d["is_deleted"] is False, f"{qid} 被误删了 —— 整批拒绝必须零副作用"
+
+    # 只传自己的 → 正常
+    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h,
+                         json={"ids": [my_qid]}))
+    assert b["code"] == 0 and b["data"]["deleted"] == 1, b
+
+    # 只传越权的 → 也是 40301（哪怕整批只有一条越权）
+    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h,
+                         json={"ids": [jz_qid]}))
+    assert b["code"] == 40301, b
+
+    _drop(client, admin_h, jz_qid)
+
+
+def test_scope_dropdowns_are_filtered(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
+    """**下拉数据源**（章节树 / 知识点）：只列有权限的科目；显式要范围外的 → 40301。
+
+    下拉是"能选什么"的清单 —— 把没权限的科目摆上去，等于让用户点一个注定 403 的选项。
+    """
+    h = _scoped_headers(client, admin_h, nickname="范围-下拉")
+
+    b = body(client.get(f"{API}/admin/chapters/tree", headers=h))
+    assert b["code"] == 0, b
+    codes = {g["subject"]["code"] for g in b["data"]["items"]}
+    assert codes == {"SW-SZ"}, f"教研看到了别科目的章节树分组：{codes}"
+
+    b = body(client.get(f"{API}/admin/chapters/tree", headers=h,
+                        params={"subject_id": JZ_SUBJECT_ID}))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+
+    assert body(client.get(f"{API}/admin/chapters/tree", headers=h,
+                           params={"subject_id": SZ_SUBJECT_ID}))["code"] == 0
+
+    # ---- 知识点：同理 ----
+    b = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=h))
+    assert b["code"] == 0, b
+    subs = {x["subject_id"] for x in b["data"]["items"]}
+    assert subs <= {str(SZ_SUBJECT_ID)}, f"教研看到了别科目的知识点：{subs}"
+
+    b = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=h,
+                        params={"subject_id": JZ_SUBJECT_ID}))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+
+    # 对照组：超管不受影响（收口不能把全局岗也一起收掉）
+    b = body(client.get(f"{API}/admin/chapters/tree", headers=admin_h))
+    assert b["code"] == 0 and len(b["data"]["items"]) >= 2, (
+        f"超管应当看到全部科目分组，实际 {len(b['data']['items'])} 组"
+    )
+
+
+def test_scope_fails_closed_for_unmapped_scope_type(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
+    """只挂**未映射**的 `professional` 范围 → 可见集合是**空集**，全拦。
+
+    这是"失败关闭"最容易被误实现成"失败开启"的点：`scope_subject_ids` 对
+    professional/course 返回**空集合**（不是 `None`）。`None` 的语义是"不限制"，
+    两者搞混就等于给未映射的范围**放开全部**。
+    """
+    sz_id, sz_chapter = sz
+    my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
+    h = _scoped_headers(client, admin_h, nickname="范围-未映射",
+                        scope_type="professional", scope_id=SZ_SUBJECT_ID)
+
+    b = body(client.get(f"{API}/admin/questions", headers=h, params={"page_size": 5}))
+    assert b["code"] == 0 and b["data"]["total"] == 0, (
+        "未映射范围应当收敛到空集（失败关闭），实际看到 "
+        f"{b['data'].get('total')} 条"
+    )
+
+    b = body(client.get(f"{API}/admin/questions/{my_qid}", headers=h))
+    assert b["code"] == 40301 and "数据范围" in b["message"], b
+
+    b = body(client.get(f"{API}/admin/chapters/tree", headers=h))
+    assert b["code"] == 0 and b["data"]["items"] == [], b["data"]
+
+    _drop(client, admin_h, my_qid)
+
+
+def test_scope_global_role_unrestricted(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
+    """对照组：`global` 范围**不受任何限制**。"""
+    jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
+    b = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))
+    assert b["code"] == 0, b
+    _drop(client, admin_h, jz_qid)

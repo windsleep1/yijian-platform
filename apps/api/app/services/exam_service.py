@@ -112,7 +112,12 @@ logger = logging.getLogger("app.exam")
 
 #: 数据范围的判定复用题库那一份唯一事实源（避免两处各写一套过滤规则慢慢漂移）。
 from app.services import config_service  # noqa: E402
-from app.services.question_service import ScopeViewer, scope_subject_ids  # noqa: E402
+from app.services.question_service import (  # noqa: E402
+    ScopeViewer,
+    ensure_subject_visible,
+    scope_clause,
+    scope_subject_ids,
+)
 
 
 class Actor(ScopeViewer, Protocol):
@@ -195,19 +200,12 @@ def _merge_rule_config(current: dict[str, Any], **updates: Any) -> dict[str, Any
 # ============================================================ 数据范围
 
 
-def _visible_subject_ids(viewer: ScopeViewer) -> set[int] | None:
-    return scope_subject_ids(viewer)
-
-
-def _ensure_subject_visible(viewer: ScopeViewer, subject_id: int, what: str = "该科目") -> None:
-    """教研只能碰自己科目范围内的试卷 / 规则（`docs/05` 的数据范围要求）。"""
-    allowed = _visible_subject_ids(viewer)
-    if allowed is None:
-        return
-    if subject_id not in allowed:
-        raise errors.forbidden(
-            f"{what}不在你的数据范围内（当前账号只被授权了 {len(allowed)} 个科目）", 40301
-        )
+# 数据范围的判定**只有一份实现**（`question_service`），这里只是别名 ——
+# 本文件原先自己实现了一份 `_ensure_subject_visible` / `_scope_clause`，
+# 与题库那份是同一条规则的两个副本，迟早会漂（数据范围收口时合并）。
+_visible_subject_ids = scope_subject_ids
+_ensure_subject_visible = ensure_subject_visible
+_scope_clause = scope_clause
 
 
 async def _assert_subject_usable(db: AsyncSession, subject_id: int) -> None:
@@ -227,19 +225,6 @@ async def _assert_subject_usable(db: AsyncSession, subject_id: int) -> None:
         raise errors.bad_request("科目不存在", 40001)
     if row["status"] != "on":
         raise errors.bad_request(f"科目「{row['name']}」已停用，不能用于组卷", 40001)
-
-
-def _scope_clause(viewer: ScopeViewer, column: str) -> tuple[str, dict[str, Any]]:
-    allowed = _visible_subject_ids(viewer)
-    if allowed is None:
-        return "", {}
-    if not allowed:
-        return f" AND {column} = ANY(CAST(:scope_subject_ids AS bigint[]))", {
-            "scope_subject_ids": []
-        }
-    return f" AND {column} = ANY(CAST(:scope_subject_ids AS bigint[]))", {
-        "scope_subject_ids": sorted(allowed)
-    }
 
 
 # ============================================================ 组卷规则 CRUD

@@ -1,6 +1,7 @@
-# 一建通 · 管理后台 v0.1（Batch 6）
+# 一建通 · 管理后台 v0.1（Batch 7）
 
-一级建造师学习备考平台的 **B 端管理后台**。累计交付：题库 CRUD（Batch 4）+ 题库批量导入管道与导入向导（Batch 5/6）。
+一级建造师学习备考平台的 **B 端管理后台**。累计交付：题库 CRUD（Batch 4）+ 题库批量导入管道与导入向导（Batch 5/6）+ 组卷引擎（Batch 7，含试卷列表 / 详情编辑 /
+新建试卷 / 组卷规则管理 / 实时试算）+ 状态机补齐（试卷下线 / 账号停用启用）+ 数据范围收口。
 
 技术栈：Next.js 14（App Router）+ TypeScript + Tailwind + shadcn/ui + TanStack Query v5。
 
@@ -190,7 +191,7 @@ student      无权限                         → 没有 user:read
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepRunning
-# 期望：118 passed, 1 skipped
+# 期望：126 passed, 1 skipped
 #   test_admin_v5.py  13 个  ← 导入管道（上传/校验/执行/发布/回滚/变更日志/数据范围）
 #   test_idgen.py     15 个  ← 雪花 ID 精度
 #   test_admin_v3/v4、test_smoke  ← Batch 2/3/4（不能回归）
@@ -253,7 +254,7 @@ Pass 2 前端未落地前，直接打接口验证：
 
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
-# 期望：118 passed, 1 skipped（其中 test_admin_v7.py 58 条是组卷用例）
+# 期望：126 passed, 1 skipped（其中 test_admin_v7.py 58 条是组卷用例）
 ```
 
 只跑组卷用例（复用已运行的 API）：
@@ -341,13 +342,14 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 ```
 
 一条命令完成：起 PostgreSQL → 载入 schema → 重放 RBAC 种子 → 初始化超管 → 起 API → 跑 pytest → 收尾。
-**期望 `118 passed, 1 skipped`**：
+**期望 `126 passed, 1 skipped`**：
 
 ```
 tests/test_idgen.py      15 个   ← 雪花 ID 精度（Batch 5）
 tests/test_admin_v3.py   14 个   ← 用户详情 / viewer 流程 / 角色权限契约 / 审计筛选 /
                                   停用启用账号（三道守卫 + 留痕 + 权限墙）
-tests/test_admin_v4.py   12 个   ← 题库 CRUD（Batch 4）
+tests/test_admin_v4.py   20 个   ← 题库 CRUD（Batch 4）+ 数据范围收口
+                                  （详情/新建/编辑/删除/批量/恢复/两个下拉）
 tests/test_admin_v5.py   14 个   ← 导入管道 + 变更日志（Batch 5/6）
                                   其中 1 条是 6000 行全量门控用例，默认 skip
 tests/test_admin_v7.py   58 个   ← 组卷引擎（Batch 7）：规则 CRUD / 组卷算法 / 缺口 /
@@ -355,7 +357,7 @@ tests/test_admin_v7.py   58 个   ← 组卷引擎（Batch 7）：规则 CRUD / 
                                   试卷归档 + 恢复 / 题目恢复 / 手动加题移题
 tests/test_smoke.py       6 个   ← Batch 2 的认证链路 + RBAC（不能回归）
 ─────────────────────────────────────────────────────────────
-共 119 条 collected → 118 passed, 1 skipped
+共 127 条 collected → 126 passed, 1 skipped
 ```
 
 > `run-smoke.ps1` 用的是 8123 端口，并且**结束时会把 PostgreSQL 停掉**。
@@ -441,11 +443,13 @@ apps/admin/
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     47 条踩过的坑
-│  └─ screenshots/                    人工走查截图存档（batch3/ batch6/）
+│  ├─ B端联调坑.md                     50 条踩过的坑
+│  └─ screenshots/                    人工走查截图存档（batch3 平铺 15 张 / batch4 13 /
+│                                     batch6 18 / batch7-pass2a 14 / batch7-pass2b 13 /
+│                                     batch7-state-machine 4）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 47 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+配套文档：**`docs/B端联调坑.md`** —— 50 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
 disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
 Batch 6 的回滚数字语义、模态框失败态、下载验真，
 Batch 7 的 `subjects` 无 `is_deleted`、SELECT 列与取值清单不一致、

@@ -37,7 +37,10 @@ DESCRIPTION = """
 + Batch 4（题库 CRUD / 章节树）
 + Batch 5（题库批量导入管道：上传 / 校验 / 执行 / 发布 / 回滚）
 + Batch 6（批次变更日志）
-+ Batch 7（组卷规则 CRUD / 试卷 CRUD / 归档 + 恢复 / 手动加题移题 / 自动组卷 / 卷面校验 / 发布锁定），共 **50 个接口**。
++ Batch 7（组卷规则 CRUD / 试卷 CRUD / 归档 + 恢复 / 手动加题移题 / 自动组卷 / 卷面校验 / 发布锁定
+/ 规则试算 / 试卷下线），共 **50 个接口**。
++ 之后：**状态机补齐**（`unpublish` + 账号停用/启用）与 **数据范围收口**
+（题目八条入口统一走 `scope_subject_ids`，见 `docs/14` / `docs/16`）。
 
 **统一响应体**：`{ code, message, data, trace_id, server_time }`，`code=0` 表示成功。
 

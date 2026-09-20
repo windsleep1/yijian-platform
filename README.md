@@ -39,14 +39,15 @@ npm run dev                                       # 打开 http://localhost:3000
 | **Batch 4** | **题库 CRUD**：后端 7 个接口 + 前端 3 个页面（列表 / 新建 / 详情编辑）+ 版本历史 | ✅ 已交付 |
 | **Batch 5** | **题库批量导入管道**：后端 7 个接口（上传 / 校验 / 执行 / 发布 / 回滚）+ 雪花 ID 精度修复 | ✅ 已交付 |
 | **Batch 6** | **导入向导**：前端 4 页（批次列表 / 三步向导 / 批次详情 / 错误报告 CSV）+ 批次变更日志接口 | ✅ 已交付 |
-| **Batch 7** | **组卷引擎**：组卷规则 CRUD + 自动组卷 / 卷面校验 / 发布（版本锁定）+ 试卷管理前端 | 🚧 Pass 1（后端）✅ / Pass 2（前端）待做 |
+| **Batch 7** | **组卷引擎**：组卷规则 CRUD + 自动组卷 / 卷面校验 / 发布（版本锁定）+ 试卷管理前端（列表 / 详情 / 新建 / 规则管理 / 实时试算 / 下线） | ✅ 已交付 |
+| **Batch 7+** | **状态机补齐**：试卷下线 + 账号停用/启用 + 删 `exams.archived` + **数据范围收口**（题目八条入口） | ✅ 已交付 |
 
 > **交付序号与最初规划不同。** 原「Batch 5」把导入流水线、组卷引擎、记忆曲线、小程序端、
 > 支付、数据看板、压测打包在一批里；实际按依赖顺序拆成了
 > **Batch 5（导入管道）→ Batch 6（导入向导）→ Batch 7（组卷引擎）**。
 > 记忆曲线、小程序端、支付、数据看板仍未启动。
 >
-> 当前后端共 **50 个接口**，pytest 全量 **118 passed, 1 skipped**。
+> 当前后端共 **50 个接口**，pytest 全量 **126 passed, 1 skipped**。
 
 **每一批都可以独立执行、独立验收。** Batch 2 起，后端本身就是可运行服务：
 `cd deploy && cp .env.example .env && docker compose up -d --build` → `http://localhost:8000/docs` 即可点开 Swagger 联调。
@@ -90,14 +91,16 @@ yijian-platform/
 │   ├─ 10-Batch4-题库CRUD-方案与验收.md # Batch 4 方案、6 个 B 端特征、验收证据与实测缺陷
 │   ├─ 11-Batch5-导入管道-方案与验收.md # Batch 5 导入管道、data scope、雪花 ID 修复
 │   ├─ 12-Batch6-导入向导-方案与验收.md # Batch 6 导入向导、七项交互、18 张截图
-│   ├─ 13-Batch7-组卷引擎-方案与验收.md # Batch 7 Pass 1 组卷引擎（接口 / 算法 / 版本锁定 / 实测缺陷）
+│   ├─ 13-Batch7-组卷引擎-方案与验收.md # Batch 7 组卷引擎（接口 / 算法 / 版本锁定 / 实时试算 / 实测缺陷）
+│   ├─ 14-状态机审计.md                # 29 张 status 表逐个审计（P0/P1/P2）+ 可复用的 5 步方法
+│   ├─ 15-审计链补齐.md                # 立项：审核要记「人 + 时间 + 理由」（与 C 端/支付批一起排）
 │   └─ samples/                        # 验收用样例文件（错误报告 / 走查 CSV）
 ├─ apps/
 │   ├─ api/                           # FastAPI 后端（Batch 2 起，逐批扩充）
 │   │   ├─ Dockerfile                 # python:3.12-slim，非 root 运行
 │   │   ├─ docker-entrypoint.sh       # 等依赖 → 建表 → 建超管 → 启动
 │   │   ├─ requirements.txt
-│   │   ├─ tests/                     # pytest（118 passed, 1 skipped）：smoke + v3 + v4 + v5 + v7 + idgen
+│   │   ├─ tests/                     # pytest（126 passed, 1 skipped）：smoke + v3 + v4 + v5 + v7 + idgen
 │   │   └─ app/
 │   │       ├─ main.py                # 应用入口（中间件 / 异常处理 / 路由挂载）
 │   │       ├─ cli.py                 # wait-db / wait-redis / init-db / seed-admin / seed-questions
@@ -117,10 +120,12 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 47 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 50 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
-│           └─ screenshots/batch7/     # Batch 7 Pass 2 待产出
+│           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）
+│           ├─ screenshots/batch7-pass2b/        # /paper-rules + /exams/new 实时试算（13 张）
+│           └─ screenshots/batch7-state-machine/ # 试卷下线 + 账号停用（4 张）
 ├─ tools/local-verify/                # 本地联调脚本：起服务 / 冒烟 / 回归探针 / 导入转换器
 ├─ db/
 │   ├─ schema.sql                     # 可直接执行的 PostgreSQL 建表脚本（64 表 + 3 视图 + 102 索引 + 基础数据）
@@ -167,7 +172,7 @@ curl http://localhost:8000/api/v1/health
 cd ../apps/api
 pip install -r requirements.txt
 ADMIN_INIT_PHONE=13800000000 ADMIN_INIT_PASSWORD=Admin@123456 pytest tests -v
-# 全量 118 passed, 1 skipped（1 skipped 是 6000 行导入用例，需环境变量显式开启）
+# 全量 126 passed, 1 skipped（1 skipped 是 6000 行导入用例，需环境变量显式开启）
 ```
 
 `test_smoke.py` 覆盖认证主链路：注册 → `/me` → 密码登录 → 刷新令牌轮换（旧 token 立即失效）→ 登出 →
@@ -332,14 +337,18 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 
 ## 七、下一步
 
-**Batch 1 ~ 7 Pass 1 + 前置修正已完成**（认证/RBAC → 管理后台 → 题库 CRUD → 导入管道
-→ 导入向导 → 组卷引擎后端 + locked_version 列 / viewer 只读 / 试卷归档）。
-往下可以接着推：
+**Batch 1 ~ 7 全部完成**（认证/RBAC → 管理后台 → 题库 CRUD → 导入管道 → 导入向导 →
+组卷引擎（后端 + 前端）→ 状态机补齐），另有**数据范围收口**。往下可以接着推：
 
-- **Batch 7 Pass 2（下一步）** → 试卷管理前端：`/exams` 列表（含"显示已归档"开关）、
-  `/exams/new`（手动选题 / 规则自动组卷）、`/exams/[id]`（卷面结构预览 + 加题/移题 +
-  发布 + 归档）、`/paper-rules` 规则管理。
-  后端 **21 个接口**与 `shortfalls` / 版本锁定 / 加题移题 / 归档恢复 / 结构防护 / 规则试算 / 下线 / viewer 只读能力已就绪（见 `docs/13` §9–§11）
+- **① 数据范围收口（已完成）** → 题目**八条入口**（列表 / 详情 / 新建 / 编辑 / 删除 /
+  批量删除 / 恢复 / 两个下拉）统一走 `question_service.scope_subject_ids()` 这一份唯一来源；
+  顺手消掉 `exam_service` 里的第二份副本。判据是「**凡是按 id 寻址的入口都要自己再拦一次**」
+  —— 列表过滤防的是"翻到"，防不了"猜到"（`B端联调坑.md` 坑 48 / 49）。
+- **② 门禁整顿（下一步）** → `npm run lint` 目前是**假门禁**（脚本在、配置不在，坑 44）；
+  补 ESLint / Prettier 配置与覆盖率阈值。
+- **③ 审计链补齐** → `docs/15-审计链补齐.md` 立项：`reviewed_by` / `audited_by` /
+  `reviewer_id` 三处引用数全为 0 —— 状态能改，但"谁审的、什么时候审的"从没被记录。
+- **记忆曲线** → 学员练习调度算法（依赖答题记录，需 C 端先落地）
 - **记忆曲线** → 学员练习调度算法（依赖答题记录，需 C 端先落地）
 - **移动端骨架** → 学员侧页面：首页倒计时、章节练习、答题卡、错题本、模拟考试、成绩报告
 - **「调整方案」** → 告诉我哪里要改（比如要换 Spring Boot / 要加直播 / 要做多租户加盟商）

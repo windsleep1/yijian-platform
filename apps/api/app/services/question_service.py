@@ -33,7 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import bad_request, conflict, not_found
+from app.core.errors import bad_request, conflict, forbidden, not_found
 from app.core.idgen import next_id
 from app.schemas.admin_question import (
     MAX_OPTIONS,
@@ -209,6 +209,58 @@ def scope_subject_ids(current_user: ScopeViewer) -> set[int] | None:
         return ids
     # 只挂了 professional / course 范围，本批还没有映射规则 → 收敛到空集（失败关闭）
     return set()
+
+
+def ensure_subject_visible(
+    viewer: ScopeViewer, subject_id: int, what: str = "该科目"
+) -> None:
+    """科目的**准入闸**：不在数据范围内就 `40301`。与 `scope_subject_ids` 同一份判定。
+
+    ## 为什么必须有它（数据范围收口的由来）
+
+    收口前只有 `list_questions` 套了范围过滤 —— **列表看不见，但照着 id 直接请求
+    就能读到、改到、删掉别的科目的题**。"列表过滤"防的是"翻到"，防不了"猜到"。
+    凡是**按 id 寻址**的入口都得自己再拦一次，否则等于"知道 id 就能越权"。
+
+    ## 语义
+
+    - `allowed is None`（`global` 范围）→ 放行；
+    - `allowed` 为空集（只挂了未映射的 `professional` / `course`）→ **全拒绝**
+      （失败关闭，理由见 `scope_subject_ids`）；
+    - 否则 `subject_id` 必须落在集合里。
+
+    ## 为什么报 40301 而不是 40401
+
+    对象**确实存在**，只是不归你。报 404 会让排查的人以为 id 写错了，
+    去找一个并不存在的问题，反而绕远路。（这也与硬约定 A 划清界限：
+    那条说的是"只读函数**夹带**比调用方更严的准入"；本条是**准入判据本身**，
+    读路径与写路径**共用同一份**，不会出现上下层不一致。）
+    """
+    allowed = scope_subject_ids(viewer)
+    if allowed is None:
+        return
+    if subject_id not in allowed:
+        raise forbidden(
+            f"{what}不在你的数据范围内（当前账号只被授权了 {len(allowed)} 个科目）", 40301
+        )
+
+
+def scope_clause(viewer: ScopeViewer, column: str) -> tuple[str, dict[str, Any]]:
+    """生成「科目范围」的 SQL 片段 `(sql, params)`，供**原生 SQL** 拼 `WHERE` 用。
+
+    与 `apply_data_scope` 是同一判定的两种形态：那个服务 `QuestionQuery`（题库列表），
+    本函数服务直接拼 SQL 的试卷/规则列表。两者都调 `scope_subject_ids`，口径不会漂。
+
+    ⚠️ **空集合也必须真的生成 SQL** —— `= ANY(空数组)` 恒假才是"失败关闭"；
+    若写成"没范围就不加这个 WHERE"，那是失败**开启**。
+    """
+    allowed = scope_subject_ids(viewer)
+    if allowed is None:
+        return "", {}
+    return (
+        f" AND {column} = ANY(CAST(:scope_subject_ids AS bigint[]))",
+        {"scope_subject_ids": sorted(allowed)},
+    )
 
 
 def apply_data_scope(query: QuestionQuery, current_user: ScopeViewer) -> QuestionQuery:
@@ -531,10 +583,12 @@ async def get_question_detail(
     - 不存在的 id → `40401`（**不是** 200 + 空对象）
     - 软删除的题**仍可查看**（详情页要能展示"这条已归档"），但 `is_deleted=true` 会带出去
     - 历史版本内联返回（最新在前，最多 10 条），只读
+    - **数据范围**：题目的科目不在调用者范围内 → `40301`（列表看不见 ≠ 按 id 也读不到）
     """
     row = await _load_question_row(db, question_id)
     if row is None:
         raise not_found("题目不存在", 40401)
+    ensure_subject_visible(viewer, int(row["subject_id"]), "题目所属科目")
 
     options = await _load_options(db, question_id)
     subject_name = await db.scalar(
@@ -621,6 +675,8 @@ async def create_question(
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> QuestionDetail:
+    # 数据范围**最先校验**（在任何写库动作之前）—— 越权请求必须零副作用。
+    ensure_subject_visible(actor, payload.subject_id, "题目所属科目")
     await _ensure_subject(db, payload.subject_id)
     if payload.chapter_id is not None:
         await _ensure_chapter(db, payload.chapter_id, payload.subject_id)
@@ -742,6 +798,13 @@ async def update_question(
     row = await _load_question_row(db, question_id, for_update=True)
     if row is None:
         raise not_found("题目不存在", 40401)
+    # 数据范围：**当前所属科目**与**要改到的科目**都必须在范围内。
+    # 后者不能漏 —— 否则能把题"搬进"一个自己没被授权的科目，
+    # 等于绕过新建时的那道闸。两道闸都排在 `is_deleted` / `version` 之前：
+    # 越权者不该从报错里读出"这道题有没有被归档、别人是不是改过"。
+    ensure_subject_visible(actor, int(row["subject_id"]), "题目所属科目")
+    if payload.subject_id is not None:
+        ensure_subject_visible(actor, payload.subject_id, "目标科目")
     if row["is_deleted"]:
         raise bad_request("题目已归档（软删除），请先恢复后再编辑", 40001)
     if row["version"] != payload.version:
@@ -934,10 +997,14 @@ async def soft_delete_question(
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> QuestionDeleteOut:
-    """软删除单题。幂等：已经删过的再删返回 `40401`（而不是假装成功）。"""
+    """软删除单题。幂等：已经删过的再删返回 `40401`（而不是假装成功）。
+
+    数据范围：科目不在调用者范围内 → `40301`，且**在任何写库动作之前**。
+    """
     row = await _load_question_row(db, question_id, for_update=True)
     if row is None:
         raise not_found("题目不存在", 40401)
+    ensure_subject_visible(actor, int(row["subject_id"]), "题目所属科目")
     if row["is_deleted"]:
         raise bad_request("题目已经是删除状态，无需重复删除", 40001)
 
@@ -1053,6 +1120,8 @@ async def restore_question(
     row = await _load_question_row(db, question_id, for_update=True)
     if row is None:
         raise not_found("题目不存在", 40401)
+    # 范围闸排在幂等分支**之前**：越权者不该靠"已经没删"这个返回拿到 200。
+    ensure_subject_visible(actor, int(row["subject_id"]), "题目所属科目")
 
     if not row["is_deleted"]:
         return QuestionRestoreOut(
@@ -1108,15 +1177,44 @@ async def batch_soft_delete(
       其中一条有问题就整批失败）
     - 整批共用一个 `batch_id`，写进 `content_change_logs.batch_id`，
       将来要"撤销这一批"或者追溯"谁在什么时候批量删了什么"就靠它
+    - ⚠️ **但数据范围越权是整批 `40301`、零副作用**（不算 `skipped`，理由见函数中部注释）
     """
     uniq = list(dict.fromkeys(ids))
     rows = (
         await db.execute(
-            text("SELECT id, stem, is_deleted FROM questions WHERE id = ANY(CAST(:ids AS bigint[]))"),
+            text(
+                "SELECT id, subject_id, stem, is_deleted FROM questions "
+                "WHERE id = ANY(CAST(:ids AS bigint[]))"
+            ),
             {"ids": uniq},
         )
     ).mappings().all()
     found = {r["id"]: dict(r) for r in rows}
+
+    # ---- 数据范围：**整批拒绝**，不是"把越权的那几条塞进 skipped" ----
+    #
+    # 为什么不复用下面的 `skipped`：`skipped` 的语义是"目标状态已达成 / 对象不存在"
+    # —— 那些情况下**继续处理其余几条是合理的**。越权不属于这一类，它是"**你根本不许动**"。
+    # 若这里也悄悄跳过，批量入口就变成比单条入口（`40301`）**更弱**的一道闸：
+    # 越权者只要改走批量接口，403 就降级成一句不起眼的 `skipped`，
+    # 而且**会被照常写进审计日志当作正常操作**。
+    # 按硬约定 C 的判据（要不要"放过"看目标状态是否已达成）—— 越权不满足，故整批拒绝、零副作用。
+    if uniq:
+        allowed = scope_subject_ids(actor)
+        if allowed is not None:
+            outsiders = [
+                i for i in uniq if i in found and int(found[i]["subject_id"]) not in allowed
+            ]
+            if outsiders:
+                preview = "、".join(str(i) for i in outsiders[:5])
+                if len(outsiders) > 5:
+                    preview += f" 等 {len(outsiders)} 道"
+                raise forbidden(
+                    f"有 {len(outsiders)} 道题不在你的数据范围内（{preview}），"
+                    f"**整批未执行**。当前账号只被授权了 {len(allowed)} 个科目，"
+                    "请从选择里去掉它们后重试。",
+                    40301,
+                )
 
     to_delete = [i for i in uniq if i in found and not found[i]["is_deleted"]]
     skipped = [i for i in uniq if i not in found or found[i]["is_deleted"]]
@@ -1154,15 +1252,26 @@ async def batch_soft_delete(
 # ============================================================ 章节树
 
 
-async def list_chapter_tree(db: AsyncSession, *, subject_id: int | None = None) -> ChapterTreeOut:
+async def list_chapter_tree(
+    db: AsyncSession, *, viewer: ScopeViewer, subject_id: int | None = None
+) -> ChapterTreeOut:
     """章节树（下拉用）。
 
-    - 不传 `subject_id` → 返回全部科目分组；传了就只返回那一组
+    - 不传 `subject_id` → 返回**调用者有数据范围的全部科目**分组；传了就只返回那一组
     - `question_count` 是**实时统计**（不含软删除），不是读 `chapters.question_count`
       那个冗余列 —— 冗余列的刷新任务还没做，读了会全是 0，反而误导人
     - 当前种子的章节都是 level=1 的扁平结构，但这里按 `parent_id` **递归成树**，
       将来加了二级章节，接口形状不用变
+    - **数据范围**：显式指定别的科目 → `40301`；不指定时**只列出有权限的科目分组**
+      （下拉是"能选什么"的清单，把没权限的科目摆上去，等于让用户点一个注定 403 的选项）
     """
+    if subject_id is not None:
+        ensure_subject_visible(viewer, subject_id, "科目")
+
+    # 不指定科目时，这份"能选哪些科目"的清单同样按数据范围收口。
+    # ⚠️ `subjects` 在这条 SQL 里**没有别名**，所以列名直接写 `id`。
+    scope_sql, scope_params = scope_clause(viewer, "id")
+
     sub_params: dict[str, Any] = {}
     sub_where = "WHERE is_deleted = false"
     if subject_id is not None:
@@ -1197,9 +1306,10 @@ async def list_chapter_tree(db: AsyncSession, *, subject_id: int | None = None) 
             text(
                 "SELECT id, code, name, short_name, professional FROM subjects "
                 "WHERE status = 'on' " + ("AND id = :sid " if subject_id is not None else "")
+                + scope_sql
                 + "ORDER BY sort_no, id"
             ),
-            sub_params,
+            {**sub_params, **scope_params},
         )
     ).mappings().all()
 
@@ -1245,6 +1355,7 @@ async def list_chapter_tree(db: AsyncSession, *, subject_id: int | None = None) 
 async def list_knowledge_points(
     db: AsyncSession,
     *,
+    viewer: ScopeViewer,
     subject_id: int | None = None,
     chapter_id: int | None = None,
     keyword: str | None = None,
@@ -1258,7 +1369,13 @@ async def list_knowledge_points(
 
     `is_deleted = false` 是硬过滤：已删除的知识点不该出现在筛选下拉里，
     否则用户筛一个"已经不存在的知识点"，结果必然是空 —— 一个注定空手而归的选项。
+
+    **数据范围**：显式指定别的科目 → `40301`；否则按 `kp.subject_id` 收口
+    （与章节树同理，下拉里不该出现选不了的选项）。
     """
+    if subject_id is not None:
+        ensure_subject_visible(viewer, subject_id, "科目")
+
     conds: list[str] = ["kp.is_deleted = false", "c.is_deleted = false"]
     params: dict[str, Any] = {}
     if subject_id is not None:
@@ -1270,6 +1387,8 @@ async def list_knowledge_points(
     if keyword and keyword.strip():
         conds.append("(kp.name ILIKE :kw OR kp.code ILIKE :kw)")
         params["kw"] = f"%{keyword.strip()}%"
+
+    scope_sql, scope_params = scope_clause(viewer, "kp.subject_id")
 
     rows = (
         await db.execute(
@@ -1284,10 +1403,10 @@ async def list_knowledge_points(
                 "    WHERE is_deleted = false AND knowledge_point_id IS NOT NULL "
                 "    GROUP BY knowledge_point_id"
                 ") cnt ON cnt.knowledge_point_id = kp.id "
-                "WHERE " + " AND ".join(conds) + " "
+                "WHERE " + " AND ".join(conds) + scope_sql + " "
                 "ORDER BY c.sort_no, kp.sort_no, kp.id"
             ),
-            params,
+            {**params, **scope_params},
         )
     ).mappings().all()
 
@@ -1386,6 +1505,8 @@ __all__ = [
     "QuestionQuery",
     "apply_data_scope",
     "scope_subject_ids",
+    "ensure_subject_visible",
+    "scope_clause",
     "content_hash",
     "derive_answer",
     "list_questions",

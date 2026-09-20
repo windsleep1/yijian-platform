@@ -26,7 +26,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.deps import DbSession, require_permission
+from app.core.deps import CurrentUserDep, DbSession, require_permission
 from app.core.response import Envelope, ok
 from app.schemas.admin_question import ChapterTreeOut, KnowledgePointListOut
 from app.services import question_service
@@ -45,17 +45,20 @@ router = APIRouter(prefix="/admin/chapters", tags=["管理端 · 章节"])
         "- `question_count` 是**实时统计**（不含软删除），不是读 `chapters.question_count` "
         "那个冗余列 —— 冗余列的刷新任务还没做，读了会全是 0，反而误导人。\n"
         "- 当前种子的章节都是 `level=1` 的扁平结构，但本接口按 `parent_id` 递归成树；"
-        "将来加了二级章节，返回形状不变。"
+        "将来加了二级章节，返回形状不变。\n"
+        "- **数据范围**：不传 `subject_id` 只返回**你有权限的科目**分组；"
+        "显式传一个范围外的科目 → `40301`。"
     ),
     dependencies=[Depends(require_permission("question:read"))],
 )
 async def chapter_tree(
     db: DbSession,
+    me: CurrentUserDep,
     subject_id: Annotated[
         int | None, Query(description="科目 ID；不传返回全部科目分组")
     ] = None,
 ) -> dict:
-    tree = await question_service.list_chapter_tree(db, subject_id=subject_id)
+    tree = await question_service.list_chapter_tree(db, viewer=me, subject_id=subject_id)
     return ok(tree.model_dump())
 
 
@@ -80,11 +83,12 @@ async def chapter_tree(
 )
 async def knowledge_points(
     db: DbSession,
+    me: CurrentUserDep,
     subject_id: Annotated[int | None, Query(description="科目 ID")] = None,
     chapter_id: Annotated[int | None, Query(description="章节 ID")] = None,
     keyword: Annotated[str | None, Query(max_length=80, description="名称 / 编码模糊匹配")] = None,
 ) -> dict:
     out = await question_service.list_knowledge_points(
-        db, subject_id=subject_id, chapter_id=chapter_id, keyword=keyword
+        db, viewer=me, subject_id=subject_id, chapter_id=chapter_id, keyword=keyword
     )
     return ok(out.model_dump())
