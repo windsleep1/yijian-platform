@@ -28,8 +28,7 @@ import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "./auth-
 import { looksLikeUnsafeId, parseJsonSafe } from "./json-bigint";
 import type { Envelope } from "./types";
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/api/v1";
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/api/v1";
 
 export class ApiError extends Error {
   constructor(
@@ -332,7 +331,12 @@ export async function uploadRequest<T>(
     // 刻意不设 Content-Type —— 浏览器要自己补 boundary
     const at = getAccessToken();
     if (at) headers.Authorization = `Bearer ${at}`;
-    return fetch(`${API_BASE}${path}`, { method: "POST", headers, body: form, signal: opts.signal });
+    return fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers,
+      body: form,
+      signal: opts.signal,
+    });
   };
 
   return send<T>(path, doFetch, true);

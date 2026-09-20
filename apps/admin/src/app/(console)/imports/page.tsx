@@ -114,7 +114,9 @@ export default function ImportsPage() {
             {b.subject_name ?? "未指定"}
           </div>
           {b.subject_code ? (
-            <div className="yj-json truncate text-[11px] text-muted-foreground">{b.subject_code}</div>
+            <div className="yj-json truncate text-[11px] text-muted-foreground">
+              {b.subject_code}
+            </div>
           ) : null}
         </div>
       ),
@@ -129,7 +131,9 @@ export default function ImportsPage() {
             共 <span className="yj-json font-medium text-foreground">{b.total_rows}</span> 行
           </div>
           <div className="flex flex-wrap gap-x-2.5 gap-y-0.5">
-            <span className="text-emerald-700">新增 {Math.max(0, b.success_rows - b.updated_rows)}</span>
+            <span className="text-emerald-700">
+              新增 {Math.max(0, b.success_rows - b.updated_rows)}
+            </span>
             <span className="text-sky-700">更新 {b.updated_rows}</span>
             <span className="text-muted-foreground">跳过 {b.duplicate_rows}</span>
             <span className={cn(b.failed_rows > 0 ? "text-destructive" : "text-muted-foreground")}>
@@ -146,7 +150,10 @@ export default function ImportsPage() {
       render: (b) => (
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
-            <Badge variant={importStatusVariant(b.status)} className="whitespace-nowrap text-[10px]">
+            <Badge
+              variant={importStatusVariant(b.status)}
+              className="whitespace-nowrap text-[10px]"
+            >
               {importStatusLabel(b.status)}
             </Badge>
             <span className="text-[11px] text-muted-foreground">{nextActionHint(b)}</span>
@@ -228,7 +235,10 @@ export default function ImportsPage() {
 
       {/* ---- 筛选 ---- */}
       <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border bg-card p-3">
-        <Select value={state.status || ANY} onValueChange={(v) => setState({ status: v === ANY ? "" : v })}>
+        <Select
+          value={state.status || ANY}
+          onValueChange={(v) => setState({ status: v === ANY ? "" : v })}
+        >
           <SelectTrigger className="w-[150px]">
             <SelectValue placeholder="全部状态" />
           </SelectTrigger>

@@ -109,7 +109,7 @@ export default function QuestionDetailPage() {
         <p className="mt-2 text-sm text-muted-foreground">
           {notFound
             ? `ID「${id}」对应的题目不存在。它可能已被彻底删除，请确认链接是否正确。`
-            : ((err as Error | null)?.message ?? "未知错误")}
+            : (err as Error | null)?.message ?? "未知错误"}
         </p>
         <div className="mt-5 flex items-center justify-center gap-2">
           <Button variant="outline" size="sm" asChild>
@@ -261,8 +261,8 @@ export default function QuestionDetailPage() {
           <p className="mb-4 flex gap-2 rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
             <FileX className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              题型「{qTypeLabel(q.type)}」本批<strong>只能查看</strong>：它涉及背景材料、子问切分与评分点，
-              编辑能力属于后续批次。你仍然可以查看版本历史。
+              题型「{qTypeLabel(q.type)}」本批<strong>只能查看</strong>
+              ：它涉及背景材料、子问切分与评分点， 编辑能力属于后续批次。你仍然可以查看版本历史。
             </span>
           </p>
           <ReadOnlyView q={q} />

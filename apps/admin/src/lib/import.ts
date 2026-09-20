@@ -142,7 +142,9 @@ export type FlowStep = {
  * 两条都不成立时**不猜**：把节点停在「校验完成」。宁可比真实进度少画一格，
  * 也不要画出一个后端其实没告诉我们的状态 —— 那是"UI 撒谎"。
  */
-export function isExecuted(b: Pick<ImportBatch, "status" | "success_rows" | "updated_rows" | "can_execute">): boolean {
+export function isExecuted(
+  b: Pick<ImportBatch, "status" | "success_rows" | "updated_rows" | "can_execute">,
+): boolean {
   if (b.status === "rolled_back") return true;
   if (b.status === "importing") return true;
   if (b.success_rows + b.updated_rows > 0) return true;
@@ -255,10 +257,12 @@ export type StatCard = {
 };
 
 /** 校验结果的统计卡片。数字必须**具体**，不能只写"通过"。 */
-export function validateStats(b: Pick<
-  ImportBatch,
-  "total_rows" | "success_rows" | "failed_rows" | "duplicate_rows" | "updated_rows"
->): StatCard[] {
+export function validateStats(
+  b: Pick<
+    ImportBatch,
+    "total_rows" | "success_rows" | "failed_rows" | "duplicate_rows" | "updated_rows"
+  >,
+): StatCard[] {
   return [
     { key: "total", label: "文件总行数", value: b.total_rows, tone: "default" },
     {
@@ -309,7 +313,10 @@ function csvCell(v: unknown): string {
 }
 
 /** 错误报告 → CSV 文本（**已含 UTF-8 BOM**，Excel 直接双击不乱码）。 */
-export function errorsToCsv(errors: RowError[], opts?: { truncatedAt?: number; totalErrors?: number }): string {
+export function errorsToCsv(
+  errors: RowError[],
+  opts?: { truncatedAt?: number; totalErrors?: number },
+): string {
   const rows = [...errors].sort((a, b) => a.row_no - b.row_no);
   const lines = [CSV_HEADER.join(",")];
   for (const e of rows) {
@@ -325,7 +332,9 @@ export function errorsToCsv(errors: RowError[], opts?: { truncatedAt?: number; t
       [
         csvCell(""),
         csvCell("# 注意"),
-        csvCell(`报告已截断：此处 ${rows.length} 条，实际共 ${total} 条错误。请先修正已列出的行后重新校验。`),
+        csvCell(
+          `报告已截断：此处 ${rows.length} 条，实际共 ${total} 条错误。请先修正已列出的行后重新校验。`,
+        ),
       ].join(","),
     );
   }
@@ -345,7 +354,11 @@ export function errorReportFilename(batchNo: string): string {
  * 必须 `URL.revokeObjectURL`：不清的话每下载一次就泄漏一个 blob URL，
  * 导几十次之后页面内存会明显涨。
  */
-export function downloadTextFile(filename: string, content: string, mime = "text/csv;charset=utf-8"): void {
+export function downloadTextFile(
+  filename: string,
+  content: string,
+  mime = "text/csv;charset=utf-8",
+): void {
   if (typeof window === "undefined") return;
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);

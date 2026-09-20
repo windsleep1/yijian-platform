@@ -37,7 +37,15 @@ export type RuleDraft = {
 export const ANY = "__any__";
 
 export function emptyRuleDraft(type: QType = "single"): RuleDraft {
-  return { type, count: "10", score: "1", difficultyMin: "", difficultyMax: "", year: "", preferUnused: true };
+  return {
+    type,
+    count: "10",
+    score: "1",
+    difficultyMin: "",
+    difficultyMax: "",
+    year: "",
+    preferUnused: true,
+  };
 }
 
 export function ruleToDraft(r: RuleItem): RuleDraft {
@@ -90,7 +98,13 @@ export type DraftIssue = { index: number; field: string; message: string };
 export function validateDrafts(drafts: RuleDraft[]): DraftIssue[] {
   const issues: DraftIssue[] = [];
   if (drafts.length === 0) {
-    return [{ index: -1, field: "rules", message: "至少要有一条抽题规则，否则这份卷子没有任何题目来源。" }];
+    return [
+      {
+        index: -1,
+        field: "rules",
+        message: "至少要有一条抽题规则，否则这份卷子没有任何题目来源。",
+      },
+    ];
   }
   drafts.forEach((d, i) => {
     const count = Number(d.count);
@@ -113,7 +127,11 @@ export function validateDrafts(drafts: RuleDraft[]): DraftIssue[] {
     const hasMin = !!d.difficultyMin;
     const hasMax = !!d.difficultyMax;
     if (hasMin !== hasMax) {
-      issues.push({ index: i, field: "difficulty", message: "难度区间要两端都填，或都留空（不限）" });
+      issues.push({
+        index: i,
+        field: "difficulty",
+        message: "难度区间要两端都填，或都留空（不限）",
+      });
     } else if (hasMin && hasMax && Number(d.difficultyMin) > Number(d.difficultyMax)) {
       issues.push({ index: i, field: "difficulty", message: "难度下限不能高于上限" });
     }
@@ -185,7 +203,10 @@ export function RuleEditor({
         return (
           <div
             key={i}
-            className={cn("rounded-md border p-2", bad ? "border-destructive/50 bg-destructive/5" : "")}
+            className={cn(
+              "rounded-md border p-2",
+              bad ? "border-destructive/50 bg-destructive/5" : "",
+            )}
           >
             <div className="grid grid-cols-12 items-end gap-2">
               <div className="col-span-3 space-y-1">
@@ -303,7 +324,9 @@ export function RuleEditor({
                   disabled={disabled}
                   placeholder="不限"
                   inputMode="numeric"
-                  onChange={(e) => patch(i, { year: e.target.value.replace(/[^\d]/g, "").slice(0, 4) })}
+                  onChange={(e) =>
+                    patch(i, { year: e.target.value.replace(/[^\d]/g, "").slice(0, 4) })
+                  }
                 />
               </div>
             </div>

@@ -41,7 +41,12 @@ export function RulePreviewPanel({
 
   if (pending) {
     return (
-      <div className={cn("flex items-center gap-2 rounded-lg border bg-card p-4 text-sm text-muted-foreground", className)}>
+      <div
+        className={cn(
+          "flex items-center gap-2 rounded-lg border bg-card p-4 text-sm text-muted-foreground",
+          className,
+        )}
+      >
         <Loader2 className="h-4 w-4 animate-spin" />
         正在试算（不影响任何数据）…
       </div>
@@ -50,7 +55,9 @@ export function RulePreviewPanel({
 
   if (error) {
     return (
-      <div className={cn("rounded-lg border border-destructive/40 bg-destructive/5 p-4", className)}>
+      <div
+        className={cn("rounded-lg border border-destructive/40 bg-destructive/5 p-4", className)}
+      >
         <p className="text-sm font-medium text-destructive">试算失败</p>
         <p className="mt-1 text-xs text-muted-foreground">
           规则本身可能有填写问题（比如题数不是正数）。改好后会自动重试。
@@ -105,8 +112,8 @@ export function RulePreviewPanel({
           </span>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          按实际抽到的题算是 <strong>{preview.total_score}</strong> 分；
-          抽满的话是 <strong>{preview.planned_score}</strong> 分。
+          按实际抽到的题算是 <strong>{preview.total_score}</strong> 分； 抽满的话是{" "}
+          <strong>{preview.planned_score}</strong> 分。
         </p>
         {/* 后端已经把人话总结好了，直接展示，不自己再拼一遍 */}
         <p className={cn("mt-1.5 text-xs", gap ? "text-amber-800" : "text-emerald-800")}>
@@ -183,7 +190,9 @@ export function RulePreviewPanel({
             <ul className="divide-y">
               {preview.sample.map((s) => (
                 <li key={s.question_id} className="px-3 py-2">
-                  <p className="line-clamp-2 text-xs leading-relaxed">{s.stem_preview || "（无题干预览）"}</p>
+                  <p className="line-clamp-2 text-xs leading-relaxed">
+                    {s.stem_preview || "（无题干预览）"}
+                  </p>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
                     <Badge variant="outline" className="text-[10px]">
                       {qTypeLabel(s.question_type)}

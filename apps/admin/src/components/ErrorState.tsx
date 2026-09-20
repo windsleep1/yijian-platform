@@ -28,7 +28,9 @@ export function ErrorState({
   const traceId = isApi ? error.traceId : "";
 
   return (
-    <div className={cn("flex flex-col items-center justify-center px-6 py-14 text-center", className)}>
+    <div
+      className={cn("flex flex-col items-center justify-center px-6 py-14 text-center", className)}
+    >
       <div className="mb-3 rounded-full bg-destructive/10 p-3">
         <AlertTriangle className="h-6 w-6 text-destructive" />
       </div>

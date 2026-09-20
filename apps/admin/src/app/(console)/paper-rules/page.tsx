@@ -81,10 +81,7 @@ export default function PaperRulesPage() {
   const pageSize = Number(state.page_size) || 20;
 
   const tree = useChapterTree();
-  const subjects = useMemo(
-    () => (tree.data?.items ?? []).map((g) => g.subject),
-    [tree.data],
-  );
+  const subjects = useMemo(() => (tree.data?.items ?? []).map((g) => g.subject), [tree.data]);
 
   const query = usePaperRules({
     page,
@@ -231,7 +228,10 @@ export default function PaperRulesPage() {
                         pendingLabel: on ? "停用中…" : "启用中…",
                         doneLabel: on ? "已停用" : "已启用",
                         action: () =>
-                          updateRule.mutateAsync({ id: r.id, payload: { status: on ? "off" : "on" } }),
+                          updateRule.mutateAsync({
+                            id: r.id,
+                            payload: { status: on ? "off" : "on" },
+                          }),
                         // 状态切换是幂等的（设成同一个值无害），允许重试
                         retryable: true,
                         errorTitle: on ? "停用失败" : "启用失败",
@@ -362,7 +362,10 @@ export default function PaperRulesPage() {
           </SelectContent>
         </Select>
 
-        <Select value={state.status || ANY} onValueChange={(v) => setState({ status: v === ANY ? "" : v })}>
+        <Select
+          value={state.status || ANY}
+          onValueChange={(v) => setState({ status: v === ANY ? "" : v })}
+        >
           <SelectTrigger className="w-[126px]">
             <SelectValue placeholder="全部状态" />
           </SelectTrigger>
@@ -376,7 +379,10 @@ export default function PaperRulesPage() {
           </SelectContent>
         </Select>
 
-        <Select value={state.type || ANY} onValueChange={(v) => setState({ type: v === ANY ? "" : v })}>
+        <Select
+          value={state.type || ANY}
+          onValueChange={(v) => setState({ type: v === ANY ? "" : v })}
+        >
           <SelectTrigger className="w-[132px]">
             <SelectValue placeholder="全部类型" />
           </SelectTrigger>
@@ -424,7 +430,9 @@ export default function PaperRulesPage() {
       />
 
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <span>每页 {pageSize} 条 · 本页 {rows.length} 条</span>
+        <span>
+          每页 {pageSize} 条 · 本页 {rows.length} 条
+        </span>
         {fb.dismissedCount > 0 ? (
           <span className="text-emerald-700">
             本次已就地处理 {fb.dismissedCount} 条并从当前视图隐藏 · 翻页或改筛选后恢复显示

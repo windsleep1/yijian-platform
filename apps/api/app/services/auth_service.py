@@ -55,17 +55,14 @@ MAX_UA_LEN = 512
 # 内部工具
 # =====================================================================
 
+
 async def get_user_by_phone(db: AsyncSession, phone: str) -> User | None:
-    rows = await db.execute(
-        select(User).where(User.phone == phone, User.is_deleted.is_(False))
-    )
+    rows = await db.execute(select(User).where(User.phone == phone, User.is_deleted.is_(False)))
     return rows.scalar_one_or_none()
 
 
 async def get_user_by_id(db: AsyncSession, user_id: int) -> User | None:
-    rows = await db.execute(
-        select(User).where(User.id == user_id, User.is_deleted.is_(False))
-    )
+    rows = await db.execute(select(User).where(User.id == user_id, User.is_deleted.is_(False)))
     return rows.scalar_one_or_none()
 
 
@@ -96,9 +93,7 @@ async def _issue_tokens(
     access_token, expires_in = create_access_token(
         user_id=user.id, session_id=session_id, roles=role_codes
     )
-    refresh_token, refresh_expires_at = create_refresh_token(
-        user_id=user.id, session_id=session_id
-    )
+    refresh_token, refresh_expires_at = create_refresh_token(user_id=user.id, session_id=session_id)
 
     db.add(
         UserSession(
@@ -143,9 +138,7 @@ async def _user_role_codes(db: AsyncSession, user_id: int) -> list[str]:
     return list(rows.scalars().all())
 
 
-async def build_me(
-    db: AsyncSession, user: User, redis: aioredis.Redis | None = None
-) -> MeOut:
+async def build_me(db: AsyncSession, user: User, redis: aioredis.Redis | None = None) -> MeOut:
     profile = (
         await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))
     ).scalar_one_or_none()
@@ -200,6 +193,7 @@ async def _create_user(
 # 对外用例
 # =====================================================================
 
+
 async def register(
     db: AsyncSession,
     redis: aioredis.Redis,
@@ -211,9 +205,7 @@ async def register(
     if await get_user_by_phone(db, payload.phone):
         raise conflict("该手机号已注册，请直接登录", 40901)
 
-    await sms_service.verify_code(
-        redis, phone=payload.phone, scene="register", code=payload.code
-    )
+    await sms_service.verify_code(redis, phone=payload.phone, scene="register", code=payload.code)
 
     user = await _create_user(
         db,
@@ -379,9 +371,14 @@ async def refresh_tokens(
     await db.flush()
 
     tokens = await _issue_tokens(
-        db, user=user, ip=ip, user_agent=user_agent,
-        device_id=session.device_id, device_name=session.device_name,
-        platform=session.platform, app_version=session.app_version,
+        db,
+        user=user,
+        ip=ip,
+        user_agent=user_agent,
+        device_id=session.device_id,
+        device_name=session.device_name,
+        platform=session.platform,
+        app_version=session.app_version,
     )
     await db.commit()
     return tokens

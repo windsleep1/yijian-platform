@@ -198,9 +198,7 @@ export function AssignRolesDialog({
                         <button
                           type="button"
                           className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-                          onClick={() =>
-                            setExpanded((p) => ({ ...p, [role.code]: !p[role.code] }))
-                          }
+                          onClick={() => setExpanded((p) => ({ ...p, [role.code]: !p[role.code] }))}
                         >
                           {isOpen ? (
                             <ChevronDown className="h-3 w-3" />
@@ -323,9 +321,8 @@ export function AssignRolesDialog({
         description={
           <div className="space-y-2 text-sm">
             <p>
-              即将把用户{" "}
-              <span className="font-medium text-foreground">{user.nickname || "—"}</span>（
-              {user.phone}）的角色修改为：
+              即将把用户 <span className="font-medium text-foreground">{user.nickname || "—"}</span>
+              （{user.phone}）的角色修改为：
             </p>
             <p className="font-medium text-foreground">
               {selected.length ? selected.map(roleLabel).join("、") : "（清空，无任何角色）"}

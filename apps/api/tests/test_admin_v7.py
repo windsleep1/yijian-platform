@@ -108,23 +108,37 @@ def created(client: httpx.Client, admin_h):
     # 借来的 → **恢复**（不是删除）。逐个来，一条失败不影响其它条
     for qid in bag.borrowed:
         try:
-            b = client.post(f"{API}/admin/questions/{qid}/restore",
-                            headers=admin_h, timeout=20).json()
+            b = client.post(
+                f"{API}/admin/questions/{qid}/restore", headers=admin_h, timeout=20
+            ).json()
             if b.get("code") != 0:
                 print(f"[created] ⚠️ 恢复借用的题目 {qid} 失败：{b.get('message')}")
         except Exception as exc:  # noqa: BLE001
             print(f"[created] ⚠️ 恢复借用的题目 {qid} 异常：{exc}")
 
 
-def make_question(client, admin_h, *, subject_id: int, qtype: str = "single",
-                  stem: str | None = None, exam_year: int | None = None,
-                  chapter_id: int | None = None, status: str = "published") -> dict:
+def make_question(
+    client,
+    admin_h,
+    *,
+    subject_id: int,
+    qtype: str = "single",
+    stem: str | None = None,
+    exam_year: int | None = None,
+    chapter_id: int | None = None,
+    status: str = "published",
+) -> dict:
     """造一道**已发布**的题（试卷只能吃已发布的题）。"""
     stem = stem or f"【B7 组卷用例 {uuid.uuid4().hex[:8]}】下列表述正确的是？"
     payload: dict = {
-        "subject_id": subject_id, "type": qtype, "stem": stem,
-        "analysis": "B7 用例", "difficulty": 3, "score_default": 1,
-        "status": status, "source_type": "self",
+        "subject_id": subject_id,
+        "type": qtype,
+        "stem": stem,
+        "analysis": "B7 用例",
+        "difficulty": 3,
+        "score_default": 1,
+        "status": status,
+        "source_type": "self",
     }
     if exam_year is not None:
         payload["exam_year"] = exam_year
@@ -151,11 +165,23 @@ def make_question(client, admin_h, *, subject_id: int, qtype: str = "single",
     return b["data"]
 
 
-def create_exam(client, admin_h, *, subject_id: int, title: str, sections: list[dict] | None = None,
-                duration_min: int = 180, pass_score: float = 0, exam_type: str = "mock") -> dict:
+def create_exam(
+    client,
+    admin_h,
+    *,
+    subject_id: int,
+    title: str,
+    sections: list[dict] | None = None,
+    duration_min: int = 180,
+    pass_score: float = 0,
+    exam_type: str = "mock",
+) -> dict:
     payload = {
-        "subject_id": subject_id, "title": title, "type": exam_type,
-        "duration_min": duration_min, "pass_score": pass_score,
+        "subject_id": subject_id,
+        "title": title,
+        "type": exam_type,
+        "duration_min": duration_min,
+        "pass_score": pass_score,
         "sections": sections or [],
     }
     b = body(client.post(f"{API}/admin/exams", headers=admin_h, json=payload, timeout=30))
@@ -164,8 +190,11 @@ def create_exam(client, admin_h, *, subject_id: int, title: str, sections: list[
 
 
 def compose(client, headers, exam_id, payload: dict) -> dict:
-    return body(client.post(f"{API}/admin/exams/{exam_id}/auto-compose",
-                            headers=headers, json=payload, timeout=120))
+    return body(
+        client.post(
+            f"{API}/admin/exams/{exam_id}/auto-compose", headers=headers, json=payload, timeout=120
+        )
+    )
 
 
 def validate(client, headers, exam_id) -> dict:
@@ -173,17 +202,36 @@ def validate(client, headers, exam_id) -> dict:
 
 
 def publish(client, headers, exam_id, **kw) -> dict:
-    return body(client.post(f"{API}/admin/exams/{exam_id}/publish",
-                            headers=headers, json=kw or {}, timeout=60))
+    return body(
+        client.post(
+            f"{API}/admin/exams/{exam_id}/publish", headers=headers, json=kw or {}, timeout=60
+        )
+    )
 
 
-def new_rule(client, admin_h, *, subject_id: int, rules: list[dict], name: str | None = None,
-             duration_min: int = 180) -> dict:
-    b = body(client.post(f"{API}/admin/paper-rules", headers=admin_h, json={
-        "name": name or f"B7 规则 {uuid.uuid4().hex[:6]}",
-        "subject_id": subject_id, "type": "mock",
-        "duration_min": duration_min, "rules": rules,
-    }, timeout=30))
+def new_rule(
+    client,
+    admin_h,
+    *,
+    subject_id: int,
+    rules: list[dict],
+    name: str | None = None,
+    duration_min: int = 180,
+) -> dict:
+    b = body(
+        client.post(
+            f"{API}/admin/paper-rules",
+            headers=admin_h,
+            json={
+                "name": name or f"B7 规则 {uuid.uuid4().hex[:6]}",
+                "subject_id": subject_id,
+                "type": "mock",
+                "duration_min": duration_min,
+                "rules": rules,
+            },
+            timeout=30,
+        )
+    )
     assert b["code"] == 0, b
     return b["data"]
 
@@ -251,8 +299,9 @@ def test_case_sub_cannot_be_composed_alone() -> None:
     from app.schemas.admin_exam import PaperRuleCreateIn, RuleItem
 
     with pytest.raises(Exception) as ei:
-        PaperRuleCreateIn(name="x", subject_id=SZ_SUBJECT_ID,
-                          rules=[RuleItem(type="case_sub", count=5)])
+        PaperRuleCreateIn(
+            name="x", subject_id=SZ_SUBJECT_ID, rules=[RuleItem(type="case_sub", count=5)]
+        )
     assert "case_sub" in str(ei.value)
 
 
@@ -284,14 +333,26 @@ def test_paper_rule_crud_roundtrip(client: httpx.Client, admin_h, created) -> No
     assert made["status"] == "on"
 
     # 列表能筛到
-    b = body(client.get(f"{API}/admin/paper-rules", headers=admin_h,
-                        params={"subject_id": JJ_SUBJECT_ID, "page_size": 100}))
+    b = body(
+        client.get(
+            f"{API}/admin/paper-rules",
+            headers=admin_h,
+            params={"subject_id": JJ_SUBJECT_ID, "page_size": 100},
+        )
+    )
     assert any(x["id"] == made["id"] for x in b["data"]["items"]), b["data"]
 
     # 编辑：整体替换 rules + 停用
-    b = body(client.put(f"{API}/admin/paper-rules/{made['id']}", headers=admin_h, json={
-        "rules": [{"type": "judge", "count": 20, "score": 1}], "status": "off",
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/paper-rules/{made['id']}",
+            headers=admin_h,
+            json={
+                "rules": [{"type": "judge", "count": 20, "score": 1}],
+                "status": "off",
+            },
+        )
+    )
     assert b["code"] == 0, b
     assert b["data"]["planned_count"] == 20 and b["data"]["status"] == "off", b["data"]
 
@@ -304,25 +365,40 @@ def test_paper_rule_crud_roundtrip(client: httpx.Client, admin_h, created) -> No
     assert b["code"] == 0 and b["data"]["hard_deleted"] is True, b
     created.rules.clear()
     # 删掉之后改不动了（404，而不是静默成功）
-    b = body(client.put(f"{API}/admin/paper-rules/{made['id']}", headers=admin_h, json={"name": "x"}))
+    b = body(
+        client.put(f"{API}/admin/paper-rules/{made['id']}", headers=admin_h, json={"name": "x"})
+    )
     assert b["code"] == 40401, "删掉的规则应当查不到了"
 
 
 def test_paper_rule_rejects_unknown_subject(client: httpx.Client, admin_h) -> None:
-    b = body(client.post(f"{API}/admin/paper-rules", headers=admin_h, json={
-        "name": "坏科目", "subject_id": 999999, "rules": [{"type": "single", "count": 1}],
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/paper-rules",
+            headers=admin_h,
+            json={
+                "name": "坏科目",
+                "subject_id": 999999,
+                "rules": [{"type": "single", "count": 1}],
+            },
+        )
+    )
     assert b["code"] == 40001, b
 
 
 def test_disabled_rule_is_refused_at_compose_time(client: httpx.Client, admin_h, created) -> None:
     """停用的规则可以查、可以留，但**组卷时会被拒绝**（避免误用废弃规则）。"""
-    made = new_rule(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                    rules=[{"type": "single", "count": 5}])
+    made = new_rule(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 5}]
+    )
     created.rules.append(made["id"])
-    body(client.put(f"{API}/admin/paper-rules/{made['id']}", headers=admin_h, json={"status": "off"}))
+    body(
+        client.put(f"{API}/admin/paper-rules/{made['id']}", headers=admin_h, json={"status": "off"})
+    )
 
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"停用规则 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"停用规则 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
     b = compose(client, admin_h, exam["id"], {"rule_id": made["id"]})
     assert b["code"] == 40001 and "已停用" in b["message"], b
@@ -333,13 +409,29 @@ def test_disabled_rule_is_refused_at_compose_time(client: httpx.Client, admin_h,
 
 def test_create_exam_with_sections_and_edit(client: httpx.Client, admin_h, created) -> None:
     """创建试卷（含分段）→ 详情 → 编辑展示字段；分段分值由题数×每题分推导。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"分段 {uuid.uuid4().hex[:6]}",
-                       sections=[
-                           {"name": "单项选择题", "question_type": "single",
-                            "question_count": 60, "score_per": 1, "sort_no": 0},
-                           {"name": "多项选择题", "question_type": "multiple",
-                            "question_count": 20, "score_per": 2, "sort_no": 1},
-                       ], pass_score=60)
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        title=f"分段 {uuid.uuid4().hex[:6]}",
+        sections=[
+            {
+                "name": "单项选择题",
+                "question_type": "single",
+                "question_count": 60,
+                "score_per": 1,
+                "sort_no": 0,
+            },
+            {
+                "name": "多项选择题",
+                "question_type": "multiple",
+                "question_count": 20,
+                "score_per": 2,
+                "sort_no": 1,
+            },
+        ],
+        pass_score=60,
+    )
     created.exams.append(exam["id"])
     assert exam["status"] == "draft" and exam["question_count"] == 0, exam
     assert len(exam["sections"]) == 2
@@ -347,29 +439,59 @@ def test_create_exam_with_sections_and_edit(client: httpx.Client, admin_h, creat
     assert s0["question_count"] == 60 and s0["section_score"] == 60.0, s0
     assert s0["actual_count"] == 0, "刚建的空卷不该有题"
 
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h,
-                        json={"title": "改过的标题", "duration_min": 150}))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}",
+            headers=admin_h,
+            json={"title": "改过的标题", "duration_min": 150},
+        )
+    )
     assert b["code"] == 0, b
     assert b["data"]["title"] == "改过的标题" and b["data"]["duration_min"] == 150, b["data"]
 
     # 分段 sort_no 重复要被拒
-    b = body(client.post(f"{API}/admin/exams", headers=admin_h, json={
-        "subject_id": JJ_SUBJECT_ID, "title": "坏分段",
-        "sections": [
-            {"name": "a", "question_type": "single", "question_count": 1, "score_per": 1, "sort_no": 1},
-            {"name": "b", "question_type": "judge", "question_count": 1, "score_per": 1, "sort_no": 1},
-        ],
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams",
+            headers=admin_h,
+            json={
+                "subject_id": JJ_SUBJECT_ID,
+                "title": "坏分段",
+                "sections": [
+                    {
+                        "name": "a",
+                        "question_type": "single",
+                        "question_count": 1,
+                        "score_per": 1,
+                        "sort_no": 1,
+                    },
+                    {
+                        "name": "b",
+                        "question_type": "judge",
+                        "question_count": 1,
+                        "score_per": 1,
+                        "sort_no": 1,
+                    },
+                ],
+            },
+        )
+    )
     assert b["code"] == 40001, b
 
 
 def test_exam_list_filters_and_404(client: httpx.Client, admin_h, created) -> None:
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"列表筛选 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"列表筛选 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
 
-    b = body(client.get(f"{API}/admin/exams", headers=admin_h,
-                        params={"subject_id": JJ_SUBJECT_ID, "status": "draft", "page_size": 100}))
+    b = body(
+        client.get(
+            f"{API}/admin/exams",
+            headers=admin_h,
+            params={"subject_id": JJ_SUBJECT_ID, "status": "draft", "page_size": 100},
+        )
+    )
     assert b["code"] == 0 and any(x["id"] == exam["id"] for x in b["data"]["items"]), b["data"]
 
     b = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))
@@ -382,10 +504,13 @@ def test_exam_list_filters_and_404(client: httpx.Client, admin_h, created) -> No
 # ================================================================ D. 验收① 完整组卷
 
 
-def test_compose_full_paper_matches_rule_and_sections(client: httpx.Client, admin_h, created) -> None:
+def test_compose_full_paper_matches_rule_and_sections(
+    client: httpx.Client, admin_h, created
+) -> None:
     """验收①：一条规则生成完整卷 —— 题型数量 / 每题分值 / 总分全部匹配。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"完整卷 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"完整卷 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
 
     rule = {"type": "single", "count": 30, "score": 2, "difficulty": [2, 3]}
@@ -419,13 +544,19 @@ def test_compose_full_paper_matches_rule_and_sections(client: httpx.Client, admi
 
 def test_compose_two_same_type_rules_do_not_overlap(client: httpx.Client, admin_h, created) -> None:
     """两条同题型规则抽出的题必须**互不重叠**（同卷不重复取题）。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"不重叠 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"不重叠 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
-    b = compose(client, admin_h, exam["id"], {
-        "rules": [{"type": "single", "count": 25}, {"type": "single", "count": 25}],
-        "seed": 7,
-    })
+    b = compose(
+        client,
+        admin_h,
+        exam["id"],
+        {
+            "rules": [{"type": "single", "count": 25}, {"type": "single", "count": 25}],
+            "seed": 7,
+        },
+    )
     assert b["code"] == 0 and b["data"]["shortfalls"] == [], b
     detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
     ids = [q["question_id"] for sec in detail["sections"] for q in sec["questions"]]
@@ -435,7 +566,9 @@ def test_compose_two_same_type_rules_do_not_overlap(client: httpx.Client, admin_
 # ================================================================ E. 验收② 缺口
 
 
-def test_shortfall_is_reported_and_never_silently_filled(client: httpx.Client, admin_h, created) -> None:
+def test_shortfall_is_reported_and_never_silently_filled(
+    client: httpx.Client, admin_h, created
+) -> None:
     """验收②：题库不足时 `shortfalls` 准确回传，**绝不静默补题**。
 
     构造"要 100 道但远远不够"的规则：建筑实务的 `case` 题总共只有 27 道。
@@ -451,13 +584,19 @@ def test_shortfall_is_reported_and_never_silently_filled(client: httpx.Client, a
     if total_case >= 100:
         pytest.skip(f"该科目 case 题有 {total_case} 道，构造不出缺口")
 
-    exam = create_exam(client, admin_h, subject_id=JZ_SUBJECT_ID,
-                       title=f"缺口 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JZ_SUBJECT_ID, title=f"缺口 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
 
-    b = compose(client, admin_h, exam["id"], {
-        "rules": [{"type": "case", "count": 100, "score": 2, "difficulty": [5, 5]}],
-    })
+    b = compose(
+        client,
+        admin_h,
+        exam["id"],
+        {
+            "rules": [{"type": "case", "count": 100, "score": 2, "difficulty": [5, 5]}],
+        },
+    )
     assert b["code"] == 0, b
     d = b["data"]
 
@@ -495,10 +634,21 @@ def test_shortfall_is_reported_and_never_silently_filled(client: httpx.Client, a
 
 def test_publish_blocked_when_validation_fails(client: httpx.Client, admin_h, created) -> None:
     """验收⑥：发布前强制走 validate，不通过**不允许发布**，且整批不落库。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"空卷发布 {uuid.uuid4().hex[:6]}",
-                       sections=[{"name": "单项选择题", "question_type": "single",
-                                  "question_count": 10, "score_per": 1, "sort_no": 0}])
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        title=f"空卷发布 {uuid.uuid4().hex[:6]}",
+        sections=[
+            {
+                "name": "单项选择题",
+                "question_type": "single",
+                "question_count": 10,
+                "score_per": 1,
+                "sort_no": 0,
+            }
+        ],
+    )
     created.exams.append(exam["id"])
 
     # 空卷：一道题都没有
@@ -513,18 +663,23 @@ def test_publish_blocked_when_validation_fails(client: httpx.Client, admin_h, cr
     assert detail["published_at"] is None, detail
 
     # 分段计划 10 道、实际只放 1 道 → 仍然挡
-    b = compose(client, admin_h, exam["id"], {
-        "rules": [{"type": "single", "count": 1}], "apply_sections": True, "seed": 1,
-    })
+    b = compose(
+        client,
+        admin_h,
+        exam["id"],
+        {
+            "rules": [{"type": "single", "count": 1}],
+            "apply_sections": True,
+            "seed": 1,
+        },
+    )
     assert b["code"] == 0 and b["data"]["question_count"] == 1, b
     # 组卷重写了分段（计划 1 道 = 实际 1 道）→ 这时校验应通过
     assert validate(client, admin_h, exam["id"])["data"]["ok"] is True
 
     # 手工把分段改成 10 道来制造"没填满"
     detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
-    sql = (
-        "UPDATE exam_sections SET question_count = 10, section_score = 10 WHERE exam_id = $1"
-    )
+    sql = "UPDATE exam_sections SET question_count = 10, section_score = 10 WHERE exam_id = $1"
     if sql_exec(sql, int(exam["id"])) is None:
         pytest.skip("需要 DATABASE_URL 才能手工改分段")
     v = validate(client, admin_h, exam["id"])
@@ -538,11 +693,16 @@ def test_publish_twice_and_recompose_after_publish_are_rejected(
     client: httpx.Client, admin_h, created
 ) -> None:
     """状态保护：已发布的卷不能重复发布，也不能重新组卷。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"状态保护 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"状态保护 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
-    assert compose(client, admin_h, exam["id"],
-                   {"rules": [{"type": "judge", "count": 5}], "seed": 3})["code"] == 0
+    assert (
+        compose(client, admin_h, exam["id"], {"rules": [{"type": "judge", "count": 5}], "seed": 3})[
+            "code"
+        ]
+        == 0
+    )
 
     b = publish(client, admin_h, exam["id"])
     assert b["code"] == 0, b
@@ -569,18 +729,34 @@ def test_publish_locks_version_and_later_edit_does_not_change_paper(
     if _dsn() is None:
         pytest.skip("需要 DATABASE_URL 才能确认种子题的 exam_year 分布")
 
-    q = make_question(client, admin_h, subject_id=SZ_SUBJECT_ID, qtype="single",
-                      exam_year=2026, stem="【B7 锁定用例】原始题干：下列表述正确的是？")
+    q = make_question(
+        client,
+        admin_h,
+        subject_id=SZ_SUBJECT_ID,
+        qtype="single",
+        exam_year=2026,
+        stem="【B7 锁定用例】原始题干：下列表述正确的是？",
+    )
     created.questions.append(q["id"])
     assert q["version"] == 1, q
 
-    exam = create_exam(client, admin_h, subject_id=SZ_SUBJECT_ID,
-                       title=f"锁定 {uuid.uuid4().hex[:6]}", pass_score=10)
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=SZ_SUBJECT_ID,
+        title=f"锁定 {uuid.uuid4().hex[:6]}",
+        pass_score=10,
+    )
     created.exams.append(exam["id"])
 
-    b = compose(client, admin_h, exam["id"], {
-        "rules": [{"type": "single", "count": 1, "score": 10, "year": 2026}],
-    })
+    b = compose(
+        client,
+        admin_h,
+        exam["id"],
+        {
+            "rules": [{"type": "single", "count": 1, "score": 10, "year": 2026}],
+        },
+    )
     assert b["code"] == 0, b
     assert b["data"]["shortfalls"] == [], b["data"]["shortfalls"]
     assert b["data"]["question_count"] == 1, b["data"]
@@ -594,9 +770,16 @@ def test_publish_locks_version_and_later_edit_does_not_change_paper(
     assert b["code"] == 0 and b["data"]["locked_versions"] == 1, b
 
     # ---- 改题：题干变了、版本 +1 ----
-    b = body(client.put(f"{API}/admin/questions/{q['id']}", headers=admin_h, json={
-        "version": 1, "stem": "【B7 锁定用例】改过的题干：下列说法错误的是？",
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/questions/{q['id']}",
+            headers=admin_h,
+            json={
+                "version": 1,
+                "stem": "【B7 锁定用例】改过的题干：下列说法错误的是？",
+            },
+        )
+    )
     assert b["code"] == 0 and b["data"]["version"] == 2, b
 
     # ---- 已发布试卷：锁定版本仍在，且展示的是**旧题干** ----
@@ -646,8 +829,14 @@ def test_compose_full_mock_paper_from_seed_bank(client: httpx.Client, admin_h, c
         {"type": "multiple", "count": 20, "score": 2, "difficulty": [3, 4]},
         {"type": "judge", "count": 20, "score": 1, "difficulty": [1, 2]},
     ]
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"B7 全真模考 {uuid.uuid4().hex[:6]}", duration_min=120, pass_score=60)
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        title=f"B7 全真模考 {uuid.uuid4().hex[:6]}",
+        duration_min=120,
+        pass_score=60,
+    )
     created.exams.append(exam["id"])
 
     b = compose(client, admin_h, exam["id"], {"rules": rules, "seed": 20260917})
@@ -660,7 +849,9 @@ def test_compose_full_mock_paper_from_seed_bank(client: httpx.Client, admin_h, c
     by_type = {s["question_type"]: s for s in d["sections"]}
     assert set(by_type) == {"single", "multiple", "judge"}, by_type
     assert by_type["single"]["actual_count"] == 60 and by_type["single"]["section_score"] == 60.0
-    assert by_type["multiple"]["actual_count"] == 20 and by_type["multiple"]["section_score"] == 40.0
+    assert (
+        by_type["multiple"]["actual_count"] == 20 and by_type["multiple"]["section_score"] == 40.0
+    )
     assert by_type["judge"]["actual_count"] == 20 and by_type["judge"]["section_score"] == 20.0
 
     v = validate(client, admin_h, exam["id"])
@@ -678,18 +869,25 @@ def test_compose_full_mock_paper_from_seed_bank(client: httpx.Client, admin_h, c
     print(f"  题量     {detail['question_count']} 道   总分 {detail['total_score']}")
     print(f"  时长     {detail['duration_min']} 分钟   及格线 {detail['pass_score']}")
     for s in detail["sections"]:
-        print(f"  - {s['name']:<8} {s['actual_count']:>3} 道 × {s['score_per']} 分 "
-              f"= {s['section_score']} 分")
+        print(
+            f"  - {s['name']:<8} {s['actual_count']:>3} 道 × {s['score_per']} 分 "
+            f"= {s['section_score']} 分"
+        )
     print("===============================================\n")
 
 
 def test_rule_from_rule_table_composes_paper(client: httpx.Client, admin_h, created) -> None:
     """`rule_id` 通路：用库里的规则组卷（规则可复用，不内联）。"""
-    made = new_rule(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                    rules=[{"type": "judge", "count": 10, "score": 1}])
+    made = new_rule(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        rules=[{"type": "judge", "count": 10, "score": 1}],
+    )
     created.rules.append(made["id"])
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"规则表组卷 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"规则表组卷 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
 
     b = compose(client, admin_h, exam["id"], {"rule_id": made["id"]})
@@ -706,27 +904,50 @@ def test_data_scope_researcher_only_own_subject(client: httpx.Client, admin_h, c
     三道闸都要拦得住：建卷、组卷、以及**规则列表本身就看不到别科目的**。
     """
     u = fresh_user(client, nickname="B7 教研-范围")
-    ar = assign_roles(client, admin_h, u["user"]["id"], ["researcher"],
-                      scope_type="subject", scope_id=SZ_SUBJECT_ID)
+    ar = assign_roles(
+        client,
+        admin_h,
+        u["user"]["id"],
+        ["researcher"],
+        scope_type="subject",
+        scope_id=SZ_SUBJECT_ID,
+    )
     assert ar["code"] == 0, ar
     rh = auth(u["access_token"])
 
     # 闸 1：建别科目的卷 → 403
-    b = body(client.post(f"{API}/admin/exams", headers=rh, json={
-        "subject_id": JZ_SUBJECT_ID, "title": "越权卷", "sections": [],
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams",
+            headers=rh,
+            json={
+                "subject_id": JZ_SUBJECT_ID,
+                "title": "越权卷",
+                "sections": [],
+            },
+        )
+    )
     assert b["code"] == 40301 and "数据范围" in b["message"], b
 
     # 闸 2：本科目的卷可以建；但换成别科目组卷 → 403
-    exam = body(client.post(f"{API}/admin/exams", headers=rh, json={
-        "subject_id": SZ_SUBJECT_ID, "title": f"B7 教研卷 {uuid.uuid4().hex[:6]}", "sections": [],
-    }))
+    exam = body(
+        client.post(
+            f"{API}/admin/exams",
+            headers=rh,
+            json={
+                "subject_id": SZ_SUBJECT_ID,
+                "title": f"B7 教研卷 {uuid.uuid4().hex[:6]}",
+                "sections": [],
+            },
+        )
+    )
     assert exam["code"] == 0, exam
     eid = exam["data"]["id"]
     created.exams.append(eid)
 
-    b = compose(client, rh, eid, {"subject_id": JZ_SUBJECT_ID,
-                                  "rules": [{"type": "case", "count": 1}]})
+    b = compose(
+        client, rh, eid, {"subject_id": JZ_SUBJECT_ID, "rules": [{"type": "case", "count": 1}]}
+    )
     assert b["code"] == 40301 and "数据范围" in b["message"], b
 
     # 本科目组卷正常
@@ -734,11 +955,13 @@ def test_data_scope_researcher_only_own_subject(client: httpx.Client, admin_h, c
     assert b["code"] == 0 and b["data"]["question_count"] == 5, b
 
     # 闸 3：规则列表只返回自己科目的规则
-    mine = new_rule(client, admin_h, subject_id=SZ_SUBJECT_ID,
-                    rules=[{"type": "judge", "count": 5}])
+    mine = new_rule(
+        client, admin_h, subject_id=SZ_SUBJECT_ID, rules=[{"type": "judge", "count": 5}]
+    )
     created.rules.append(mine["id"])
-    other = new_rule(client, admin_h, subject_id=JZ_SUBJECT_ID,
-                     rules=[{"type": "single", "count": 5}])
+    other = new_rule(
+        client, admin_h, subject_id=JZ_SUBJECT_ID, rules=[{"type": "single", "count": 5}]
+    )
     created.rules.append(other["id"])
 
     b = body(client.get(f"{API}/admin/paper-rules", headers=rh, params={"page_size": 100}))
@@ -747,12 +970,15 @@ def test_data_scope_researcher_only_own_subject(client: httpx.Client, admin_h, c
     assert subs <= {str(SZ_SUBJECT_ID)}, f"教研看到了别科目的规则：{subs}"
 
     # 别科目的规则，教研改不动（403）
-    b = body(client.put(f"{API}/admin/paper-rules/{other['id']}", headers=rh, json={"name": "改名"}))
+    b = body(
+        client.put(f"{API}/admin/paper-rules/{other['id']}", headers=rh, json={"name": "改名"})
+    )
     assert b["code"] == 40301, b
 
     # 别科目的卷，教研看不到也读不了
-    other_exam = create_exam(client, admin_h, subject_id=JZ_SUBJECT_ID,
-                             title=f"别科目卷 {uuid.uuid4().hex[:6]}")
+    other_exam = create_exam(
+        client, admin_h, subject_id=JZ_SUBJECT_ID, title=f"别科目卷 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(other_exam["id"])
     b = body(client.get(f"{API}/admin/exams/{other_exam['id']}", headers=rh))
     assert b["code"] == 40301, b
@@ -784,9 +1010,17 @@ def test_exam_endpoints_require_permissions(client: httpx.Client, admin_h, creat
 
     b = body(client.get(f"{API}/admin/exams", headers=sh))
     assert b["code"] == 40301 and "exam:read" in b["message"], b
-    b = body(client.post(f"{API}/admin/exams", headers=sh, json={
-        "subject_id": JJ_SUBJECT_ID, "title": "x", "sections": [],
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams",
+            headers=sh,
+            json={
+                "subject_id": JJ_SUBJECT_ID,
+                "title": "x",
+                "sections": [],
+            },
+        )
+    )
     assert b["code"] == 40301 and "exam:create" in b["message"], b
     b = body(client.get(f"{API}/admin/paper-rules", headers=sh))
     assert b["code"] == 40301, b
@@ -801,17 +1035,35 @@ def test_exam_endpoints_require_permissions(client: httpx.Client, admin_h, creat
 
     # researcher 走完整链路（教研本来就该能发布自己的卷 —— 当前的权限模型如此）
     u2 = fresh_user(client, nickname="B7 教研-全链路")
-    assign_roles(client, admin_h, u2["user"]["id"], ["researcher"],
-                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    assign_roles(
+        client,
+        admin_h,
+        u2["user"]["id"],
+        ["researcher"],
+        scope_type="subject",
+        scope_id=JJ_SUBJECT_ID,
+    )
     rh = auth(u2["access_token"])
-    exam = body(client.post(f"{API}/admin/exams", headers=rh, json={
-        "subject_id": JJ_SUBJECT_ID, "title": f"B7 教研发布 {uuid.uuid4().hex[:6]}",
-        "sections": [], "pass_score": 3,
-    }))
+    exam = body(
+        client.post(
+            f"{API}/admin/exams",
+            headers=rh,
+            json={
+                "subject_id": JJ_SUBJECT_ID,
+                "title": f"B7 教研发布 {uuid.uuid4().hex[:6]}",
+                "sections": [],
+                "pass_score": 3,
+            },
+        )
+    )
     assert exam["code"] == 0, exam
     created.exams.append(exam["data"]["id"])
-    assert compose(client, rh, exam["data"]["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 9})["code"] == 0
+    assert (
+        compose(
+            client, rh, exam["data"]["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 9}
+        )["code"]
+        == 0
+    )
     b = publish(client, rh, exam["data"]["id"])
     assert b["code"] == 0 and b["data"]["locked_versions"] == 3, b
 
@@ -832,16 +1084,19 @@ def test_locked_version_is_written_to_column_and_mirrored_to_jsonb(
     if _dsn() is None:
         pytest.skip("需要 DATABASE_URL 才能直接断言列内容")
 
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"锁定列 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"锁定列 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
-    assert compose(client, admin_h, exam["id"],
-                   {"rules": [{"type": "judge", "count": 4}], "seed": 11})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, exam["id"], {"rules": [{"type": "judge", "count": 4}], "seed": 11}
+        )["code"]
+        == 0
+    )
 
     # 发布前：列应为 NULL（没有锁定）
-    rows = sql_fetch(
-        "SELECT locked_version FROM exam_questions WHERE exam_id=$1", int(exam["id"])
-    )
+    rows = sql_fetch("SELECT locked_version FROM exam_questions WHERE exam_id=$1", int(exam["id"]))
     assert len(rows) == 4 and all(r["locked_version"] is None for r in rows), rows
 
     assert publish(client, admin_h, exam["id"])["code"] == 0
@@ -874,16 +1129,25 @@ def test_locked_version_is_written_to_column_and_mirrored_to_jsonb(
 
     # 重新组卷应把列清空（卷面换了，旧锁没意义）
     # 已发布的卷不能重组，所以先造一张草稿卷验证清理逻辑
-    draft = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                        title=f"清锁 {uuid.uuid4().hex[:6]}")
+    draft = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"清锁 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(draft["id"])
-    assert compose(client, admin_h, draft["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 12})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, draft["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 12}
+        )["code"]
+        == 0
+    )
     publish(client, admin_h, draft["id"])
     # 已发布 → 直接改回 draft 再重组（模拟"下线重编"）
     sql_exec("UPDATE exams SET status='draft', published_at=NULL WHERE id=$1", int(draft["id"]))
-    assert compose(client, admin_h, draft["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 13})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, draft["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 13}
+        )["code"]
+        == 0
+    )
     cleared = sql_fetch(
         "SELECT locked_version FROM exam_questions WHERE exam_id=$1", int(draft["id"])
     )
@@ -898,11 +1162,20 @@ def test_viewer_can_read_but_not_publish(client: httpx.Client, admin_h, created)
     其他角色的权限是按模块整包发的，都能发布（见坑 36）。
     """
     # 先备一张有内容的卷，供 viewer 读
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"viewer 只读 {uuid.uuid4().hex[:6]}", pass_score=3)
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        title=f"viewer 只读 {uuid.uuid4().hex[:6]}",
+        pass_score=3,
+    )
     created.exams.append(exam["id"])
-    assert compose(client, admin_h, exam["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 21})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, exam["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 21}
+        )["code"]
+        == 0
+    )
 
     u = fresh_user(client, nickname="B7 只读岗")
     ar = assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
@@ -923,12 +1196,25 @@ def test_viewer_can_read_but_not_publish(client: httpx.Client, admin_h, created)
     # 写：全部 40301，且消息里点明缺哪个权限（前端 tooltip 直接用这句）
     b = publish(client, vh, exam["id"])
     assert b["code"] == 40301 and "exam:publish" in b["message"], b
-    b = body(client.post(f"{API}/admin/exams", headers=vh, json={
-        "subject_id": JJ_SUBJECT_ID, "title": "越权建卷", "sections": [],
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams",
+            headers=vh,
+            json={
+                "subject_id": JJ_SUBJECT_ID,
+                "title": "越权建卷",
+                "sections": [],
+            },
+        )
+    )
     assert b["code"] == 40301 and "exam:create" in b["message"], b
-    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=vh,
-                         json={"rules": [{"type": "judge", "count": 1}]}))
+    b = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=vh,
+            json={"rules": [{"type": "judge", "count": 1}]},
+        )
+    )
     assert b["code"] == 40301 and "exam:create" in b["message"], b
     b = body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=vh))
     assert b["code"] == 40301 and "exam:create" in b["message"], b
@@ -952,29 +1238,45 @@ def test_soft_delete_hides_from_default_list_but_keeps_detail(
     与 Batch 4 的题目软删除同一套语义：只置 `is_deleted`，
     题目不动、卷面不删、详情不 404。
     """
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"归档 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"归档 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
-    assert compose(client, admin_h, exam["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 31})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, exam["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 31}
+        )["code"]
+        == 0
+    )
     assert publish(client, admin_h, exam["id"])["code"] == 0
 
     # 归档
-    b = body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h,
-                           params={"reason": "用例归档"}))
+    b = body(
+        client.delete(
+            f"{API}/admin/exams/{exam['id']}", headers=admin_h, params={"reason": "用例归档"}
+        )
+    )
     assert b["code"] == 0, b
     assert b["data"]["is_deleted"] is True, b["data"]
     assert b["data"]["previous_status"] == "published", b["data"]
     assert b["data"]["question_count"] == 3, b["data"]
 
     # 默认列表看不到
-    b = body(client.get(f"{API}/admin/exams", headers=admin_h,
-                        params={"page_size": 100, "status": "published"}))
+    b = body(
+        client.get(
+            f"{API}/admin/exams", headers=admin_h, params={"page_size": 100, "status": "published"}
+        )
+    )
     assert not any(x["id"] == exam["id"] for x in b["data"]["items"]), "归档后默认列表不该出现"
 
     # 开关打开能看到，且带 is_deleted 标记
-    b = body(client.get(f"{API}/admin/exams", headers=admin_h,
-                        params={"page_size": 100, "include_deleted": "true"}))
+    b = body(
+        client.get(
+            f"{API}/admin/exams",
+            headers=admin_h,
+            params={"page_size": 100, "include_deleted": "true"},
+        )
+    )
     hits = [x for x in b["data"]["items"] if x["id"] == exam["id"]]
     assert len(hits) == 1 and hits[0]["is_deleted"] is True, "开了开关应能看到归档的卷"
 
@@ -1016,17 +1318,27 @@ def restore_question(client, headers, qid) -> dict:
 
 def test_exam_restore_roundtrip_and_idempotent(client: httpx.Client, admin_h, created) -> None:
     """归档 → 默认列表看不到 → 开开关能看到 → **恢复** → 回到默认列表；再调幂等。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"恢复 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"恢复 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
-    assert compose(client, admin_h, exam["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 41})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, exam["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 41}
+        )["code"]
+        == 0
+    )
 
     assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
 
     def in_default_list() -> bool:
-        b = body(client.get(f"{API}/admin/exams", headers=admin_h,
-                            params={"page_size": 100, "subject_id": JJ_SUBJECT_ID}))
+        b = body(
+            client.get(
+                f"{API}/admin/exams",
+                headers=admin_h,
+                params={"page_size": 100, "subject_id": JJ_SUBJECT_ID},
+            )
+        )
         return any(x["id"] == exam["id"] for x in b["data"]["items"])
 
     assert not in_default_list(), "归档后不该出现在默认列表"
@@ -1054,8 +1366,9 @@ def test_exam_restore_roundtrip_and_idempotent(client: httpx.Client, admin_h, cr
 
 def test_exam_restore_requires_publish_permission(client: httpx.Client, admin_h, created) -> None:
     """恢复需要 `exam:publish`：viewer 能看能归档（exam:create）但**不能恢复**。"""
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"恢复权限 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"恢复权限 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
     assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
 
@@ -1082,8 +1395,9 @@ def test_exam_restore_rejects_when_subject_disabled(client: httpx.Client, admin_
     if _dsn() is None:
         pytest.skip("需要 DATABASE_URL 才能改科目状态")
 
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"停用科目 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"停用科目 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
     assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
 
@@ -1108,11 +1422,20 @@ def test_exam_restore_rejects_published_with_archived_questions(
 
     对照：把同一个卷改回草稿，就不该再拦 —— 草稿缺题很正常。
     """
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"缺题的已发布卷 {uuid.uuid4().hex[:6]}", pass_score=3)
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        title=f"缺题的已发布卷 {uuid.uuid4().hex[:6]}",
+        pass_score=3,
+    )
     created.exams.append(exam["id"])
-    assert compose(client, admin_h, exam["id"],
-                   {"rules": [{"type": "judge", "count": 3}], "seed": 42})["code"] == 0
+    assert (
+        compose(
+            client, admin_h, exam["id"], {"rules": [{"type": "judge", "count": 3}], "seed": 42}
+        )["code"]
+        == 0
+    )
     assert publish(client, admin_h, exam["id"])["code"] == 0
 
     # 挑一道卷面题归档。
@@ -1144,8 +1467,13 @@ def test_question_restore_roundtrip_and_idempotent(client: httpx.Client, admin_h
     assert body(client.delete(f"{API}/admin/questions/{q['id']}", headers=admin_h))["code"] == 0
 
     def visible() -> bool:
-        b = body(client.get(f"{API}/admin/questions", headers=admin_h,
-                            params={"page_size": 100, "subject_id": JJ_SUBJECT_ID}))
+        b = body(
+            client.get(
+                f"{API}/admin/questions",
+                headers=admin_h,
+                params={"page_size": 100, "subject_id": JJ_SUBJECT_ID},
+            )
+        )
         return any(x["id"] == q["id"] for x in b["data"]["items"])
 
     assert not visible(), "软删除后默认列表不该有它"
@@ -1165,7 +1493,9 @@ def test_question_restore_roundtrip_and_idempotent(client: httpx.Client, admin_h
     assert restore_question(client, admin_h, 999999999999999999)["code"] == 40401
 
 
-def test_question_restore_requires_delete_permission(client: httpx.Client, admin_h, created) -> None:
+def test_question_restore_requires_delete_permission(
+    client: httpx.Client, admin_h, created
+) -> None:
     """恢复题目需要 `question:delete`（与删除**同一个权责**，不新增权限码）。"""
     q = make_question(client, admin_h, subject_id=JJ_SUBJECT_ID)
     created.questions.append(q["id"])
@@ -1183,8 +1513,14 @@ def test_question_restore_requires_delete_permission(client: httpx.Client, admin
 
     # researcher 有 question:delete → 能恢复
     u2 = fresh_user(client, nickname="B7 教研恢复")
-    assign_roles(client, admin_h, u2["user"]["id"], ["researcher"],
-                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    assign_roles(
+        client,
+        admin_h,
+        u2["user"]["id"],
+        ["researcher"],
+        scope_type="subject",
+        scope_id=JJ_SUBJECT_ID,
+    )
     rh = auth(u2["access_token"])
     assert restore_question(client, rh, q["id"])["code"] == 0
 
@@ -1261,8 +1597,9 @@ def test_restore_writes_change_log_with_is_deleted_diff(
     if _dsn() is None:
         pytest.skip("需要 DATABASE_URL 才能断言变更日志")
 
-    exam = create_exam(client, admin_h, subject_id=JJ_SUBJECT_ID,
-                       title=f"留痕 {uuid.uuid4().hex[:6]}")
+    exam = create_exam(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, title=f"留痕 {uuid.uuid4().hex[:6]}"
+    )
     created.exams.append(exam["id"])
     assert body(client.delete(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["code"] == 0
     assert restore_exam(client, admin_h, exam["id"])["code"] == 0
@@ -1289,34 +1626,57 @@ def add_questions(client, headers, exam_id, ids: list[int], section_id: int | No
     payload: dict = {"question_ids": [str(i) for i in ids]}
     if section_id is not None:
         payload["section_id"] = str(section_id)
-    return body(client.post(f"{API}/admin/exams/{exam_id}/questions",
-                            headers=headers, json=payload, timeout=60))
+    return body(
+        client.post(
+            f"{API}/admin/exams/{exam_id}/questions", headers=headers, json=payload, timeout=60
+        )
+    )
 
 
-def make_exam_with_sections(client, admin_h, created, *, subject_id=JJ_SUBJECT_ID,
-                            single=0, multiple=0, judge=0) -> dict:
+def make_exam_with_sections(
+    client, admin_h, created, *, subject_id=JJ_SUBJECT_ID, single=0, multiple=0, judge=0
+) -> dict:
     """建一张**带分段**的草稿卷，供手动加题用。"""
     sections = []
     sort_no = 0
     for qt, cnt, score in (("single", single, 1), ("multiple", multiple, 2), ("judge", judge, 1)):
         if cnt:
-            sections.append({
-                "name": {"single": "单项选择题", "multiple": "多项选择题",
-                         "judge": "判断题"}[qt],
-                "question_type": qt, "question_count": cnt, "score_per": score,
-                "sort_no": sort_no,
-            })
+            sections.append(
+                {
+                    "name": {"single": "单项选择题", "multiple": "多项选择题", "judge": "判断题"}[
+                        qt
+                    ],
+                    "question_type": qt,
+                    "question_count": cnt,
+                    "score_per": score,
+                    "sort_no": sort_no,
+                }
+            )
             sort_no += 1
-    exam = create_exam(client, admin_h, subject_id=subject_id,
-                       title=f"手动选题 {uuid.uuid4().hex[:6]}", sections=sections)
+    exam = create_exam(
+        client,
+        admin_h,
+        subject_id=subject_id,
+        title=f"手动选题 {uuid.uuid4().hex[:6]}",
+        sections=sections,
+    )
     created.exams.append(exam["id"])
     return exam
 
 
 def pick_published_ids(client, admin_h, subject_id: int, qtype: str, n: int) -> list[int]:
-    b = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
-        "subject_id": subject_id, "type": qtype, "status": "published", "page_size": n,
-    }))
+    b = body(
+        client.get(
+            f"{API}/admin/questions",
+            headers=admin_h,
+            params={
+                "subject_id": subject_id,
+                "type": qtype,
+                "status": "published",
+                "page_size": n,
+            },
+        )
+    )
     assert b["code"] == 0, b
     return [int(x["id"]) for x in b["data"]["items"]][:n]
 
@@ -1346,15 +1706,16 @@ def test_manual_add_and_remove_questions(client: httpx.Client, admin_h, created)
     detail = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
     eq_id = detail["sections"][0]["questions"][0]["id"]
 
-    b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}",
-                           headers=admin_h))
+    b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}", headers=admin_h))
     assert b["code"] == 0, b
     d = b["data"]
     assert d["question_count"] == 2, d
     assert d["total_score"] == 3.0, d
     assert "分段的题数与计划不符" in d["message"], d["message"]
     # 题目本身没被删（只是移出卷面）
-    assert body(client.get(f"{API}/admin/questions/{d['question_id']}", headers=admin_h))["code"] == 0
+    assert (
+        body(client.get(f"{API}/admin/questions/{d['question_id']}", headers=admin_h))["code"] == 0
+    )
 
     # 再移一次同一个卷面行 → 40401
     b = body(client.delete(f"{API}/admin/exams/{exam['id']}/questions/{eq_id}", headers=admin_h))
@@ -1374,14 +1735,18 @@ def test_add_questions_skips_with_reason_not_whole_batch_failure(
     # 已归档的题
     archived = make_question(client, admin_h, subject_id=JJ_SUBJECT_ID)
     created.questions.append(archived["id"])
-    assert body(client.delete(f"{API}/admin/questions/{archived['id']}",
-                              headers=admin_h))["code"] == 0
+    assert (
+        body(client.delete(f"{API}/admin/questions/{archived['id']}", headers=admin_h))["code"] == 0
+    )
     # 卷面没有「判断题」分段 → 这道 judge 题应被跳过
     judge_q = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 1)[0]
 
-    b = add_questions(client, admin_h, exam["id"],
-                      [good, int(other_subject), int(archived["id"]), int(judge_q),
-                       999999999999999999, good])
+    b = add_questions(
+        client,
+        admin_h,
+        exam["id"],
+        [good, int(other_subject), int(archived["id"]), int(judge_q), 999999999999999999, good],
+    )
     assert b["code"] == 0, "一条有问题不该整批失败"
     d = b["data"]
     assert d["added"] == 1, d
@@ -1457,25 +1822,48 @@ def test_question_list_filters_by_knowledge_point(client: httpx.Client, admin_h)
         pytest.skip(f"科目 {JJ_SUBJECT_ID} 没有挂了知识点的已发布题")
     kp_id, total = int(rows[0]["kp"]), int(rows[0]["n"])
 
-    b = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
-        "subject_id": JJ_SUBJECT_ID, "knowledge_point_id": kp_id, "page_size": 1,
-    }))
+    b = body(
+        client.get(
+            f"{API}/admin/questions",
+            headers=admin_h,
+            params={
+                "subject_id": JJ_SUBJECT_ID,
+                "knowledge_point_id": kp_id,
+                "page_size": 1,
+            },
+        )
+    )
     assert b["code"] == 0, b
     assert int(b["data"]["total"]) == total, f"期望 {total}，实际 {b['data']['total']}"
 
     # 不传该参数时结果集更大（证明筛选真的在起作用）
-    b2 = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
-        "subject_id": JJ_SUBJECT_ID, "page_size": 1,
-    }))
+    b2 = body(
+        client.get(
+            f"{API}/admin/questions",
+            headers=admin_h,
+            params={
+                "subject_id": JJ_SUBJECT_ID,
+                "page_size": 1,
+            },
+        )
+    )
     assert int(b2["data"]["total"]) > total, "知识点筛选没起作用"
 
     # 每条结果的 knowledge_point_id 都等于筛选值
-    b3 = body(client.get(f"{API}/admin/questions", headers=admin_h, params={
-        "subject_id": JJ_SUBJECT_ID, "knowledge_point_id": kp_id, "page_size": 50,
-    }))
-    assert all(
-        int(x["knowledge_point_id"]) == kp_id for x in b3["data"]["items"]
-    ), "返回了别的知识点的题"
+    b3 = body(
+        client.get(
+            f"{API}/admin/questions",
+            headers=admin_h,
+            params={
+                "subject_id": JJ_SUBJECT_ID,
+                "knowledge_point_id": kp_id,
+                "page_size": 50,
+            },
+        )
+    )
+    assert all(int(x["knowledge_point_id"]) == kp_id for x in b3["data"]["items"]), (
+        "返回了别的知识点的题"
+    )
 
 
 def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
@@ -1490,18 +1878,34 @@ def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
     u = fresh_user(client, nickname="B7 知识点下拉")
     assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
     vh = auth(u["access_token"])
-    b_denied = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=vh,
-                               params={"subject_id": JJ_SUBJECT_ID}))
+    b_denied = body(
+        client.get(
+            f"{API}/admin/chapters/knowledge-points",
+            headers=vh,
+            params={"subject_id": JJ_SUBJECT_ID},
+        )
+    )
     assert b_denied["code"] == 40301 and "question:read" in b_denied["message"], b_denied
 
     # 有 question:read 的人（教研）能拉到
     r = fresh_user(client, nickname="B7 知识点下拉-教研")
-    assign_roles(client, admin_h, r["user"]["id"], ["researcher"],
-                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    assign_roles(
+        client,
+        admin_h,
+        r["user"]["id"],
+        ["researcher"],
+        scope_type="subject",
+        scope_id=JJ_SUBJECT_ID,
+    )
     rh = auth(r["access_token"])
 
-    b = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=rh,
-                        params={"subject_id": JJ_SUBJECT_ID}))
+    b = body(
+        client.get(
+            f"{API}/admin/chapters/knowledge-points",
+            headers=rh,
+            params={"subject_id": JJ_SUBJECT_ID},
+        )
+    )
     assert b["code"] == 0, b
     items = b["data"]["items"]
     assert items, "科目下应当有知识点"
@@ -1512,8 +1916,11 @@ def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
 
     # 带 chapter_id 过滤 → 结果全都属于该章节
     chapter_id = items[0]["chapter_id"]
-    b2 = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=rh,
-                         params={"chapter_id": chapter_id}))
+    b2 = body(
+        client.get(
+            f"{API}/admin/chapters/knowledge-points", headers=rh, params={"chapter_id": chapter_id}
+        )
+    )
     assert b2["code"] == 0 and b2["data"]["items"], b2
     assert all(str(k["chapter_id"]) == str(chapter_id) for k in b2["data"]["items"])
     assert len(b2["data"]["items"]) <= len(items), "按章节过滤后不该变多"
@@ -1524,8 +1931,13 @@ def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
     victim = int(items[-1]["id"])
     try:
         sql_exec("UPDATE knowledge_points SET is_deleted=true WHERE id=$1", victim)
-        b3 = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=rh,
-                             params={"subject_id": JJ_SUBJECT_ID}))
+        b3 = body(
+            client.get(
+                f"{API}/admin/chapters/knowledge-points",
+                headers=rh,
+                params={"subject_id": JJ_SUBJECT_ID},
+            )
+        )
         ids = {int(k["id"]) for k in b3["data"]["items"]}
         assert victim not in ids, "已删除的知识点不该出现在下拉里"
     finally:
@@ -1547,13 +1959,24 @@ def test_metadata_update_rejects_sections_and_writes_nothing(
     before = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
     assert before["question_count"] == 4, before
 
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h, json={
-        "title": "想顺手改个标题",
-        "sections": [
-            {"name": "换个分段", "question_type": "single",
-             "question_count": 1, "score_per": 1, "sort_no": 0},
-        ],
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}",
+            headers=admin_h,
+            json={
+                "title": "想顺手改个标题",
+                "sections": [
+                    {
+                        "name": "换个分段",
+                        "question_type": "single",
+                        "question_count": 1,
+                        "score_per": 1,
+                        "sort_no": 0,
+                    },
+                ],
+            },
+        )
+    )
     assert b["code"] == 40001, b
     # 错误信息要**可执行**：不只是"不支持"，而是告诉调用方该用哪个接口
     assert "sections" in b["message"] and "/sections" in b["message"], b["message"]
@@ -1568,12 +1991,18 @@ def test_metadata_update_rejects_sections_and_writes_nothing(
 def test_metadata_update_without_sections_succeeds(client: httpx.Client, admin_h, created) -> None:
     """不带 `sections` 的元数据更新照常工作（不能被防护误伤）。"""
     exam = make_exam_with_sections(client, admin_h, created, single=3, multiple=2)
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h, json={
-        "title": f"换标题 {uuid.uuid4().hex[:4]}",
-        "duration_min": 145,
-        "pass_score": 66,
-        "is_free": True,
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}",
+            headers=admin_h,
+            json={
+                "title": f"换标题 {uuid.uuid4().hex[:4]}",
+                "duration_min": 145,
+                "pass_score": 66,
+                "is_free": True,
+            },
+        )
+    )
     assert b["code"] == 0, b
     d = b["data"]
     assert d["duration_min"] == 145 and d["pass_score"] == 66 and d["is_free"] is True, d
@@ -1584,20 +2013,36 @@ def test_metadata_update_without_sections_succeeds(client: httpx.Client, admin_h
 def test_metadata_update_rejects_unknown_field(client: httpx.Client, admin_h, created) -> None:
     """`extra="forbid"`：别的未知字段也一律拒绝（防住将来新加的错字段）。"""
     exam = make_exam_with_sections(client, admin_h, created, single=2)
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}", headers=admin_h,
-                        json={"title": "x", "subjects_id": 1001}))  # 故意拼错
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}",
+            headers=admin_h,
+            json={"title": "x", "subjects_id": 1001},
+        )
+    )  # 故意拼错
     assert b["code"] == 40001, b
 
 
 def test_sections_endpoint_requires_expected_count(client: httpx.Client, admin_h, created) -> None:
     """sections 接口**不传** `expected_question_count` → 40001（必填）。"""
     exam = make_exam_with_sections(client, admin_h, created, single=2)
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
-        "sections": [
-            {"name": "新分段", "question_type": "single",
-             "question_count": 1, "score_per": 1, "sort_no": 0},
-        ],
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}/sections",
+            headers=admin_h,
+            json={
+                "sections": [
+                    {
+                        "name": "新分段",
+                        "question_type": "single",
+                        "question_count": 1,
+                        "score_per": 1,
+                        "sort_no": 0,
+                    },
+                ],
+            },
+        )
+    )
     assert b["code"] == 40001, b
     assert "expected_question_count" in b["message"], b["message"]
 
@@ -1606,7 +2051,9 @@ def test_sections_endpoint_requires_expected_count(client: httpx.Client, admin_h
     assert len(after["sections"]) == 1 and after["sections"][0]["question_count"] == 2, after
 
 
-def test_sections_endpoint_rejects_stale_expected_count(client: httpx.Client, admin_h, created) -> None:
+def test_sections_endpoint_rejects_stale_expected_count(
+    client: httpx.Client, admin_h, created
+) -> None:
     """`expected_question_count` 与库里不一致 → 40901，且**一行不写**。
 
     这是乐观并发：期间有人改过这张卷，后提交的必然对不上，
@@ -1619,37 +2066,68 @@ def test_sections_endpoint_rejects_stale_expected_count(client: httpx.Client, ad
     assert detail["question_count"] == 6, detail
 
     # 拿着过期的 2（比如页面是加题之前打开的）去提交
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
-        "sections": [
-            {"name": "只留一段", "question_type": "single",
-             "question_count": 1, "score_per": 1, "sort_no": 0},
-        ],
-        "expected_question_count": 2,
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}/sections",
+            headers=admin_h,
+            json={
+                "sections": [
+                    {
+                        "name": "只留一段",
+                        "question_type": "single",
+                        "question_count": 1,
+                        "score_per": 1,
+                        "sort_no": 0,
+                    },
+                ],
+                "expected_question_count": 2,
+            },
+        )
+    )
     assert b["code"] == 40901, b
     assert "卷面已变化" in b["message"] and "刷新" in b["message"], b["message"]
 
     # 卷面纹丝不动
     after = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
     assert after["question_count"] == 6, "被拒的请求不该动卷面"
-    assert len(after["sections"]) == 1 and after["sections"][0]["question_count"] == 6, after["sections"]
+    assert len(after["sections"]) == 1 and after["sections"][0]["question_count"] == 6, after[
+        "sections"
+    ]
 
 
-def test_sections_endpoint_replaces_and_reports_removed(client: httpx.Client, admin_h, created) -> None:
+def test_sections_endpoint_replaces_and_reports_removed(
+    client: httpx.Client, admin_h, created
+) -> None:
     """expected 对得上 → 重建成功，并如实回报清掉了多少道卷面题。"""
     exam = make_exam_with_sections(client, admin_h, created, single=8)
     qs = pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "single", 8)
     assert add_questions(client, admin_h, exam["id"], qs)["code"] == 0
 
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
-        "sections": [
-            {"name": "一、单项选择题", "question_type": "single",
-             "question_count": 5, "score_per": 1, "sort_no": 0},
-            {"name": "二、判断题", "question_type": "judge",
-             "question_count": 5, "score_per": 1, "sort_no": 1},
-        ],
-        "expected_question_count": 8,
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}/sections",
+            headers=admin_h,
+            json={
+                "sections": [
+                    {
+                        "name": "一、单项选择题",
+                        "question_type": "single",
+                        "question_count": 5,
+                        "score_per": 1,
+                        "sort_no": 0,
+                    },
+                    {
+                        "name": "二、判断题",
+                        "question_type": "judge",
+                        "question_count": 5,
+                        "score_per": 1,
+                        "sort_no": 1,
+                    },
+                ],
+                "expected_question_count": 8,
+            },
+        )
+    )
     assert b["code"] == 0, b
     d = b["data"]
     assert d["removed_questions"] == 8, d
@@ -1664,15 +2142,35 @@ def test_sections_endpoint_replaces_and_reports_removed(client: httpx.Client, ad
 def test_sections_endpoint_frozen_after_publish(client: httpx.Client, admin_h, created) -> None:
     """已发布的卷不能重建卷面结构 → 40901。"""
     exam = make_exam_with_sections(client, admin_h, created, judge=2)
-    assert add_questions(client, admin_h, exam["id"],
-                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert (
+        add_questions(
+            client,
+            admin_h,
+            exam["id"],
+            pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2),
+        )["code"]
+        == 0
+    )
     assert publish(client, admin_h, exam["id"])["code"] == 0
 
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
-        "sections": [{"name": "x", "question_type": "judge",
-                      "question_count": 1, "score_per": 1, "sort_no": 0}],
-        "expected_question_count": 2,
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}/sections",
+            headers=admin_h,
+            json={
+                "sections": [
+                    {
+                        "name": "x",
+                        "question_type": "judge",
+                        "question_count": 1,
+                        "score_per": 1,
+                        "sort_no": 0,
+                    }
+                ],
+                "expected_question_count": 2,
+            },
+        )
+    )
     assert b["code"] == 40901 and "已发布" in b["message"], b
     after = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
     assert after["question_count"] == 2, after
@@ -1686,33 +2184,58 @@ def test_compose_mass_question_loss_is_blocked(client: httpx.Client, admin_h, cr
     所以兜底不看调用方"想要什么"，只看**实际发生的结果**。
     """
     exam = make_exam_with_sections(client, admin_h, created, single=20)
-    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 20, "score": 1}], "seed": 5,
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": [{"type": "single", "count": 20, "score": 1}],
+                "seed": 5,
+            },
+        )
+    )
     assert b["code"] == 0 and b["data"]["question_count"] == 20, b
-    rows_before = int(sql_fetch(
-        "SELECT count(*) AS n FROM exam_questions WHERE exam_id = $1", int(exam["id"])
-    )[0]["n"])
+    rows_before = int(
+        sql_fetch("SELECT count(*) AS n FROM exam_questions WHERE exam_id = $1", int(exam["id"]))[
+            0
+        ]["n"]
+    )
     assert rows_before == 20, rows_before
 
     # 换成"只要 2 道"，replace 默认 true → 会净减少 18 道（> 默认阈值 10）
-    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 6,
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": [{"type": "single", "count": 2, "score": 1}],
+                "seed": 6,
+            },
+        )
+    )
     assert b["code"] == 40901, b
     assert "会删掉 18 道" in b["message"] and "/sections" in b["message"], b["message"]
     assert "expected_question_count=20" in b["message"], "提示里要给出可执行的下一步参数"
 
     # ⚠️ 关键：**交易整体回滚**，一行都没少
-    rows_after = int(sql_fetch(
-        "SELECT count(*) AS n FROM exam_questions WHERE exam_id = $1", int(exam["id"])
-    )[0]["n"])
+    rows_after = int(
+        sql_fetch("SELECT count(*) AS n FROM exam_questions WHERE exam_id = $1", int(exam["id"]))[
+            0
+        ]["n"]
+    )
     assert rows_after == rows_before == 20, f"被拦下就该零副作用：{rows_before} -> {rows_after}"
 
     # 阈值以内（20 → 15，减 5）应当放行
-    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 15, "score": 1}], "seed": 7,
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": [{"type": "single", "count": 15, "score": 1}],
+                "seed": 7,
+            },
+        )
+    )
     assert b["code"] == 0, f"减 5 道在阈值内，不该被拦：{b}"
     assert b["data"]["question_count"] == 15, b["data"]
 
@@ -1730,14 +2253,28 @@ def test_mass_loss_threshold_comes_from_app_configs(client: httpx.Client, admin_
     assert rows, "配置项 exam.mass_question_loss_threshold 不存在（迁移没跑到？）"
 
     exam = make_exam_with_sections(client, admin_h, created, single=6)
-    assert body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 6, "score": 1}], "seed": 11,
-    }))["code"] == 0
+    assert (
+        body(
+            client.post(
+                f"{API}/admin/exams/{exam['id']}/auto-compose",
+                headers=admin_h,
+                json={
+                    "rules": [{"type": "single", "count": 6, "score": 1}],
+                    "seed": 11,
+                },
+            )
+        )["code"]
+        == 0
+    )
 
     def compose(count: int, seed: int) -> dict:
-        return body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h,
-                                json={"rules": [{"type": "single", "count": count, "score": 1}],
-                                      "seed": seed}))
+        return body(
+            client.post(
+                f"{API}/admin/exams/{exam['id']}/auto-compose",
+                headers=admin_h,
+                json={"rules": [{"type": "single", "count": count, "score": 1}], "seed": seed},
+            )
+        )
 
     try:
         # ---- 阈值调小到 3：减 5 道（6 → 1）应当被拦（默认 10 下这是放行的）----
@@ -1775,29 +2312,67 @@ def test_mass_loss_threshold_comes_from_app_configs(client: httpx.Client, admin_
 def test_sections_endpoint_is_the_escape_hatch(client: httpx.Client, admin_h, created) -> None:
     """兜底拦下的操作，走 /sections 给足确认后应当能做成（否则就是死路）。"""
     exam = make_exam_with_sections(client, admin_h, created, single=20)
-    assert body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 20, "score": 1}], "seed": 21,
-    }))["code"] == 0
+    assert (
+        body(
+            client.post(
+                f"{API}/admin/exams/{exam['id']}/auto-compose",
+                headers=admin_h,
+                json={
+                    "rules": [{"type": "single", "count": 20, "score": 1}],
+                    "seed": 21,
+                },
+            )
+        )["code"]
+        == 0
+    )
 
     # 组卷兜底拒绝（减 18 > 10）
-    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 22,
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": [{"type": "single", "count": 2, "score": 1}],
+                "seed": 22,
+            },
+        )
+    )
     assert b["code"] == 40901, b
 
     # 兜底提示指向的接口，照做就该成功
-    b = body(client.put(f"{API}/admin/exams/{exam['id']}/sections", headers=admin_h, json={
-        "sections": [{"name": "重来的单选段", "question_type": "single",
-                      "question_count": 2, "score_per": 1, "sort_no": 0}],
-        "expected_question_count": 20,
-    }))
+    b = body(
+        client.put(
+            f"{API}/admin/exams/{exam['id']}/sections",
+            headers=admin_h,
+            json={
+                "sections": [
+                    {
+                        "name": "重来的单选段",
+                        "question_type": "single",
+                        "question_count": 2,
+                        "score_per": 1,
+                        "sort_no": 0,
+                    }
+                ],
+                "expected_question_count": 20,
+            },
+        )
+    )
     assert b["code"] == 0, b
     assert b["data"]["removed_questions"] == 20, b["data"]
 
     # 之后按新分段（2 道）组卷就顺了
-    b = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": [{"type": "single", "count": 2, "score": 1}], "seed": 23, "replace": False,
-    }))
+    b = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": [{"type": "single", "count": 2, "score": 1}],
+                "seed": 23,
+                "replace": False,
+            },
+        )
+    )
     assert b["code"] == 0, b
 
 
@@ -1806,13 +2381,21 @@ def test_sections_endpoint_is_the_escape_hatch(client: httpx.Client, admin_h, cr
 # 最关键的一条：**试算与真组卷的判据必须同源** —— 否则用户会彻底不信这个预览。
 
 
-def preview_rule(client, headers, *, subject_id: int, rules: list[dict],
-                 seed: int | None = None, include_sample: bool = True) -> dict:
+def preview_rule(
+    client,
+    headers,
+    *,
+    subject_id: int,
+    rules: list[dict],
+    seed: int | None = None,
+    include_sample: bool = True,
+) -> dict:
     payload: dict = {"subject_id": subject_id, "rules": rules, "include_sample": include_sample}
     if seed is not None:
         payload["seed"] = seed
-    return body(client.post(f"{API}/admin/paper-rules/preview", headers=headers,
-                            json=payload, timeout=60))
+    return body(
+        client.post(f"{API}/admin/paper-rules/preview", headers=headers, json=payload, timeout=60)
+    )
 
 
 def test_rule_preview_matches_actual_compose(client: httpx.Client, admin_h, created) -> None:
@@ -1839,9 +2422,16 @@ def test_rule_preview_matches_actual_compose(client: httpx.Client, admin_h, crea
 
     # ---- 真组卷：同样的 rules + 同样的 seed ----
     exam = make_exam_with_sections(client, admin_h, created, single=15, judge=10)
-    comp = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": rules, "seed": 2024,
-    }))
+    comp = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": rules,
+                "seed": 2024,
+            },
+        )
+    )
     assert comp["code"] == 0, comp
     assert comp["data"]["question_count"] == d["total_got"], (
         f"试算说 {d['total_got']} 道，真组卷写了 {comp['data']['question_count']} 道 —— 判据不同源！"
@@ -1850,7 +2440,9 @@ def test_rule_preview_matches_actual_compose(client: httpx.Client, admin_h, crea
     assert comp["data"]["shortfalls"] == [], "试算说没缺口，组卷也该没缺口"
 
 
-def test_rule_preview_reports_shortfall_consistently(client: httpx.Client, admin_h, created) -> None:
+def test_rule_preview_reports_shortfall_consistently(
+    client: httpx.Client, admin_h, created
+) -> None:
     """题库不足时：试算的 `need/got/missing` 与真组卷的 `shortfalls` **完全一致**。"""
     # 要 200 道案例题 —— 库里远没有这么多，必然缺口
     rules = [{"type": "case", "count": 200, "score": 2}]
@@ -1865,9 +2457,16 @@ def test_rule_preview_reports_shortfall_consistently(client: httpx.Client, admin
     assert d["planned_score"] == 400.0 and d["total_score"] == 0.0, d
 
     exam = make_exam_with_sections(client, admin_h, created, single=1)
-    comp = body(client.post(f"{API}/admin/exams/{exam['id']}/auto-compose", headers=admin_h, json={
-        "rules": rules, "seed": 99,
-    }))
+    comp = body(
+        client.post(
+            f"{API}/admin/exams/{exam['id']}/auto-compose",
+            headers=admin_h,
+            json={
+                "rules": rules,
+                "seed": 99,
+            },
+        )
+    )
     assert comp["code"] == 0, comp
     sf = comp["data"]["shortfalls"]
     assert len(sf) == 1, sf
@@ -1889,10 +2488,16 @@ def test_rule_preview_writes_nothing(client: httpx.Client, admin_h) -> None:
         )
 
     before = counts()
-    pv = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[
-        {"type": "single", "count": 5, "score": 1},
-        {"type": "case", "count": 100, "score": 2},
-    ], seed=5)
+    pv = preview_rule(
+        client,
+        admin_h,
+        subject_id=JJ_SUBJECT_ID,
+        rules=[
+            {"type": "single", "count": 5, "score": 1},
+            {"type": "case", "count": 100, "score": 2},
+        ],
+        seed=5,
+    )
     assert pv["code"] == 0, pv
     assert counts() == before, f"试算不该写库：{before} -> {counts()}"
 
@@ -1900,14 +2505,23 @@ def test_rule_preview_writes_nothing(client: httpx.Client, admin_h) -> None:
 def test_rule_preview_validation_and_permission(client: httpx.Client, admin_h) -> None:
     """入参校验 + 权限 + 数据范围。"""
     # 题数必须是正数
-    b = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 0}])
+    b = preview_rule(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 0}]
+    )
     assert b["code"] == 40001, b
     # rules 不能为空
-    b = body(client.post(f"{API}/admin/paper-rules/preview", headers=admin_h,
-                         json={"subject_id": JJ_SUBJECT_ID, "rules": []}))
+    b = body(
+        client.post(
+            f"{API}/admin/paper-rules/preview",
+            headers=admin_h,
+            json={"subject_id": JJ_SUBJECT_ID, "rules": []},
+        )
+    )
     assert b["code"] == 40001, b
     # case_sub 不能单独抽（与建规则同一条约束）
-    b = preview_rule(client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "case_sub", "count": 3}])
+    b = preview_rule(
+        client, admin_h, subject_id=JJ_SUBJECT_ID, rules=[{"type": "case_sub", "count": 3}]
+    )
     assert b["code"] == 40001 and "case_sub" in b["message"], b
     # 科目不存在
     b = preview_rule(client, admin_h, subject_id=999999999, rules=[{"type": "single", "count": 1}])
@@ -1921,8 +2535,14 @@ def test_rule_preview_validation_and_permission(client: httpx.Client, admin_h) -
 
     # 数据范围：教研只挂 A 科目，去试算别科目 → 40301
     r = fresh_user(client, nickname="B7 试算范围")
-    assign_roles(client, admin_h, r["user"]["id"], ["researcher"],
-                 scope_type="subject", scope_id=JJ_SUBJECT_ID)
+    assign_roles(
+        client,
+        admin_h,
+        r["user"]["id"],
+        ["researcher"],
+        scope_type="subject",
+        scope_id=JJ_SUBJECT_ID,
+    )
     rh = auth(r["access_token"])
     b = preview_rule(client, rh, subject_id=JZ_SUBJECT_ID, rules=[{"type": "single", "count": 1}])
     assert b["code"] == 40301, "试算会回传题目明细，必须按数据范围收口"
@@ -1966,8 +2586,15 @@ def test_unpublish_roundtrip_and_published_at_semantics(
     - 而若回 `draft`，就分不清"没发过"和"发过又退回"了。
     """
     exam = make_exam_with_sections(client, admin_h, created, judge=2)
-    assert add_questions(client, admin_h, exam["id"],
-                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert (
+        add_questions(
+            client,
+            admin_h,
+            exam["id"],
+            pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2),
+        )["code"]
+        == 0
+    )
 
     # ---- 发布 ----
     assert publish(client, admin_h, exam["id"])["code"] == 0
@@ -2009,8 +2636,15 @@ def test_unpublish_rejects_when_not_published(client: httpx.Client, admin_h, cre
     assert "只有「已发布」" in b["message"] and "草稿" in b["message"], b["message"]
 
     # 发布 → 下线 → **再下线**：不幂等
-    assert add_questions(client, admin_h, exam["id"],
-                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert (
+        add_questions(
+            client,
+            admin_h,
+            exam["id"],
+            pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2),
+        )["code"]
+        == 0
+    )
     assert publish(client, admin_h, exam["id"])["code"] == 0
     assert unpublish(client, admin_h, exam["id"])["code"] == 0
     b = unpublish(client, admin_h, exam["id"])
@@ -2030,7 +2664,9 @@ def test_unpublish_keeps_locked_versions(client: httpx.Client, admin_h, created)
 
     def locked_map() -> dict:
         d = body(client.get(f"{API}/admin/exams/{exam['id']}", headers=admin_h))["data"]
-        return {q["question_id"]: q["locked_version"] for s in d["sections"] for q in s["questions"]}
+        return {
+            q["question_id"]: q["locked_version"] for s in d["sections"] for q in s["questions"]
+        }
 
     before = locked_map()
     assert all(v is not None for v in before.values()), before
@@ -2042,8 +2678,15 @@ def test_unpublish_keeps_locked_versions(client: httpx.Client, admin_h, created)
 def test_unpublish_permission_and_archived(client: httpx.Client, admin_h, created) -> None:
     """权限 `exam:publish`；已归档（软删除）的卷 → `40401`。"""
     exam = make_exam_with_sections(client, admin_h, created, judge=2)
-    assert add_questions(client, admin_h, exam["id"],
-                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert (
+        add_questions(
+            client,
+            admin_h,
+            exam["id"],
+            pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2),
+        )["code"]
+        == 0
+    )
     assert publish(client, admin_h, exam["id"])["code"] == 0
 
     # viewer 只有 exam:read → 40301（与「发布/归档」一致，都是写动作）
@@ -2064,8 +2707,15 @@ def test_unpublish_writes_change_log(client: httpx.Client, admin_h, created) -> 
         pytest.skip("需要 DATABASE_URL 才能核对变更日志")
 
     exam = make_exam_with_sections(client, admin_h, created, judge=2)
-    assert add_questions(client, admin_h, exam["id"],
-                         pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2))["code"] == 0
+    assert (
+        add_questions(
+            client,
+            admin_h,
+            exam["id"],
+            pick_published_ids(client, admin_h, JJ_SUBJECT_ID, "judge", 2),
+        )["code"]
+        == 0
+    )
     assert publish(client, admin_h, exam["id"])["code"] == 0
     assert unpublish(client, admin_h, exam["id"])["code"] == 0
 

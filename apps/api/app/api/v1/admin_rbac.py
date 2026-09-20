@@ -42,9 +42,7 @@ router = APIRouter(prefix="/admin", tags=["管理端 · 角色与权限"])
 )
 async def list_roles(
     db: DbSession,
-    include_permissions: Annotated[
-        bool, Query(description="是否带上每个角色的权限码")
-    ] = True,
+    include_permissions: Annotated[bool, Query(description="是否带上每个角色的权限码")] = True,
 ) -> dict:
     items = await rbac_service.list_roles_with_permissions(
         db, include_permissions=include_permissions

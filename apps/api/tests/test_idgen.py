@@ -163,8 +163,8 @@ class TestTransportGuard:
         # 注意边界本身有个反直觉的点：2^53 能被 float64 精确表示，
         # 真正不可精确表示的是 2^53 + 1。所以"安全整数"上限是 2^53-1。
         assert is_float_safe(MAX_SAFE_FLOAT_INT) is True
-        assert is_float_safe(2**53) is True          # 恰好可表示
-        assert is_float_safe(2**53 + 1) is False     # 第一个不可表示的整数
+        assert is_float_safe(2**53) is True  # 恰好可表示
+        assert is_float_safe(2**53 + 1) is False  # 第一个不可表示的整数
         assert is_float_safe(0) is True
         assert is_float_safe(-MAX_SAFE_FLOAT_INT) is True
 
@@ -182,10 +182,10 @@ class TestTransportGuard:
         """
         real = SnowflakeGenerator(worker_id=1).next_id()
         base = (real >> 22) << 22 | (1 << 12)  # 抹掉 seq，保留 worker=1，seq=0
-        assert is_float_safe(base) is True          # seq=0 无损
-        assert is_float_safe(base | 1) is False     # seq=1 失真
-        assert is_float_safe(base | 63) is False    # seq=63 失真
-        assert is_float_safe(base | 64) is True     # seq=64 又回到网格上
+        assert is_float_safe(base) is True  # seq=0 无损
+        assert is_float_safe(base | 1) is False  # seq=1 失真
+        assert is_float_safe(base | 63) is False  # seq=63 失真
+        assert is_float_safe(base | 64) is True  # seq=64 又回到网格上
 
         with pytest.raises(ValueError, match="字符串"):
             assert_float_safe(base | 1)

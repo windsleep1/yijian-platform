@@ -55,6 +55,7 @@ class TimestampMixin:
 # 用户
 # =====================================================================
 
+
 class User(Base, TimestampMixin):
     __tablename__ = "users"
 
@@ -118,6 +119,7 @@ class UserSession(Base):
 # RBAC
 # =====================================================================
 
+
 class Role(Base, TimestampMixin):
     __tablename__ = "roles"
 
@@ -173,6 +175,7 @@ class UserRole(Base):
 # =====================================================================
 # 审计
 # =====================================================================
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"

@@ -42,15 +42,14 @@ def _ua(request: Request) -> str | None:
 # 验证码
 # ---------------------------------------------------------------------
 
+
 @router.post(
     "/sms/send",
     response_model=Envelope[SmsSendOut],
     summary="发送短信验证码",
     dependencies=[Depends(rate_limit("sms", limit=20, window_seconds=60, by="ip"))],
 )
-async def send_sms_code(
-    payload: SmsSendIn, request: Request, redis: RedisClient
-) -> dict:
+async def send_sms_code(payload: SmsSendIn, request: Request, redis: RedisClient) -> dict:
     expires_in, dev_code = await sms_service.send_code(
         redis, phone=payload.phone, scene=payload.scene, ip=client_ip(request)
     )
@@ -61,13 +60,16 @@ async def send_sms_code(
 # 注册 / 登录
 # ---------------------------------------------------------------------
 
+
 @router.post(
     "/register",
     response_model=Envelope[TokenPairOut],
     summary="注册（注册即登录）",
     dependencies=[Depends(rate_limit("register", limit=10, window_seconds=60, by="ip"))],
 )
-async def register(payload: RegisterIn, request: Request, db: DbSession, redis: RedisClient) -> dict:
+async def register(
+    payload: RegisterIn, request: Request, db: DbSession, redis: RedisClient
+) -> dict:
     tokens = await auth_service.register(
         db, redis, payload, ip=client_ip(request), user_agent=_ua(request)
     )
@@ -109,6 +111,7 @@ async def login_sms(
 # ---------------------------------------------------------------------
 # 令牌
 # ---------------------------------------------------------------------
+
 
 @router.post(
     "/refresh",
@@ -154,15 +157,14 @@ async def logout(
 # 当前用户
 # ---------------------------------------------------------------------
 
+
 @router.get(
     "/me",
     response_model=Envelope[MeOut],
     summary="当前用户信息",
     description="返回账号、学习档案、角色、权限码列表与数据范围。前端据此渲染菜单与按钮权限。",
 )
-async def get_me(
-    db: DbSession, redis: RedisClient, me: CurrentUserDep, response: Response
-) -> dict:
+async def get_me(db: DbSession, redis: RedisClient, me: CurrentUserDep, response: Response) -> dict:
     # 权限随时可能被后台调整，这里禁用前端强缓存
     response.headers["Cache-Control"] = "no-store"
     data = await auth_service.build_me(db, me.user, redis)

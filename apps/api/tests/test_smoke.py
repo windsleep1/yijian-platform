@@ -36,6 +36,7 @@ from .conftest import (
 
 # ---------------------------------------------------------------- 1. 健康
 
+
 def test_health(client: httpx.Client) -> None:
     b = body(client.get(f"{API}/health"))
     assert b["code"] == 0
@@ -44,6 +45,7 @@ def test_health(client: httpx.Client) -> None:
 
 
 # ---------------------------------------------------------------- 2. 注册
+
 
 def test_register_and_me(client: httpx.Client) -> None:
     phone = rand_phone()
@@ -74,6 +76,7 @@ def test_register_and_me(client: httpx.Client) -> None:
 
 
 # ---------------------------------------------------------------- 3. 登录链路
+
 
 def test_password_login_refresh_logout(client: httpx.Client) -> None:
     phone = rand_phone()
@@ -114,12 +117,14 @@ def test_password_login_refresh_logout(client: httpx.Client) -> None:
 def test_unauthorized_access(client: httpx.Client) -> None:
     assert body(client.get(f"{API}/auth/me"))["code"] == 40100
     assert body(client.get(f"{API}/admin/users"))["code"] == 40100
-    assert body(
-        client.get(f"{API}/auth/me", headers={"Authorization": "Bearer not-a-token"})
-    )["code"] == 40102
+    assert (
+        body(client.get(f"{API}/auth/me", headers={"Authorization": "Bearer not-a-token"}))["code"]
+        == 40102
+    )
 
 
 # ---------------------------------------------------------------- 4/5/6. RBAC
+
 
 def test_rbac_flow(client: httpx.Client) -> None:
     admin_h = auth(admin_token(client))
@@ -195,6 +200,7 @@ def test_rbac_flow(client: httpx.Client) -> None:
 
 
 # ---------------------------------------------------------------- 7. 限流
+
 
 def test_rate_limit_on_sms(client: httpx.Client) -> None:
     phone = rand_phone()

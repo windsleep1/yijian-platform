@@ -79,7 +79,9 @@ app = FastAPI(
 app.add_middleware(TraceIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if not settings.is_prod else [
+    allow_origins=["*"]
+    if not settings.is_prod
+    else [
         o.strip() for o in __import__("os").environ.get("CORS_ORIGINS", "").split(",") if o.strip()
     ],
     allow_credentials=True,

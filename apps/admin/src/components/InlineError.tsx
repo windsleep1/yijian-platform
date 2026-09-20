@@ -53,10 +53,7 @@ export function InlineError({ title, error, onRetry, retrying, hint, className }
   return (
     <div
       role="alert"
-      className={cn(
-        "rounded-lg border border-destructive/40 bg-destructive/5 p-4",
-        className,
-      )}
+      className={cn("rounded-lg border border-destructive/40 bg-destructive/5 p-4", className)}
     >
       <div className="flex items-start gap-2.5">
         <div className="mt-0.5 rounded-full bg-destructive/10 p-1.5">
@@ -80,7 +77,9 @@ export function InlineError({ title, error, onRetry, retrying, hint, className }
             <p className="text-xs leading-relaxed text-muted-foreground">{message}</p>
           )}
 
-          {hint ? <div className="text-xs leading-relaxed text-muted-foreground">{hint}</div> : null}
+          {hint ? (
+            <div className="text-xs leading-relaxed text-muted-foreground">{hint}</div>
+          ) : null}
 
           {api?.traceId ? (
             <p className="yj-json text-[11px] text-muted-foreground">trace_id: {api.traceId}</p>

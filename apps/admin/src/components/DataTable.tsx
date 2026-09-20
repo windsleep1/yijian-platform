@@ -7,7 +7,14 @@ import { DataTableSkeleton } from "@/components/DataTableSkeleton";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
 export type SortState = { key: string; order: "asc" | "desc" };
@@ -110,7 +117,9 @@ export function DataTable<T>({
   const toggleSort = (key: string) => {
     if (!onSortChange) return;
     const next: SortState =
-      sort?.key === key ? { key, order: sort.order === "asc" ? "desc" : "asc" } : { key, order: "desc" };
+      sort?.key === key
+        ? { key, order: sort.order === "asc" ? "desc" : "asc" }
+        : { key, order: "desc" };
     onSortChange(next);
   };
 

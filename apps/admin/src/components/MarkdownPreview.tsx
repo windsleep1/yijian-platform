@@ -52,7 +52,10 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
           </code>
         );
       }
-      if (p.length > 2 && ((p.startsWith("*") && p.endsWith("*")) || (p.startsWith("_") && p.endsWith("_")))) {
+      if (
+        p.length > 2 &&
+        ((p.startsWith("*") && p.endsWith("*")) || (p.startsWith("_") && p.endsWith("_")))
+      ) {
         return <em key={key}>{p.slice(1, -1)}</em>;
       }
       return <span key={key}>{p}</span>;

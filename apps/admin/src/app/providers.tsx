@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  MutationCache,
-  QueryCache,
-  QueryClient,
-  QueryClientProvider,
-} from "@tanstack/react-query";
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { useState, type ReactNode } from "react";
 import { Toaster, toast } from "sonner";

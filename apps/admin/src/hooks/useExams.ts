@@ -119,7 +119,10 @@ export function useReplaceExamSections(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: ExamSectionsReplaceIn) =>
-      request<ExamSectionsReplaceOut>(`/admin/exams/${id}/sections`, { method: "PUT", body: payload }),
+      request<ExamSectionsReplaceOut>(`/admin/exams/${id}/sections`, {
+        method: "PUT",
+        body: payload,
+      }),
     onSuccess: () => invalidateAfterWrite(qc, id, { list: true }),
   });
 }
@@ -197,7 +200,10 @@ export function useAddExamQuestions(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: ExamAddQuestionsIn) =>
-      request<ExamAddQuestionsOut>(`/admin/exams/${id}/questions`, { method: "POST", body: payload }),
+      request<ExamAddQuestionsOut>(`/admin/exams/${id}/questions`, {
+        method: "POST",
+        body: payload,
+      }),
     onSuccess: () => invalidateAfterWrite(qc, id, { list: true }),
   });
 }

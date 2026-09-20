@@ -76,9 +76,9 @@ from app.services.question_service import ScopeViewer, content_hash, scope_subje
 
 # --------------------------------------------------------------------- 上限
 
-MAX_FILE_BYTES = 20 * 1024 * 1024        # 单文件 20MB（6000 题的 json 约 13MB）
-MAX_ROWS = 20000                          # 单批最多 2 万行
-ERROR_REPORT_LIMIT = 200                  # 错误报告最多回传多少条
+MAX_FILE_BYTES = 20 * 1024 * 1024  # 单文件 20MB（6000 题的 json 约 13MB）
+MAX_ROWS = 20000  # 单批最多 2 万行
+ERROR_REPORT_LIMIT = 200  # 错误报告最多回传多少条
 ROW_PAGE_SIZE_DEFAULT = 50
 
 OBJECTIVE_TYPES = ("single", "multiple")
@@ -88,7 +88,7 @@ SOURCE_TYPES = ("self", "authorized", "public", "user_import", "ai_assisted")
 
 MIN_STEM, MAX_STEM = 5, 3000
 MIN_ANALYSIS = 10
-MIN_OPTIONS, MAX_OPTIONS = 2, len(OPTION_COLUMNS)   # 2 ~ 6（option_a..option_f）
+MIN_OPTIONS, MAX_OPTIONS = 2, len(OPTION_COLUMNS)  # 2 ~ 6（option_a..option_f）
 MAX_TAGS = 8
 # 执行阶段"分批写"的批大小（同一事务内）
 WRITE_CHUNK = 500
@@ -198,26 +198,42 @@ async def load_context(
     db: AsyncSession, *, current_user: ScopeViewer, batch_subject_id: int | None, mode: str
 ) -> ValidationContext:
     subjects = (
-        await db.execute(
-            text("SELECT id, code, name, category, professional FROM subjects WHERE status = 'on'")
-        )
-    ).mappings().all()
-    chapters = (
-        await db.execute(
-            text("SELECT id, subject_id, code FROM chapters WHERE is_deleted = false")
-        )
-    ).mappings().all()
-    kps = (
-        await db.execute(
-            text(
-                "SELECT id, subject_id, chapter_id, code FROM knowledge_points "
-                "WHERE is_deleted = false"
+        (
+            await db.execute(
+                text(
+                    "SELECT id, code, name, category, professional FROM subjects WHERE status = 'on'"
+                )
             )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
+    chapters = (
+        (
+            await db.execute(
+                text("SELECT id, subject_id, code FROM chapters WHERE is_deleted = false")
+            )
+        )
+        .mappings()
+        .all()
+    )
+    kps = (
+        (
+            await db.execute(
+                text(
+                    "SELECT id, subject_id, chapter_id, code FROM knowledge_points "
+                    "WHERE is_deleted = false"
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
     existing = (
-        await db.execute(text("SELECT id, content_hash FROM questions WHERE is_deleted = false"))
-    ).mappings().all()
+        (await db.execute(text("SELECT id, content_hash FROM questions WHERE is_deleted = false")))
+        .mappings()
+        .all()
+    )
 
     return ValidationContext(
         subjects_by_code={r["code"]: dict(r) for r in subjects},
@@ -378,15 +394,23 @@ def validate_row(row: dict[str, Any], row_no: int, ctx: ValidationContext) -> Ro
     # ---- 2. 数据范围（合规属性，校验阶段就拒绝）----
     if subject_id is not None and ctx.allowed_subject_ids is not None:
         if subject_id not in ctx.allowed_subject_ids:
-            allowed_desc = "、".join(
-                f"{c}({ctx.subjects_by_code[c]['name']})"
-                for c in ctx.subjects_by_code
-                if ctx.subjects_by_code[c]["id"] in ctx.allowed_subject_ids
-            ) or "（无）"
-            err("subject_code",
-                f"超出你的数据范围：{subject_code} 不在你可操作的科目内（可操作：{allowed_desc}）")
-    if subject_id is not None and ctx.batch_subject_id is not None \
-            and subject_id != ctx.batch_subject_id:
+            allowed_desc = (
+                "、".join(
+                    f"{c}({ctx.subjects_by_code[c]['name']})"
+                    for c in ctx.subjects_by_code
+                    if ctx.subjects_by_code[c]["id"] in ctx.allowed_subject_ids
+                )
+                or "（无）"
+            )
+            err(
+                "subject_code",
+                f"超出你的数据范围：{subject_code} 不在你可操作的科目内（可操作：{allowed_desc}）",
+            )
+    if (
+        subject_id is not None
+        and ctx.batch_subject_id is not None
+        and subject_id != ctx.batch_subject_id
+    ):
         err("subject_code", "与批次指定的科目不一致")
 
     # ---- 3. chapter_code ----
@@ -457,8 +481,10 @@ def validate_row(row: dict[str, Any], row_no: int, ctx: ValidationContext) -> Ro
             correct = [c.strip().upper() for c in correct if c.strip()]
             outside = [c for c in correct if c not in labels]
             if outside:
-                err("answer",
-                    f"答案 {'、'.join(outside)} 不在选项中（本题选项：{'、'.join(labels) or '（无）'}）")
+                err(
+                    "answer",
+                    f"答案 {'、'.join(outside)} 不在选项中（本题选项：{'、'.join(labels) or '（无）'}）",
+                )
             elif qtype == "single" and len(correct) != 1:
                 err("answer", f"单选题必须恰好 1 个正确答案，当前 {len(correct)} 个")
             elif qtype == "multiple" and len(correct) < 2:
@@ -466,8 +492,9 @@ def validate_row(row: dict[str, Any], row_no: int, ctx: ValidationContext) -> Ro
         if not errors:
             for i, (col, val) in enumerate(provided):
                 label = col.replace("option_", "").upper()
-                options.append({"label": label, "content": val,
-                                "is_correct": label in correct, "sort_no": i})
+                options.append(
+                    {"label": label, "content": val, "is_correct": label in correct, "sort_no": i}
+                )
     elif qtype in TEXT_ANSWER_TYPES:
         if not answer_raw:
             err("answer", f"{qtype} 题必须给出参考答案文本")
@@ -503,9 +530,11 @@ def validate_row(row: dict[str, Any], row_no: int, ctx: ValidationContext) -> Ro
     source_name = _s(row, "source_name")
     source_license = _s(row, "source_license")
     if source_type != "self" and not source_name:
-        err("source_name",
+        err(
+            "source_name",
             f"合规红线：source_type={source_type} 时必须填写 source_name"
-            "（来源不可追溯的内容不得入库）")
+            "（来源不可追溯的内容不得入库）",
+        )
     if source_type == "authorized" and not source_license:
         err("source_license", "合规红线：authorized 来源必须填写 source_license（授权凭证号）")
     if exam_year is not None and source_type in ("self", "ai_assisted", "user_import"):
@@ -522,8 +551,10 @@ def validate_row(row: dict[str, Any], row_no: int, ctx: ValidationContext) -> Ro
         if not group:
             err("case_group_id", "案例小题必须填写 case_group_id（同组小问共享同一个值）")
         elif ctx.case_groups_in_file and group not in ctx.case_groups_in_file:
-            err("case_group_id",
-                f"本批次内找不到 case_group_id={group} 的案例大题（小问必须与大题同批导入）")
+            err(
+                "case_group_id",
+                f"本批次内找不到 case_group_id={group} 的案例大题（小问必须与大题同批导入）",
+            )
 
     if errors:
         return RowOutcome(row_no=row_no, action="error", errors=errors)
@@ -531,23 +562,40 @@ def validate_row(row: dict[str, Any], row_no: int, ctx: ValidationContext) -> Ro
     assert subject_id is not None  # 上面已保证
     hash_value = content_hash(stem, [(o["label"], o["content"]) for o in options], qtype)
     payload = _build_payload(
-        row, qtype=qtype, subject_id=subject_id, chapter_id=chapter_id,
-        kp_id=kp_id, options=options, hash_value=hash_value,
+        row,
+        qtype=qtype,
+        subject_id=subject_id,
+        chapter_id=chapter_id,
+        kp_id=kp_id,
+        options=options,
+        hash_value=hash_value,
     )
 
     seen_at = ctx.seen_hashes.get(hash_value)
     if seen_at is not None:
-        return RowOutcome(row_no=row_no, action="duplicate",
-                          message=f"文件内重复：内容与第 {seen_at} 行一致，只入第一条")
+        return RowOutcome(
+            row_no=row_no,
+            action="duplicate",
+            message=f"文件内重复：内容与第 {seen_at} 行一致，只入第一条",
+        )
 
     existing_id = ctx.existing_hashes.get(hash_value)
     if existing_id is not None:
         if ctx.mode != "upsert":
-            return RowOutcome(row_no=row_no, action="duplicate", question_id=existing_id,
-                              message=f"库内已有同内容题目（id={existing_id}），insert 模式跳过")
-        return RowOutcome(row_no=row_no, action="update", question_id=existing_id,
-                          payload=payload, options=options,
-                          message=f"命中同内容题目（id={existing_id}），upsert 模式更新")
+            return RowOutcome(
+                row_no=row_no,
+                action="duplicate",
+                question_id=existing_id,
+                message=f"库内已有同内容题目（id={existing_id}），insert 模式跳过",
+            )
+        return RowOutcome(
+            row_no=row_no,
+            action="update",
+            question_id=existing_id,
+            payload=payload,
+            options=options,
+            message=f"命中同内容题目（id={existing_id}），upsert 模式更新",
+        )
 
     return RowOutcome(row_no=row_no, action="insert", payload=payload, options=options)
 
@@ -611,10 +659,18 @@ async def create_batch(
             """
         ),
         {
-            "id": batch_id, "batch_no": batch_no, "file_name": file_name[:255],
-            "file_hash": file_hash, "file_type": file_type, "subject_id": subject_id,
-            "source_type": source_type, "license_note": license_note, "mode": mode,
-            "total_rows": len(rows), "auto_publish": auto_publish, "operator_id": actor.id,
+            "id": batch_id,
+            "batch_no": batch_no,
+            "file_name": file_name[:255],
+            "file_hash": file_hash,
+            "file_type": file_type,
+            "subject_id": subject_id,
+            "source_type": source_type,
+            "license_note": license_note,
+            "mode": mode,
+            "total_rows": len(rows),
+            "auto_publish": auto_publish,
+            "operator_id": actor.id,
         },
     )
     # 原始文件落盘：execute 阶段要重新解析它拿完整 payload（见下方 _IMPORT_FILE_DIR 注记）
@@ -623,16 +679,28 @@ async def create_batch(
     await _store_raw_rows(db, batch_id, rows)
 
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="import.upload",
-        module="question", entity_type="import_batch", entity_id=batch_id,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="import.upload",
+        module="question",
+        entity_type="import_batch",
+        entity_id=batch_id,
         after={"file_name": file_name, "rows": len(rows), "mode": mode},
-        method="POST", path="/api/v1/admin/imports/upload", ip=ip, user_agent=user_agent,
+        method="POST",
+        path="/api/v1/admin/imports/upload",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
 
     return ImportUploadOut(
-        id=batch_id, batch_no=batch_no, file_name=file_name, file_type=file_type,
-        total_rows=len(rows), status="pending",
+        id=batch_id,
+        batch_no=batch_no,
+        file_name=file_name,
+        file_type=file_type,
+        total_rows=len(rows),
+        status="pending",
         message="上传成功，尚未写入任何题目。请调用 /validate 做逐行校验。",
     )
 
@@ -653,17 +721,21 @@ async def _store_raw_rows(db: AsyncSession, batch_id: int, rows: list[dict[str, 
                 slim[k] = v[:200] + "…"
             else:
                 slim[k] = v
-        payload.append({
-            "id": rid, "batch_id": batch_id, "row_no": i,
-            "raw": json.dumps(slim, ensure_ascii=False, default=str),
-        })
+        payload.append(
+            {
+                "id": rid,
+                "batch_id": batch_id,
+                "row_no": i,
+                "raw": json.dumps(slim, ensure_ascii=False, default=str),
+            }
+        )
     for start in range(0, len(payload), WRITE_CHUNK):
         await db.execute(
             text(
                 "INSERT INTO import_items (id, batch_id, row_no, raw, action, message) "
                 "VALUES (:id, :batch_id, :row_no, CAST(:raw AS jsonb), 'skip', '待校验')"
             ),
-            payload[start:start + WRITE_CHUNK],
+            payload[start : start + WRITE_CHUNK],
         )
 
 
@@ -681,30 +753,50 @@ LEFT JOIN users u ON u.id = b.operator_id
 """
 
 
-def _batch_out(row: dict[str, Any], *, can: dict[str, bool], size: int | None = None) -> ImportBatchOut:
+def _batch_out(
+    row: dict[str, Any], *, can: dict[str, bool], size: int | None = None
+) -> ImportBatchOut:
     report_raw = row.get("error_report") or {}
     report = ErrorReport(**report_raw) if isinstance(report_raw, dict) else ErrorReport()
     if size is None:
         size = _stored_file_size(row["id"], row["file_type"])
     return ImportBatchOut(
-        id=row["id"], batch_no=row["batch_no"], file_name=row["file_name"],
-        file_type=row["file_type"], file_hash=row["file_hash"], file_size=size,
-        subject_id=row["subject_id"], subject_code=row["subject_code"],
-        subject_name=row["subject_name"], source_type=row["source_type"],
-        license_note=row["license_note"], mode=row["mode"], status=row["status"],
+        id=row["id"],
+        batch_no=row["batch_no"],
+        file_name=row["file_name"],
+        file_type=row["file_type"],
+        file_hash=row["file_hash"],
+        file_size=size,
+        subject_id=row["subject_id"],
+        subject_code=row["subject_code"],
+        subject_name=row["subject_name"],
+        source_type=row["source_type"],
+        license_note=row["license_note"],
+        mode=row["mode"],
+        status=row["status"],
         auto_publish=bool(row["auto_publish"]),
-        total_rows=row["total_rows"], success_rows=row["success_rows"],
-        failed_rows=row["failed_rows"], duplicate_rows=row["duplicate_rows"],
-        updated_rows=row["updated_rows"], error_report=report,
-        operator_id=row["operator_id"], operator_name=row["operator_name"],
-        started_at=row["started_at"], finished_at=row["finished_at"],
-        rollback_at=row["rollback_at"], rollback_by=row["rollback_by"],
+        total_rows=row["total_rows"],
+        success_rows=row["success_rows"],
+        failed_rows=row["failed_rows"],
+        duplicate_rows=row["duplicate_rows"],
+        updated_rows=row["updated_rows"],
+        error_report=report,
+        operator_id=row["operator_id"],
+        operator_name=row["operator_name"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        rollback_at=row["rollback_at"],
+        rollback_by=row["rollback_by"],
         created_at=row["created_at"],
-        can_execute=can["execute"], can_publish=can["publish"], can_rollback=can["rollback"],
+        can_execute=can["execute"],
+        can_publish=can["publish"],
+        can_rollback=can["rollback"],
     )
 
 
-def _capabilities(batch_status: str, viewer: ScopeViewer, *, executed: bool = False) -> dict[str, bool]:
+def _capabilities(
+    batch_status: str, viewer: ScopeViewer, *, executed: bool = False
+) -> dict[str, bool]:
     """前端按钮可用性。**与路由上的 `require_permission` 严格一致** ——
     否则会出现"按钮亮着、点了 403"或反过来的鬼状态。
 
@@ -732,19 +824,27 @@ async def _executed_batch_ids(db: AsyncSession, batch_ids: list[int]) -> set[int
     if not batch_ids:
         return set()
     rows = (
-        await db.execute(
-            text(
-                "SELECT DISTINCT batch_id FROM content_change_logs "
-                "WHERE batch_id = ANY(CAST(:ids AS bigint[])) AND action IN ('create','update')"
-            ),
-            {"ids": list(batch_ids)},
+        (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT batch_id FROM content_change_logs "
+                    "WHERE batch_id = ANY(CAST(:ids AS bigint[])) AND action IN ('create','update')"
+                ),
+                {"ids": list(batch_ids)},
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {int(b) for b in rows if b is not None}
 
 
 async def _load_batch(db: AsyncSession, batch_id: int) -> dict[str, Any]:
-    row = (await db.execute(text(_BATCH_SELECT + " WHERE b.id = :id"), {"id": batch_id})).mappings().first()
+    row = (
+        (await db.execute(text(_BATCH_SELECT + " WHERE b.id = :id"), {"id": batch_id}))
+        .mappings()
+        .first()
+    )
     if row is None:
         raise not_found("导入批次不存在", 40401)
     return dict(row)
@@ -756,8 +856,13 @@ async def _load_batch(db: AsyncSession, batch_id: int) -> dict[str, Any]:
 
 
 async def validate_batch(
-    db: AsyncSession, *, batch_id: int, actor: ScopeViewer, actor_name: str | None,
-    ip: str | None = None, user_agent: str | None = None,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> ImportBatchDetail:
     """② 逐行校验（dry-run）。**不写任何题目**，只落 `import_items` 与统计。"""
     batch = await _load_batch(db, batch_id)
@@ -765,11 +870,15 @@ async def validate_batch(
         raise conflict("批次正在导入，无法重复校验", 40901)
 
     raw_rows = (
-        await db.execute(
-            text("SELECT row_no, raw FROM import_items WHERE batch_id = :id ORDER BY row_no"),
-            {"id": batch_id},
+        (
+            await db.execute(
+                text("SELECT row_no, raw FROM import_items WHERE batch_id = :id ORDER BY row_no"),
+                {"id": batch_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     if not raw_rows:
         raise bad_request("批次没有可校验的行（可能未上传成功）", 40001)
 
@@ -805,17 +914,22 @@ async def validate_batch(
             msg = "；".join(f"[{e.field}] {e.message}" for e in o.errors[:3])
         else:
             msg = o.message
-        updates.append({
-            "row_no": o.row_no, "batch_id": batch_id, "action": o.action,
-            "message": (msg or "")[:500], "question_id": o.question_id,
-        })
+        updates.append(
+            {
+                "row_no": o.row_no,
+                "batch_id": batch_id,
+                "action": o.action,
+                "message": (msg or "")[:500],
+                "question_id": o.question_id,
+            }
+        )
     for start in range(0, len(updates), WRITE_CHUNK):
         await db.execute(
             text(
                 "UPDATE import_items SET action = :action, message = :message, "
                 "question_id = :question_id WHERE batch_id = :batch_id AND row_no = :row_no"
             ),
-            updates[start:start + WRITE_CHUNK],
+            updates[start : start + WRITE_CHUNK],
         )
 
     counts = {"insert": 0, "update": 0, "duplicate": 0, "error": 0}
@@ -845,24 +959,38 @@ async def validate_batch(
             """
         ),
         {
-            "id": batch_id, "total": len(outcomes),
+            "id": batch_id,
+            "total": len(outcomes),
             "success": counts["insert"] + counts["update"],
-            "failed": counts["error"], "dup": counts["duplicate"],
+            "failed": counts["error"],
+            "dup": counts["duplicate"],
             "report": json.dumps(report.model_dump(), ensure_ascii=False),
         },
     )
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="import.validate",
-        module="question", entity_type="import_batch", entity_id=batch_id,
-        after={"total": len(outcomes), "insert": counts["insert"],
-               "update": counts["update"], "duplicate": counts["duplicate"],
-               "error": counts["error"]},
-        method="POST", path=f"/api/v1/admin/imports/{batch_id}/validate",
-        ip=ip, user_agent=user_agent,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="import.validate",
+        module="question",
+        entity_type="import_batch",
+        entity_id=batch_id,
+        after={
+            "total": len(outcomes),
+            "insert": counts["insert"],
+            "update": counts["update"],
+            "duplicate": counts["duplicate"],
+            "error": counts["error"],
+        },
+        method="POST",
+        path=f"/api/v1/admin/imports/{batch_id}/validate",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
-    return await get_batch(db, batch_id=batch_id, viewer=actor,
-                           row_page=1, row_page_size=ROW_PAGE_SIZE_DEFAULT)
+    return await get_batch(
+        db, batch_id=batch_id, viewer=actor, row_page=1, row_page_size=ROW_PAGE_SIZE_DEFAULT
+    )
 
 
 # =====================================================================
@@ -871,38 +999,60 @@ async def validate_batch(
 
 
 async def get_batch(
-    db: AsyncSession, *, batch_id: int, viewer: ScopeViewer,
-    row_page: int = 1, row_page_size: int = ROW_PAGE_SIZE_DEFAULT,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    viewer: ScopeViewer,
+    row_page: int = 1,
+    row_page_size: int = ROW_PAGE_SIZE_DEFAULT,
 ) -> ImportBatchDetail:
     row = await _load_batch(db, batch_id)
     total_items = int(
-        (await db.execute(
-            text("SELECT count(*) FROM import_items WHERE batch_id = :id"), {"id": batch_id}
-        )).scalar_one()
+        (
+            await db.execute(
+                text("SELECT count(*) FROM import_items WHERE batch_id = :id"), {"id": batch_id}
+            )
+        ).scalar_one()
     )
     items = (
-        await db.execute(
-            text(
-                "SELECT row_no, action, message, question_id FROM import_items "
-                "WHERE batch_id = :id ORDER BY row_no LIMIT :lim OFFSET :off"
-            ),
-            {"id": batch_id, "lim": row_page_size, "off": (row_page - 1) * row_page_size},
+        (
+            await db.execute(
+                text(
+                    "SELECT row_no, action, message, question_id FROM import_items "
+                    "WHERE batch_id = :id ORDER BY row_no LIMIT :lim OFFSET :off"
+                ),
+                {"id": batch_id, "lim": row_page_size, "off": (row_page - 1) * row_page_size},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     executed = bool(await _executed_batch_ids(db, [batch_id]))
     base = _batch_out(row, can=_capabilities(row["status"], viewer, executed=executed))
     return ImportBatchDetail(
         **base.model_dump(),
-        rows=[ImportRowPreview(row_no=r["row_no"], action=r["action"],
-                               message=r["message"], question_id=r["question_id"])
-              for r in items],
-        row_page=row_page, row_page_size=row_page_size, row_total=total_items,
+        rows=[
+            ImportRowPreview(
+                row_no=r["row_no"],
+                action=r["action"],
+                message=r["message"],
+                question_id=r["question_id"],
+            )
+            for r in items
+        ],
+        row_page=row_page,
+        row_page_size=row_page_size,
+        row_total=total_items,
     )
 
 
 async def list_batches(
-    db: AsyncSession, *, viewer: ScopeViewer, page: int, page_size: int,
+    db: AsyncSession,
+    *,
+    viewer: ScopeViewer,
+    page: int,
+    page_size: int,
     status: str | None = None,
 ) -> tuple[list[ImportBatchOut], int]:
     where = ""
@@ -911,19 +1061,29 @@ async def list_batches(
         where = " WHERE b.status = :status"
         params["status"] = status
     total = int(
-        (await db.execute(
-            text("SELECT count(*) FROM import_batches b" + where), params
-        )).scalar_one()
+        (
+            await db.execute(text("SELECT count(*) FROM import_batches b" + where), params)
+        ).scalar_one()
     )
     rows = (
-        await db.execute(
-            text(_BATCH_SELECT + where + " ORDER BY b.created_at DESC, b.id DESC LIMIT :lim OFFSET :off"),
-            {**params, "lim": page_size, "off": (page - 1) * page_size},
+        (
+            await db.execute(
+                text(
+                    _BATCH_SELECT
+                    + where
+                    + " ORDER BY b.created_at DESC, b.id DESC LIMIT :lim OFFSET :off"
+                ),
+                {**params, "lim": page_size, "off": (page - 1) * page_size},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     executed_ids = await _executed_batch_ids(db, [r["id"] for r in rows])
     return [
-        _batch_out(dict(r), can=_capabilities(r["status"], viewer, executed=r["id"] in executed_ids))
+        _batch_out(
+            dict(r), can=_capabilities(r["status"], viewer, executed=r["id"] in executed_ids)
+        )
         for r in rows
     ], total
 
@@ -947,8 +1107,12 @@ WHERE c.batch_id = :batch_id
 
 
 async def list_batch_changes(
-    db: AsyncSession, *, batch_id: int, viewer: ScopeViewer,
-    page: int = 1, page_size: int = ROW_PAGE_SIZE_DEFAULT,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    viewer: ScopeViewer,
+    page: int = 1,
+    page_size: int = ROW_PAGE_SIZE_DEFAULT,
 ) -> ImportChangeOut:
     """本批次的 `content_change_logs`（分页）+ 按 action 的全量汇总。
 
@@ -968,26 +1132,44 @@ async def list_batch_changes(
                 ),
                 {"id": batch_id},
             )
-        ).mappings().all()
+        )
+        .mappings()
+        .all()
     }
     total = sum(counts.values())
 
     rows = (
-        await db.execute(
-            text(_CHANGE_SELECT + " ORDER BY c.created_at DESC, c.id DESC LIMIT :lim OFFSET :off"),
-            {"batch_id": batch_id, "lim": page_size, "off": (page - 1) * page_size},
+        (
+            await db.execute(
+                text(
+                    _CHANGE_SELECT + " ORDER BY c.created_at DESC, c.id DESC LIMIT :lim OFFSET :off"
+                ),
+                {"batch_id": batch_id, "lim": page_size, "off": (page - 1) * page_size},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     return ImportChangeOut(
-        id=batch["id"], batch_no=batch["batch_no"], total=total, counts=counts,
-        page=page, page_size=page_size, has_more=page * page_size < total,
+        id=batch["id"],
+        batch_no=batch["batch_no"],
+        total=total,
+        counts=counts,
+        page=page,
+        page_size=page_size,
+        has_more=page * page_size < total,
         items=[
             ImportChangeItem(
-                id=r["id"], entity_type=r["entity_type"], entity_id=r["entity_id"],
-                action=r["action"], change_log=r["change_log"],
-                question_stem=r["question_stem"], operator_id=r["operator_id"],
-                operator_name=r["operator_name"], created_at=r["created_at"],
+                id=r["id"],
+                entity_type=r["entity_type"],
+                entity_id=r["entity_id"],
+                action=r["action"],
+                change_log=r["change_log"],
+                question_stem=r["question_stem"],
+                operator_id=r["operator_id"],
+                operator_name=r["operator_name"],
+                created_at=r["created_at"],
             )
             for r in rows
         ],
@@ -1000,9 +1182,15 @@ async def list_batch_changes(
 
 
 async def execute_batch(
-    db: AsyncSession, *, batch_id: int, actor: ScopeViewer, actor_name: str | None,
-    publish: bool = False, allow_partial: bool = False,
-    ip: str | None = None, user_agent: str | None = None,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    publish: bool = False,
+    allow_partial: bool = False,
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> ImportExecuteOut:
     """④ 执行导入。**单事务**，要么整批进入，要么一条不进。
 
@@ -1037,7 +1225,7 @@ async def execute_batch(
         raise conflict(
             f"本批次有 {batch['failed_rows']} 行未通过校验。按「整批成功或整批失败」的约定，"
             "不会写入任何数据。请修正这些行后重新上传；"
-            "若确认只导入通过的行，请在 execute 时传 \"allow_partial\": true。",
+            '若确认只导入通过的行，请在 execute 时传 "allow_partial": true。',
             40901,
         )
 
@@ -1054,14 +1242,18 @@ async def execute_batch(
         raise bad_request("批次原始文件已不可用，无法执行导入（请重新上传）", 40001)
 
     items = (
-        await db.execute(
-            text(
-                "SELECT row_no, action, question_id FROM import_items "
-                "WHERE batch_id = :id AND action IN ('insert','update') ORDER BY row_no"
-            ),
-            {"id": batch_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT row_no, action, question_id FROM import_items "
+                    "WHERE batch_id = :id AND action IN ('insert','update') ORDER BY row_no"
+                ),
+                {"id": batch_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     await db.execute(
         text("UPDATE import_batches SET status = 'importing', started_at = now() WHERE id = :id"),
@@ -1074,7 +1266,11 @@ async def execute_batch(
         # 所以这里**重新解析原文件**才能拿到完整内容；mode 沿用它 = 校验时的 mode。
         payloads = await _load_full_payloads(db, batch_id, batch, actor)
         inserted, updated = await _write_rows(
-            db, batch_id=batch_id, items=items, payloads=payloads, actor=actor,
+            db,
+            batch_id=batch_id,
+            items=items,
+            payloads=payloads,
+            actor=actor,
         )
     except Exception as exc:  # noqa: BLE001
         # 整批回滚 —— 不留半截数据
@@ -1085,10 +1281,17 @@ async def execute_batch(
                 "UPDATE import_batches SET status = 'failed', finished_at = now(), "
                 "error_report = CAST(:rep AS jsonb) WHERE id = :id"
             ),
-            {"id": batch_id, "rep": json.dumps(
-                {"total_errors": 1, "truncated": False,
-                 "errors": [{"row_no": 0, "field": "_batch", "message": err_msg}]},
-                ensure_ascii=False)},
+            {
+                "id": batch_id,
+                "rep": json.dumps(
+                    {
+                        "total_errors": 1,
+                        "truncated": False,
+                        "errors": [{"row_no": 0, "field": "_batch", "message": err_msg}],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
         )
         await db.commit()
         raise conflict(f"导入失败，已整批回滚，未写入任何数据。{err_msg}", 50001) from exc
@@ -1105,11 +1308,18 @@ async def execute_batch(
         {"id": batch_id, "success": inserted + updated, "updated": updated},
     )
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="import.execute",
-        module="question", entity_type="import_batch", entity_id=batch_id,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="import.execute",
+        module="question",
+        entity_type="import_batch",
+        entity_id=batch_id,
         after={"inserted": inserted, "updated": updated, "mode": batch["mode"]},
-        method="POST", path=f"/api/v1/admin/imports/{batch_id}/execute",
-        ip=ip, user_agent=user_agent,
+        method="POST",
+        path=f"/api/v1/admin/imports/{batch_id}/execute",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
 
@@ -1117,15 +1327,24 @@ async def execute_batch(
     # 直接调 publish_batch 会抛"没有可发布的题目"，把一次成功的 execute 变成 500）
     if (publish or batch["auto_publish"]) and (inserted + updated) > 0:
         await publish_batch(
-            db, batch_id=batch_id, actor=actor, actor_name=actor_name,
-            include_duplicates=False, ip=ip, user_agent=user_agent,
+            db,
+            batch_id=batch_id,
+            actor=actor,
+            actor_name=actor_name,
+            include_duplicates=False,
+            ip=ip,
+            user_agent=user_agent,
         )
 
     fresh = await _load_batch(db, batch_id)
     return ImportExecuteOut(
-        id=batch_id, status=fresh["status"], total_rows=fresh["total_rows"],
-        success_rows=fresh["success_rows"], failed_rows=fresh["failed_rows"],
-        duplicate_rows=fresh["duplicate_rows"], updated_rows=fresh["updated_rows"],
+        id=batch_id,
+        status=fresh["status"],
+        total_rows=fresh["total_rows"],
+        success_rows=fresh["success_rows"],
+        failed_rows=fresh["failed_rows"],
+        duplicate_rows=fresh["duplicate_rows"],
+        updated_rows=fresh["updated_rows"],
         duration_ms=int((_time.perf_counter() - started) * 1000),
     )
 
@@ -1148,7 +1367,8 @@ async def _load_full_payloads(
         db, current_user=actor, batch_subject_id=batch["subject_id"], mode=batch["mode"]
     )
     ctx.case_groups_in_file = {
-        _s(r, "case_group_id") for r in rows
+        _s(r, "case_group_id")
+        for r in rows
         if _s(r, "type").lower() == "case" and _s(r, "case_group_id")
     }
     out: dict[int, RowOutcome] = {}
@@ -1201,8 +1421,12 @@ def _stored_file_size(batch_id: int, file_type: str) -> int | None:
 
 
 async def _write_rows(
-    db: AsyncSession, *, batch_id: int, items: list[Any],
-    payloads: dict[int, RowOutcome], actor: ScopeViewer,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    items: list[Any],
+    payloads: dict[int, RowOutcome],
+    actor: ScopeViewer,
 ) -> tuple[int, int]:
     """把 insert / update 两类行真正写进库。调用方保证在**同一事务**内。
 
@@ -1210,10 +1434,16 @@ async def _write_rows(
     批次定死的 mode 现算出来），`items` 只用来兜底过滤。
     这样即便 DB 里 `import_items.action` 与重新校验的结果有出入，也以重算的为准。
     """
-    inserts = [o for o in (payloads.get(i["row_no"]) for i in items)
-               if o is not None and o.action == "insert"]
-    updates = [o for o in (payloads.get(i["row_no"]) for i in items)
-               if o is not None and o.action == "update"]
+    inserts = [
+        o
+        for o in (payloads.get(i["row_no"]) for i in items)
+        if o is not None and o.action == "insert"
+    ]
+    updates = [
+        o
+        for o in (payloads.get(i["row_no"]) for i in items)
+        if o is not None and o.action == "update"
+    ]
 
     inserted = 0
     updated = 0
@@ -1235,22 +1465,41 @@ async def _write_rows(
         p = o.payload or {}
         nonlocal cursor
         question_rows.append(_question_insert_params(qid, p, actor.id, status="draft"))
-        for opt in (o.options or []):
-            option_rows.append({
-                "id": next_id(), "qid": qid, "label": opt["label"],
-                "content": opt["content"], "content_html": None,
-                "is_correct": opt["is_correct"], "sort_no": opt["sort_no"],
-            })
-        version_rows.append(_version_params(
-            qid, 1, _snapshot_from_payload(p, o.options or []), "导入创建 v1", actor.id,
-        ))
-        change_rows.append(_change_params(
-            qid, action="create", batch_id=batch_id,
-            before=None, after={"stem": p["stem"][:200], "type": p["type"]},
-            change_log="批量导入创建", operator_id=actor.id,
-        ))
-        item_updates.append({"batch_id": batch_id, "row_no": row_no,
-                             "action": "insert", "question_id": qid})
+        for opt in o.options or []:
+            option_rows.append(
+                {
+                    "id": next_id(),
+                    "qid": qid,
+                    "label": opt["label"],
+                    "content": opt["content"],
+                    "content_html": None,
+                    "is_correct": opt["is_correct"],
+                    "sort_no": opt["sort_no"],
+                }
+            )
+        version_rows.append(
+            _version_params(
+                qid,
+                1,
+                _snapshot_from_payload(p, o.options or []),
+                "导入创建 v1",
+                actor.id,
+            )
+        )
+        change_rows.append(
+            _change_params(
+                qid,
+                action="create",
+                batch_id=batch_id,
+                before=None,
+                after={"stem": p["stem"][:200], "type": p["type"]},
+                change_log="批量导入创建",
+                operator_id=actor.id,
+            )
+        )
+        item_updates.append(
+            {"batch_id": batch_id, "row_no": row_no, "action": "insert", "question_id": qid}
+        )
 
     for o in case_rows:
         qid = ids[cursor]
@@ -1279,25 +1528,29 @@ async def _write_rows(
     inserted = len(case_rows) + len(other_rows)
 
     for start in range(0, len(question_rows), WRITE_CHUNK):
-        await db.execute(text(_INSERT_QUESTION_SQL), question_rows[start:start + WRITE_CHUNK])
+        await db.execute(text(_INSERT_QUESTION_SQL), question_rows[start : start + WRITE_CHUNK])
     for start in range(0, len(option_rows), WRITE_CHUNK):
-        await db.execute(text(_INSERT_OPTION_SQL), option_rows[start:start + WRITE_CHUNK])
+        await db.execute(text(_INSERT_OPTION_SQL), option_rows[start : start + WRITE_CHUNK])
     for start in range(0, len(version_rows), WRITE_CHUNK):
-        await db.execute(text(_INSERT_VERSION_SQL), version_rows[start:start + WRITE_CHUNK])
+        await db.execute(text(_INSERT_VERSION_SQL), version_rows[start : start + WRITE_CHUNK])
     for start in range(0, len(change_rows), WRITE_CHUNK):
-        await db.execute(text(_INSERT_CHANGE_SQL), change_rows[start:start + WRITE_CHUNK])
+        await db.execute(text(_INSERT_CHANGE_SQL), change_rows[start : start + WRITE_CHUNK])
 
     # ---- 2. upsert 更新命中行 ----
     if updates:
         current = (
-            await db.execute(
-                text(
-                    "SELECT id, version, status FROM questions "
-                    "WHERE id = ANY(CAST(:ids AS bigint[]))"
-                ),
-                {"ids": [o.question_id for o in updates]},
+            (
+                await db.execute(
+                    text(
+                        "SELECT id, version, status FROM questions "
+                        "WHERE id = ANY(CAST(:ids AS bigint[]))"
+                    ),
+                    {"ids": [o.question_id for o in updates]},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         cur_map = {r["id"]: dict(r) for r in current}
         upd_params: list[dict[str, Any]] = []
         for o in updates:
@@ -1306,43 +1559,81 @@ async def _write_rows(
                 raise not_found(f"第 {o.row_no} 行：要更新的题目 {o.question_id} 已不存在", 40401)
             p = o.payload or {}
             new_version = cur["version"] + 1
-            upd_params.append({
-                "qid": o.question_id, "subject_id": p["subject_id"],
-                "chapter_id": p["chapter_id"], "knowledge_point_id": p["knowledge_point_id"],
-                "type": p["type"], "stem": p["stem"],
-                "answer": json.dumps(p["answer"], ensure_ascii=False),
-                "analysis": p["analysis"],
-                "analysis_points": json.dumps(p["analysis_points"], ensure_ascii=False),
-                "score_default": p["score_default"], "difficulty": p["difficulty"],
-                "exam_year": p["exam_year"], "source_type": p["source_type"],
-                "source_name": p["source_name"], "source_license": p["source_license"],
-                "tags": list(p["tags"]), "content_hash": p["content_hash"],
-                "material": p["material"], "version": new_version, "actor": actor.id,
-            })
-            version_rows = [_version_params(
-                o.question_id, new_version, _snapshot_from_payload(p, o.options or []),
-                "批量导入更新", actor.id,
-            )]
-            change_rows = [_change_params(
-                o.question_id, action="update", batch_id=batch_id,
-                before={"version": cur["version"]}, after={"version": new_version},
-                change_log="批量导入更新", operator_id=actor.id,
-            )]
+            upd_params.append(
+                {
+                    "qid": o.question_id,
+                    "subject_id": p["subject_id"],
+                    "chapter_id": p["chapter_id"],
+                    "knowledge_point_id": p["knowledge_point_id"],
+                    "type": p["type"],
+                    "stem": p["stem"],
+                    "answer": json.dumps(p["answer"], ensure_ascii=False),
+                    "analysis": p["analysis"],
+                    "analysis_points": json.dumps(p["analysis_points"], ensure_ascii=False),
+                    "score_default": p["score_default"],
+                    "difficulty": p["difficulty"],
+                    "exam_year": p["exam_year"],
+                    "source_type": p["source_type"],
+                    "source_name": p["source_name"],
+                    "source_license": p["source_license"],
+                    "tags": list(p["tags"]),
+                    "content_hash": p["content_hash"],
+                    "material": p["material"],
+                    "version": new_version,
+                    "actor": actor.id,
+                }
+            )
+            version_rows = [
+                _version_params(
+                    o.question_id,
+                    new_version,
+                    _snapshot_from_payload(p, o.options or []),
+                    "批量导入更新",
+                    actor.id,
+                )
+            ]
+            change_rows = [
+                _change_params(
+                    o.question_id,
+                    action="update",
+                    batch_id=batch_id,
+                    before={"version": cur["version"]},
+                    after={"version": new_version},
+                    change_log="批量导入更新",
+                    operator_id=actor.id,
+                )
+            ]
             await db.execute(text(_UPDATE_QUESTION_SQL), upd_params[-1])
-            await db.execute(text("DELETE FROM question_options WHERE question_id = :qid"),
-                             {"qid": o.question_id})
+            await db.execute(
+                text("DELETE FROM question_options WHERE question_id = :qid"),
+                {"qid": o.question_id},
+            )
             if o.options:
                 await db.execute(
                     text(_INSERT_OPTION_SQL),
-                    [{"id": next_id(), "qid": o.question_id, "label": opt["label"],
-                      "content": opt["content"], "content_html": None,
-                      "is_correct": opt["is_correct"], "sort_no": opt["sort_no"]}
-                     for opt in o.options],
+                    [
+                        {
+                            "id": next_id(),
+                            "qid": o.question_id,
+                            "label": opt["label"],
+                            "content": opt["content"],
+                            "content_html": None,
+                            "is_correct": opt["is_correct"],
+                            "sort_no": opt["sort_no"],
+                        }
+                        for opt in o.options
+                    ],
                 )
             await db.execute(text(_INSERT_VERSION_SQL), version_rows)
             await db.execute(text(_INSERT_CHANGE_SQL), change_rows)
-            item_updates.append({"batch_id": batch_id, "row_no": o.row_no,
-                                 "action": "update", "question_id": o.question_id})
+            item_updates.append(
+                {
+                    "batch_id": batch_id,
+                    "row_no": o.row_no,
+                    "action": "update",
+                    "question_id": o.question_id,
+                }
+            )
             updated += 1
 
     for start in range(0, len(item_updates), WRITE_CHUNK):
@@ -1351,7 +1642,7 @@ async def _write_rows(
                 "UPDATE import_items SET action = :action, question_id = :question_id "
                 "WHERE batch_id = :batch_id AND row_no = :row_no"
             ),
-            item_updates[start:start + WRITE_CHUNK],
+            item_updates[start : start + WRITE_CHUNK],
         )
     return inserted, updated
 
@@ -1403,57 +1694,100 @@ VALUES (:id, 'question', :entity_id, :action, :batch_id, CAST(:diff AS jsonb),
 """
 
 
-def _question_insert_params(qid: int, p: dict[str, Any], actor_id: int, *, status: str) -> dict[str, Any]:
+def _question_insert_params(
+    qid: int, p: dict[str, Any], actor_id: int, *, status: str
+) -> dict[str, Any]:
     return {
-        "id": qid, "subject_id": p["subject_id"], "chapter_id": p["chapter_id"],
-        "knowledge_point_id": p["knowledge_point_id"], "type": p["type"], "stem": p["stem"],
+        "id": qid,
+        "subject_id": p["subject_id"],
+        "chapter_id": p["chapter_id"],
+        "knowledge_point_id": p["knowledge_point_id"],
+        "type": p["type"],
+        "stem": p["stem"],
         "answer": json.dumps(p["answer"], ensure_ascii=False),
         "analysis": p["analysis"],
         "analysis_points": json.dumps(p["analysis_points"], ensure_ascii=False),
-        "score_default": p["score_default"], "difficulty": p["difficulty"],
-        "exam_year": p["exam_year"], "source_type": p["source_type"],
-        "source_name": p["source_name"], "source_license": p["source_license"],
+        "score_default": p["score_default"],
+        "difficulty": p["difficulty"],
+        "exam_year": p["exam_year"],
+        "source_type": p["source_type"],
+        "source_name": p["source_name"],
+        "source_license": p["source_license"],
         "tags": list(p["tags"]),
-        "parent_id": p.get("parent_id"), "root_id": p.get("root_id") or qid,
-        "sort_no": 0, "material_html": p.get("material"),
+        "parent_id": p.get("parent_id"),
+        "root_id": p.get("root_id") or qid,
+        "sort_no": 0,
+        "material_html": p.get("material"),
         "stem_media": json.dumps(
             [{"type": "image", "url": u} for u in (p.get("media_urls") or [])],
             ensure_ascii=False,
         ),
-        "content_hash": p["content_hash"], "status": status, "actor": actor_id,
+        "content_hash": p["content_hash"],
+        "status": status,
+        "actor": actor_id,
     }
 
 
-def _version_params(qid: int, version: int, snapshot: dict[str, Any],
-                    change_log: str, operator_id: int) -> dict[str, Any]:
+def _version_params(
+    qid: int, version: int, snapshot: dict[str, Any], change_log: str, operator_id: int
+) -> dict[str, Any]:
     return {
-        "id": next_id(), "qid": qid, "version": version,
+        "id": next_id(),
+        "qid": qid,
+        "version": version,
         "snapshot": json.dumps(snapshot, ensure_ascii=False, default=str),
-        "change_log": change_log[:500], "operator_id": operator_id,
+        "change_log": change_log[:500],
+        "operator_id": operator_id,
     }
 
 
-def _change_params(entity_id: int, *, action: str, batch_id: int, before: Any, after: Any,
-                   change_log: str, operator_id: int,
-                   ip: str | None = None) -> dict[str, Any]:
+def _change_params(
+    entity_id: int,
+    *,
+    action: str,
+    batch_id: int,
+    before: Any,
+    after: Any,
+    change_log: str,
+    operator_id: int,
+    ip: str | None = None,
+) -> dict[str, Any]:
     return {
-        "id": next_id(), "entity_id": entity_id, "action": action, "batch_id": batch_id,
+        "id": next_id(),
+        "entity_id": entity_id,
+        "action": action,
+        "batch_id": batch_id,
         "diff": json.dumps({"before": before, "after": after}, ensure_ascii=False, default=str),
-        "change_log": change_log[:500], "operator_id": operator_id, "operator_ip": to_inet(ip),
+        "change_log": change_log[:500],
+        "operator_id": operator_id,
+        "operator_ip": to_inet(ip),
     }
 
 
 def _snapshot_from_payload(p: dict[str, Any], options: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "stem": p["stem"], "type": p["type"], "analysis": p["analysis"],
-        "difficulty": p["difficulty"], "score_default": p["score_default"],
-        "status": "draft", "subject_id": p["subject_id"], "chapter_id": p["chapter_id"],
-        "exam_year": p["exam_year"], "tags": list(p["tags"]),
-        "source_type": p["source_type"], "source_name": p["source_name"],
-        "source_license": p["source_license"], "answer": p["answer"],
+        "stem": p["stem"],
+        "type": p["type"],
+        "analysis": p["analysis"],
+        "difficulty": p["difficulty"],
+        "score_default": p["score_default"],
+        "status": "draft",
+        "subject_id": p["subject_id"],
+        "chapter_id": p["chapter_id"],
+        "exam_year": p["exam_year"],
+        "tags": list(p["tags"]),
+        "source_type": p["source_type"],
+        "source_name": p["source_name"],
+        "source_license": p["source_license"],
+        "answer": p["answer"],
         "options": [
-            {"label": o["label"], "content": o["content"], "content_html": None,
-             "is_correct": o["is_correct"], "sort_no": o["sort_no"]}
+            {
+                "label": o["label"],
+                "content": o["content"],
+                "content_html": None,
+                "is_correct": o["is_correct"],
+                "sort_no": o["sort_no"],
+            }
             for o in options
         ],
     }
@@ -1465,8 +1799,14 @@ def _snapshot_from_payload(p: dict[str, Any], options: list[dict[str, Any]]) -> 
 
 
 async def publish_batch(
-    db: AsyncSession, *, batch_id: int, actor: ScopeViewer, actor_name: str | None,
-    include_duplicates: bool = False, ip: str | None = None, user_agent: str | None = None,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    include_duplicates: bool = False,
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> ImportBatchOut:
     """⑤ draft → published。只发布**本批写入**的题（可选带上命中的重复题）。"""
     batch = await _load_batch(db, batch_id)
@@ -1477,15 +1817,19 @@ async def publish_batch(
     if include_duplicates:
         actions.append("duplicate")
     ids = (
-        await db.execute(
-            text(
-                "SELECT DISTINCT question_id FROM import_items "
-                "WHERE batch_id = :id AND action = ANY(CAST(:actions AS text[])) "
-                "AND question_id IS NOT NULL"
-            ),
-            {"id": batch_id, "actions": actions},
+        (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT question_id FROM import_items "
+                    "WHERE batch_id = :id AND action = ANY(CAST(:actions AS text[])) "
+                    "AND question_id IS NOT NULL"
+                ),
+                {"id": batch_id, "actions": actions},
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not ids:
         raise bad_request("本批次没有可发布的题目", 40001)
 
@@ -1497,17 +1841,32 @@ async def publish_batch(
         {"actor": actor.id, "ids": list(ids)},
     )
     for qid in ids:
-        await _flush_single(db, _change_params(
-            qid, action="publish", batch_id=batch_id, before={"status": "draft"},
-            after={"status": "published"}, change_log="批量导入发布",
-            operator_id=actor.id, ip=ip,
-        ))
+        await _flush_single(
+            db,
+            _change_params(
+                qid,
+                action="publish",
+                batch_id=batch_id,
+                before={"status": "draft"},
+                after={"status": "published"},
+                change_log="批量导入发布",
+                operator_id=actor.id,
+                ip=ip,
+            ),
+        )
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="import.publish",
-        module="question", entity_type="import_batch", entity_id=batch_id,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="import.publish",
+        module="question",
+        entity_type="import_batch",
+        entity_id=batch_id,
         after={"published": len(ids), "include_duplicates": include_duplicates},
-        method="POST", path=f"/api/v1/admin/imports/{batch_id}/publish",
-        ip=ip, user_agent=user_agent,
+        method="POST",
+        path=f"/api/v1/admin/imports/{batch_id}/publish",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
     fresh = await _load_batch(db, batch_id)
@@ -1525,8 +1884,14 @@ async def _flush_single(db: AsyncSession, params: dict[str, Any]) -> None:
 
 
 async def rollback_batch(
-    db: AsyncSession, *, batch_id: int, actor: ScopeViewer, actor_name: str | None,
-    reason: str | None = None, ip: str | None = None, user_agent: str | None = None,
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    reason: str | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> ImportRollbackOut:
     """⑥ 整批回滚。
 
@@ -1541,24 +1906,32 @@ async def rollback_batch(
         raise conflict(f"批次状态是 {batch['status']}，不能回滚", 40901)
 
     rows = (
-        await db.execute(
-            text(
-                "SELECT row_no, action, question_id FROM import_items "
-                "WHERE batch_id = :id AND action IN ('insert','update') "
-                "AND question_id IS NOT NULL ORDER BY row_no"
-            ),
-            {"id": batch_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT row_no, action, question_id FROM import_items "
+                    "WHERE batch_id = :id AND action IN ('insert','update') "
+                    "AND question_id IS NOT NULL ORDER BY row_no"
+                ),
+                {"id": batch_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     insert_ids = [r["question_id"] for r in rows if r["action"] == "insert"]
     update_ids = [r["question_id"] for r in rows if r["action"] == "update"]
 
     existing = set(
-        (await db.execute(
-            text("SELECT id FROM questions WHERE id = ANY(CAST(:ids AS bigint[]))"),
-            {"ids": list(insert_ids) + list(update_ids) or [0]},
-        )).scalars().all()
+        (
+            await db.execute(
+                text("SELECT id FROM questions WHERE id = ANY(CAST(:ids AS bigint[]))"),
+                {"ids": list(insert_ids) + list(update_ids) or [0]},
+            )
+        )
+        .scalars()
+        .all()
     )
     missing = [i for i in (list(insert_ids) + list(update_ids)) if i not in existing]
 
@@ -1574,12 +1947,19 @@ async def rollback_batch(
             for start in range(0, len(insert_ids), WRITE_CHUNK):
                 await db.execute(
                     text(_INSERT_CHANGE_SQL),
-                    [_change_params(
-                        qid, action="rollback", batch_id=batch_id,
-                        before={"is_deleted": False}, after={"is_deleted": True},
-                        change_log=reason or "批量导入整批回滚（软删除）",
-                        operator_id=actor.id, ip=ip,
-                    ) for qid in insert_ids[start:start + WRITE_CHUNK]],
+                    [
+                        _change_params(
+                            qid,
+                            action="rollback",
+                            batch_id=batch_id,
+                            before={"is_deleted": False},
+                            after={"is_deleted": True},
+                            change_log=reason or "批量导入整批回滚（软删除）",
+                            operator_id=actor.id,
+                            ip=ip,
+                        )
+                        for qid in insert_ids[start : start + WRITE_CHUNK]
+                    ],
                 )
 
         restored = 0
@@ -1587,16 +1967,20 @@ async def rollback_batch(
             # 找导入前那一版：本批写入的是 version_batch，
             # 于是"导入前"就是 question_versions 里版本号最大的、且小于当前版本的记录。
             snap = (
-                await db.execute(
-                    text(
-                        "SELECT version, snapshot FROM question_versions "
-                        "WHERE question_id = :qid AND version < "
-                        "  (SELECT version FROM questions WHERE id = :qid) "
-                        "ORDER BY version DESC LIMIT 1"
-                    ),
-                    {"qid": qid},
+                (
+                    await db.execute(
+                        text(
+                            "SELECT version, snapshot FROM question_versions "
+                            "WHERE question_id = :qid AND version < "
+                            "  (SELECT version FROM questions WHERE id = :qid) "
+                            "ORDER BY version DESC LIMIT 1"
+                        ),
+                        {"qid": qid},
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if snap is None:
                 continue
             s = snap["snapshot"] or {}
@@ -1611,19 +1995,30 @@ async def rollback_batch(
                     """
                 ),
                 {
-                    "qid": qid, "stem": s.get("stem"), "analysis": s.get("analysis"),
-                    "difficulty": s.get("difficulty"), "score_default": s.get("score_default"),
+                    "qid": qid,
+                    "stem": s.get("stem"),
+                    "analysis": s.get("analysis"),
+                    "difficulty": s.get("difficulty"),
+                    "score_default": s.get("score_default"),
                     "answer": json.dumps(s.get("answer") or {}, ensure_ascii=False),
-                    "version": snap["version"] + 1, "actor": actor.id,
+                    "version": snap["version"] + 1,
+                    "actor": actor.id,
                 },
             )
             restored += 1
-            await _flush_single(db, _change_params(
-                qid, action="rollback", batch_id=batch_id,
-                before={"version": snap["version"] + 1}, after={"version": snap["version"]},
-                change_log=reason or "批量导入整批回滚（还原到导入前版本）",
-                operator_id=actor.id, ip=ip,
-            ))
+            await _flush_single(
+                db,
+                _change_params(
+                    qid,
+                    action="rollback",
+                    batch_id=batch_id,
+                    before={"version": snap["version"] + 1},
+                    after={"version": snap["version"]},
+                    change_log=reason or "批量导入整批回滚（还原到导入前版本）",
+                    operator_id=actor.id,
+                    ip=ip,
+                ),
+            )
 
         await db.execute(
             text(
@@ -1633,11 +2028,18 @@ async def rollback_batch(
             {"actor": actor.id, "id": batch_id},
         )
         await write_audit(
-            db, actor_id=actor.id, actor_name=actor_name, action="import.rollback",
-            module="question", entity_type="import_batch", entity_id=batch_id,
+            db,
+            actor_id=actor.id,
+            actor_name=actor_name,
+            action="import.rollback",
+            module="question",
+            entity_type="import_batch",
+            entity_id=batch_id,
             after={"soft_deleted": len(insert_ids), "restored": restored, "reason": reason},
-            method="POST", path=f"/api/v1/admin/imports/{batch_id}/rollback",
-            ip=ip, user_agent=user_agent,
+            method="POST",
+            path=f"/api/v1/admin/imports/{batch_id}/rollback",
+            ip=ip,
+            user_agent=user_agent,
         )
         await db.commit()
     except Exception as exc:  # noqa: BLE001
@@ -1645,6 +2047,9 @@ async def rollback_batch(
         raise conflict(f"回滚失败，已回滚本次回滚操作：{exc}", 50001) from exc
 
     return ImportRollbackOut(
-        id=batch_id, status="rolled_back",
-        rolled_back_questions=len(insert_ids), rolled_back_updates=restored, missing=missing,
+        id=batch_id,
+        status="rolled_back",
+        rolled_back_questions=len(insert_ids),
+        rolled_back_updates=restored,
+        missing=missing,
     )

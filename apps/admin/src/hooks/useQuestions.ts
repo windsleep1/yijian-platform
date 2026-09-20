@@ -78,7 +78,8 @@ export function useKnowledgePoints(params: ListKnowledgePointsQuery) {
   const hasScope = !!params.chapter_id || !!params.subject_id;
   return useQuery({
     queryKey: questionKeys.knowledgePoints(params),
-    queryFn: () => request<KnowledgePointListOut>("/admin/chapters/knowledge-points", { query: params }),
+    queryFn: () =>
+      request<KnowledgePointListOut>("/admin/chapters/knowledge-points", { query: params }),
     enabled: hasScope,
     staleTime: 5 * 60_000,
   });

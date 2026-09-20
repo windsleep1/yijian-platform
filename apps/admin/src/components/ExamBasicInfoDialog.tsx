@@ -109,8 +109,8 @@ export function ExamBasicInfoDialog({
         <DialogHeader>
           <DialogTitle>编辑基本信息</DialogTitle>
           <DialogDescription>
-            这里<strong>不包含卷面结构</strong>。分段与计划题数在「编辑卷面结构」里
-            —— 那一步会清空题目，所以单独确认。
+            这里<strong>不包含卷面结构</strong>。分段与计划题数在「编辑卷面结构」里 ——
+            那一步会清空题目，所以单独确认。
           </DialogDescription>
         </DialogHeader>
 

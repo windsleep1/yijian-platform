@@ -4,7 +4,15 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { RuleEditor, StrategySelect, draftsToRules, emptyRuleDraft, ruleToDraft, validateDrafts, type RuleDraft } from "@/components/RuleEditor";
+import {
+  RuleEditor,
+  StrategySelect,
+  draftsToRules,
+  emptyRuleDraft,
+  ruleToDraft,
+  validateDrafts,
+  type RuleDraft,
+} from "@/components/RuleEditor";
 import { RulePreviewPanel } from "@/components/RulePreviewPanel";
 import { Button } from "@/components/ui/button";
 import {
@@ -163,8 +171,8 @@ export function PaperRuleDialog({
           <DialogHeader>
             <DialogTitle>{isEdit ? "编辑组卷规则" : "新建组卷规则"}</DialogTitle>
             <DialogDescription>
-              规则描述**要什么题**（题型 / 题数 / 分值 / 难度 / 年份）。
-              能不能凑够由组卷时决定 —— 凑不够会如实报缺口，**系统不会用别的题顶替**。
+              规则描述**要什么题**（题型 / 题数 / 分值 / 难度 / 年份）。 能不能凑够由组卷时决定 ——
+              凑不够会如实报缺口，**系统不会用别的题顶替**。
               <span className="mt-1 block text-amber-700">
                 下面会实时试算：告诉你按现在这套规则**能抽出多少题**，题库够不够。
               </span>
@@ -189,7 +197,10 @@ export function PaperRuleDialog({
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label>科目</Label>
-                  <Select value={subjectId || "__none__"} onValueChange={(v) => setSubjectId(v === "__none__" ? "" : v)}>
+                  <Select
+                    value={subjectId || "__none__"}
+                    onValueChange={(v) => setSubjectId(v === "__none__" ? "" : v)}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder={tree.isLoading ? "加载中…" : "请选择科目"} />
                     </SelectTrigger>
@@ -261,9 +272,7 @@ export function PaperRuleDialog({
               <div className="space-y-2 rounded-md border p-3">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs text-muted-foreground">抽题约束</Label>
-                  <span className="text-[11px] text-muted-foreground">
-                    每条 = 一类题的抽取条件
-                  </span>
+                  <span className="text-[11px] text-muted-foreground">每条 = 一类题的抽取条件</span>
                 </div>
                 <RuleEditor drafts={drafts} onChange={setDrafts} disabled={saving} />
               </div>
@@ -341,9 +350,9 @@ export function PaperRuleDialog({
         description={
           <div className="space-y-2 text-sm">
             <p className="text-amber-700">
-              按当前规则，需要 <strong>{preview.data?.total_need}</strong> 道题，
-              但只能抽到 <strong>{preview.data?.total_got}</strong> 道，
-              还差 <strong>{preview.data?.total_missing}</strong> 道。
+              按当前规则，需要 <strong>{preview.data?.total_need}</strong> 道题， 但只能抽到{" "}
+              <strong>{preview.data?.total_got}</strong> 道， 还差{" "}
+              <strong>{preview.data?.total_missing}</strong> 道。
             </p>
             <p className="text-xs text-muted-foreground">
               保存后用它组卷会出现<strong>同样的缺口</strong> ——

@@ -79,6 +79,4 @@ async def get_int(db: AsyncSession, key: str, default: int) -> int:
 
 async def mass_question_loss_threshold(db: AsyncSession) -> int:
     """单次写操作允许净减少的卷面题数上限。"""
-    return await get_int(
-        db, MASS_QUESTION_LOSS_THRESHOLD_KEY, MASS_QUESTION_LOSS_THRESHOLD_DEFAULT
-    )
+    return await get_int(db, MASS_QUESTION_LOSS_THRESHOLD_KEY, MASS_QUESTION_LOSS_THRESHOLD_DEFAULT)

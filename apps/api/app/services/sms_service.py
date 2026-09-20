@@ -28,7 +28,7 @@ COOLDOWN_KEY = "sms:cd:{phone}"
 PHONE_DAILY_KEY = "sms:cnt:phone:{phone}:{date}"
 IP_DAILY_KEY = "sms:cnt:ip:{ip}:{date}"
 
-DAILY_KEY_TTL = 25 * 3600          # 覆盖当日 + 跨时区余量
+DAILY_KEY_TTL = 25 * 3600  # 覆盖当日 + 跨时区余量
 CN_TZ = timezone(timedelta(hours=8))
 
 

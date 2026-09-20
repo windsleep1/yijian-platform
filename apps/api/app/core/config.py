@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # ---------------- 应用 ----------------
     app_name: str = "一建通"
     app_version: str = "0.2.0"
-    app_env: str = "local"          # local | dev | staging | prod
+    app_env: str = "local"  # local | dev | staging | prod
     app_debug: bool = True
     app_port: int = 8000
     app_timezone: str = "Asia/Shanghai"
@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 30
 
     # ---------------- 短信 ----------------
-    sms_provider: str = "mock"      # mock | aliyun | tencent
+    sms_provider: str = "mock"  # mock | aliyun | tencent
     sms_sign_name: str = "一建通"
     sms_code_ttl_seconds: int = 300
     sms_daily_limit_per_phone: int = 10
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
         if env == "prod" and (v == DEV_SECRET or len(v) < 32):
             raise ValueError(
                 "生产环境必须设置长度 >= 32 的 JWT_SECRET，不能使用默认值。"
-                "生成方式：python -c \"import secrets;print(secrets.token_urlsafe(48))\""
+                '生成方式：python -c "import secrets;print(secrets.token_urlsafe(48))"'
             )
         return v
 

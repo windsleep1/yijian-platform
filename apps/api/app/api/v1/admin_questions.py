@@ -191,9 +191,7 @@ async def batch_delete_questions(
     dependencies=[Depends(require_permission("question:read"))],
 )
 async def get_question(question_id: int, db: DbSession, me: CurrentUserDep) -> dict:
-    detail = await question_service.get_question_detail(
-        db, question_id=question_id, viewer=me
-    )
+    detail = await question_service.get_question_detail(db, question_id=question_id, viewer=me)
     return ok(detail.model_dump())
 
 

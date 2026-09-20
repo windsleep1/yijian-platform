@@ -177,10 +177,16 @@ export function AuditDetailDrawer({
                             <tr key={r.path} className="border-t">
                               <td className="yj-json px-3 py-2 align-top text-xs">{r.path}</td>
                               <td className="yj-json px-3 py-2 align-top text-xs">
-                                <ValueCell value={r.before} kind={r.kind === "added" ? "missing" : "before"} />
+                                <ValueCell
+                                  value={r.before}
+                                  kind={r.kind === "added" ? "missing" : "before"}
+                                />
                               </td>
                               <td className="yj-json px-3 py-2 align-top text-xs">
-                                <ValueCell value={r.after} kind={r.kind === "removed" ? "missing" : "after"} />
+                                <ValueCell
+                                  value={r.after}
+                                  kind={r.kind === "removed" ? "missing" : "after"}
+                                />
                               </td>
                             </tr>
                           ))}

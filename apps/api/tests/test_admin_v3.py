@@ -51,6 +51,7 @@ VIEWER_PERMS = {"user:read", "system:audit", "stats:read", "exam:read"}
 
 # ================================================================ A. ID 字符串契约
 
+
 def test_ids_are_json_strings(client: httpx.Client, admin_h: dict[str, str]) -> None:
     b = body(client.get(f"{API}/admin/users", headers=admin_h, params={"page": 1, "page_size": 50}))
     assert b["code"] == 0, b
@@ -76,6 +77,7 @@ def test_ids_are_json_strings(client: httpx.Client, admin_h: dict[str, str]) -> 
 
 
 # ================================================================ 用户详情
+
 
 def test_user_detail_masking(client: httpx.Client, admin_h: dict[str, str]) -> None:
     stu = register(client, nickname="详情用例")
@@ -116,6 +118,7 @@ def test_user_detail_404_is_real_404(client: httpx.Client, admin_h: dict[str, st
 
 
 # ================================================================ B. viewer 只读流程
+
 
 def test_viewer_read_only_flow(client: httpx.Client, admin_h: dict[str, str]) -> None:
     """超管把新账号设成 viewer，然后验证「能看不能改」。"""
@@ -160,6 +163,7 @@ def test_viewer_read_only_flow(client: httpx.Client, admin_h: dict[str, str]) ->
 
 # ================================================================ /admin/roles
 
+
 def test_roles_contract(client: httpx.Client, admin_h: dict[str, str]) -> None:
     b = body(client.get(f"{API}/admin/roles", headers=admin_h))
     assert b["code"] == 0, b
@@ -192,6 +196,7 @@ def test_roles_contract(client: httpx.Client, admin_h: dict[str, str]) -> None:
 
 # ================================================================ /admin/permissions
 
+
 def test_permission_tree(client: httpx.Client, admin_h: dict[str, str]) -> None:
     b = body(client.get(f"{API}/admin/permissions", headers=admin_h))
     assert b["code"] == 0, b
@@ -221,6 +226,7 @@ def test_permission_tree(client: httpx.Client, admin_h: dict[str, str]) -> None:
 
 # ================================================================ /admin/audit-logs
 
+
 def test_audit_logs_filter_and_diff(client: httpx.Client, admin_h: dict[str, str]) -> None:
     """自己先造一条可预期的审计记录，再验筛选 / 分页 / diff 数据。
 
@@ -231,7 +237,9 @@ def test_audit_logs_filter_and_diff(client: httpx.Client, admin_h: dict[str, str
     assert assign_roles(client, admin_h, uid, ["researcher"])["code"] == 0
 
     # 列表
-    b = body(client.get(f"{API}/admin/audit-logs", headers=admin_h, params={"page": 1, "page_size": 20}))
+    b = body(
+        client.get(f"{API}/admin/audit-logs", headers=admin_h, params={"page": 1, "page_size": 20})
+    )
     assert b["code"] == 0, b
     assert b["data"]["total"] >= 1
     assert isinstance(b["data"]["items"][0]["id"], str), "审计 id 也必须是字符串"
@@ -294,7 +302,8 @@ def test_audit_logs_filter_and_diff(client: httpx.Client, admin_h: dict[str, str
     # 没有 system:audit → 403
     s = register(client, nickname="无审计权限")
     assert (
-        body(client.get(f"{API}/admin/audit-logs", headers=auth(s["access_token"])))["code"] == 40301
+        body(client.get(f"{API}/admin/audit-logs", headers=auth(s["access_token"])))["code"]
+        == 40301
     )
 
 
@@ -327,8 +336,9 @@ def set_status(client, headers, uid, status: str, reason: str | None = None) -> 
     payload: dict = {"status": status}
     if reason is not None:
         payload["reason"] = reason
-    return body(client.patch(f"{API}/admin/users/{uid}/status", headers=headers,
-                             json=payload, timeout=30))
+    return body(
+        client.patch(f"{API}/admin/users/{uid}/status", headers=headers, json=payload, timeout=30)
+    )
 
 
 def login_password(client, phone: str, password: str = TEST_PASSWORD):
@@ -423,8 +433,11 @@ def test_user_status_guards(client: httpx.Client, admin_h: dict[str, str]) -> No
     oh = auth(op["access_token"])
 
     # 定位超管（按手机号精确定位；库里有 400+ 用户，靠 page_size=100 翻页找不到）
-    lst = body(client.get(f"{API}/admin/users", headers=admin_h,
-                          params={"keyword": ADMIN_PHONE, "page_size": 10}))
+    lst = body(
+        client.get(
+            f"{API}/admin/users", headers=admin_h, params={"keyword": ADMIN_PHONE, "page_size": 10}
+        )
+    )
     admin_row = next(
         (x for x in lst["data"]["items"] if "super_admin" in (x.get("roles") or [])), None
     )
@@ -517,4 +530,6 @@ def test_user_status_permission_wall(client: httpx.Client, admin_h: dict[str, st
     b = set_status(client, vh, uid, "disabled")
     assert b["code"] == 40301 and "user:manage" in b["message"], b
     # 状态没动
-    assert body(client.get(f"{API}/admin/users/{uid}", headers=admin_h))["data"]["status"] == "active"
+    assert (
+        body(client.get(f"{API}/admin/users/{uid}", headers=admin_h))["data"]["status"] == "active"
+    )

@@ -54,9 +54,7 @@ router = APIRouter(prefix="/admin/chapters", tags=["管理端 · 章节"])
 async def chapter_tree(
     db: DbSession,
     me: CurrentUserDep,
-    subject_id: Annotated[
-        int | None, Query(description="科目 ID；不传返回全部科目分组")
-    ] = None,
+    subject_id: Annotated[int | None, Query(description="科目 ID；不传返回全部科目分组")] = None,
 ) -> dict:
     tree = await question_service.list_chapter_tree(db, viewer=me, subject_id=subject_id)
     return ok(tree.model_dump())

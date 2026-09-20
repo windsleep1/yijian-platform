@@ -22,7 +22,7 @@ from app.core.errors import unauthorized
 TokenType = Literal["access", "refresh"]
 
 BCRYPT_ROUNDS = 12
-_MAX_BCRYPT_BYTES = 72          # bcrypt 只取前 72 字节，超出必须先截断否则报错
+_MAX_BCRYPT_BYTES = 72  # bcrypt 只取前 72 字节，超出必须先截断否则报错
 
 
 def hash_password(plain: str) -> str:

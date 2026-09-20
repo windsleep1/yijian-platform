@@ -37,6 +37,7 @@ from app.core.security import hash_password
 
 # ---------------------------------------------------------------- 工具
 
+
 def _log(msg: str) -> None:
     print(f"[cli] {msg}", flush=True)
 
@@ -50,7 +51,7 @@ async def _raw_conn():
 def _resolve_schema_file() -> Path | None:
     candidates = [
         Path(settings.schema_file),
-        Path(__file__).resolve().parents[3] / "db" / "schema.sql",          # apps/api/app -> repo/db
+        Path(__file__).resolve().parents[3] / "db" / "schema.sql",  # apps/api/app -> repo/db
         Path(__file__).resolve().parents[2] / "db" / "schema.sql",
         Path.cwd() / "db" / "schema.sql",
         Path("/db/schema.sql"),
@@ -74,6 +75,7 @@ def _resolve_seed_file() -> Path | None:
 
 
 # ---------------------------------------------------------------- 等待依赖
+
 
 async def _wait_db(timeout: int) -> int:
     import asyncpg
@@ -115,6 +117,7 @@ async def _wait_redis(timeout: int) -> int:
 
 
 # ---------------------------------------------------------------- 建表
+
 
 async def _init_db() -> int:
     schema_file = _resolve_schema_file()
@@ -185,7 +188,9 @@ async def _seed_rbac() -> int:
     block = sql[sql.index("\n", start) + 1 : end].strip()
 
     if ";" not in block:
-        _log(f"slice has no executable statement (len={len(block)}); markers look edited -- refusing")
+        _log(
+            f"slice has no executable statement (len={len(block)}); markers look edited -- refusing"
+        )
         return 1
 
     conn = await _raw_conn()
@@ -220,6 +225,7 @@ async def _seed_rbac() -> int:
 
 # ---------------------------------------------------------------- 超管
 
+
 async def _seed_admin() -> int:
     phone = (settings.admin_init_phone or "").strip()
     password = settings.admin_init_password or ""
@@ -242,9 +248,7 @@ async def _seed_admin() -> int:
             _log("no super_admin role in table; run init-db first")
             return 1
 
-        user = (
-            await db.execute(select(User).where(User.phone == phone))
-        ).scalar_one_or_none()
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one_or_none()
 
         if user is None:
             user = User(
@@ -276,11 +280,13 @@ async def _seed_admin() -> int:
 
 # ---------------------------------------------------------------- 题库
 
+
 async def _seed_questions() -> int:
     seed_file = _resolve_seed_file()
     if seed_file is None:
-        _log("data/seed/questions.sql not found; skipping "
-             "(run db/seed/gen_seed_questions.py first)")
+        _log(
+            "data/seed/questions.sql not found; skipping (run db/seed/gen_seed_questions.py first)"
+        )
         return 0
 
     conn = await _raw_conn()
@@ -292,8 +298,10 @@ async def _seed_questions() -> int:
 
         existing = await conn.fetchval("SELECT count(*) FROM questions")
         if existing:
-            _log(f"question bank already has {existing} rows; skipping import "
-             "(truncate questions to re-import)")
+            _log(
+                f"question bank already has {existing} rows; skipping import "
+                "(truncate questions to re-import)"
+            )
             return 0
 
         _log(f"importing {seed_file.name} ...")
@@ -310,13 +318,16 @@ async def _seed_questions() -> int:
 
 # ---------------------------------------------------------------- 入口
 
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="app.cli", description="Yijian backend operations CLI")
     parser.add_argument(
         "command",
         choices=["wait-db", "wait-redis", "init-db", "seed-rbac", "seed-admin", "seed-questions"],
     )
-    parser.add_argument("--timeout", type=int, default=120, help="timeout in seconds for wait-* commands")
+    parser.add_argument(
+        "--timeout", type=int, default=120, help="timeout in seconds for wait-* commands"
+    )
     args = parser.parse_args(argv)
 
     if args.command == "wait-db":

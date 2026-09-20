@@ -96,12 +96,19 @@ async def list_paper_rules(
     page_info: Annotated[tuple[int, int], Depends(pagination)],
     subject_id: Annotated[int | None, Query(description="科目 ID")] = None,
     status: Annotated[Literal["on", "off"] | None, Query(description="启用状态")] = None,
-    rule_type: Annotated[str | None, Query(alias="type", max_length=24, description="试卷类型")] = None,
+    rule_type: Annotated[
+        str | None, Query(alias="type", max_length=24, description="试卷类型")
+    ] = None,
 ) -> dict:
     page, page_size = page_info
     items, total = await exam_service.list_paper_rules(
-        db, viewer=me, page=page, page_size=page_size,
-        subject_id=subject_id, status=status, rule_type=rule_type,
+        db,
+        viewer=me,
+        page=page,
+        page_size=page_size,
+        subject_id=subject_id,
+        status=status,
+        rule_type=rule_type,
     )
     return ok(
         paginate([i.model_dump() for i in items], page=page, page_size=page_size, total=total)
@@ -116,7 +123,7 @@ async def list_paper_rules(
         "需要权限 `exam:create`。\n\n"
         "`rules` 是**约束数组**，每条描述一类题的抽取条件：\n"
         "```json\n"
-        "{\"type\":\"single\",\"count\":60,\"score\":1,\"difficulty\":[2,4],\"kp_ids\":[123],\"year\":null}\n"
+        '{"type":"single","count":60,"score":1,"difficulty":[2,4],"kp_ids":[123],"year":null}\n'
         "```\n"
         "- `difficulty` 是**闭区间** `[min,max]`，取值 1~5；不传 = 不限。\n"
         "- `kp_ids` / `chapter_ids` 任一命中即可；空数组 = 不限。\n"
@@ -189,8 +196,12 @@ async def update_paper_rule(
     me: CurrentUserDep,
 ) -> dict:
     out = await exam_service.update_paper_rule(
-        db, actor=me, actor_name=me.display_name, rule_id=rule_id,
-        payload=payload, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        rule_id=rule_id,
+        payload=payload,
+        ip=client_ip(request),
     )
     return ok(out.model_dump(), message="已保存")
 
@@ -210,9 +221,7 @@ async def update_paper_rule(
 async def delete_paper_rule(
     rule_id: int, request: Request, db: DbSession, me: CurrentUserDep
 ) -> dict:
-    out = await exam_service.delete_paper_rule(
-        db, actor=me, rule_id=rule_id, ip=client_ip(request)
-    )
+    out = await exam_service.delete_paper_rule(db, actor=me, rule_id=rule_id, ip=client_ip(request))
     return ok(out.model_dump(), message="规则已删除")
 
 
@@ -238,15 +247,24 @@ async def list_exams(
     me: CurrentUserDep,
     page_info: Annotated[tuple[int, int], Depends(pagination)],
     subject_id: Annotated[int | None, Query(description="科目 ID")] = None,
-    exam_type: Annotated[str | None, Query(alias="type", max_length=24, description="试卷类型")] = None,
+    exam_type: Annotated[
+        str | None, Query(alias="type", max_length=24, description="试卷类型")
+    ] = None,
     status: Annotated[str | None, Query(max_length=16, description="状态")] = None,
     keyword: Annotated[str | None, Query(max_length=100, description="标题/卷号模糊搜索")] = None,
     include_deleted: Annotated[bool, Query(description="是否带出已删除的卷")] = False,
 ) -> dict:
     page, page_size = page_info
     items, total = await exam_service.list_exams(
-        db, viewer=me, page=page, page_size=page_size, subject_id=subject_id,
-        exam_type=exam_type, status=status, keyword=keyword, include_deleted=include_deleted,
+        db,
+        viewer=me,
+        page=page,
+        page_size=page_size,
+        subject_id=subject_id,
+        exam_type=exam_type,
+        status=status,
+        keyword=keyword,
+        include_deleted=include_deleted,
     )
     return ok(
         paginate([i.model_dump() for i in items], page=page, page_size=page_size, total=total)
@@ -309,8 +327,12 @@ async def auto_compose_exam(
     me: CurrentUserDep,
 ) -> dict:
     out = await exam_service.compose_exam(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        payload=payload, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        payload=payload,
+        ip=client_ip(request),
     )
     # 有缺口时 message 里已经写明，这里不再把 code 改成非 0 ——
     # "组卷成功但有缺口"是**成功**，不是失败：缺口是正常业务结果，靠数据表达而非错误码。
@@ -368,8 +390,12 @@ async def publish_exam(
     me: CurrentUserDep,
 ) -> dict:
     out = await exam_service.publish_exam(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        payload=payload, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        payload=payload,
+        ip=client_ip(request),
     )
     return ok(out.model_dump(), message=out.message)
 
@@ -422,8 +448,12 @@ async def update_exam(
     me: CurrentUserDep,
 ) -> dict:
     detail = await exam_service.update_exam(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        payload=payload, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        payload=payload,
+        ip=client_ip(request),
     )
     return ok(detail.model_dump(), message="已保存")
 
@@ -458,8 +488,12 @@ async def replace_exam_sections(
     me: CurrentUserDep,
 ) -> dict:
     out = await exam_service.replace_exam_sections(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        payload=payload, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        payload=payload,
+        ip=client_ip(request),
     )
     return ok(out.model_dump(), message=out.message)
 
@@ -491,8 +525,12 @@ async def delete_exam(
     reason: Annotated[str | None, Query(max_length=200, description="归档原因")] = None,
 ) -> dict:
     out = await exam_service.soft_delete_exam(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        reason=reason, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        reason=reason,
+        ip=client_ip(request),
     )
     return ok(out.model_dump(), message="试卷已归档")
 
@@ -558,9 +596,7 @@ async def unpublish_exam(
     ),
     dependencies=[Depends(require_permission("exam:publish"))],
 )
-async def restore_exam(
-    exam_id: int, request: Request, db: DbSession, me: CurrentUserDep
-) -> dict:
+async def restore_exam(exam_id: int, request: Request, db: DbSession, me: CurrentUserDep) -> dict:
     out = await exam_service.restore_exam(
         db, actor=me, actor_name=me.display_name, exam_id=exam_id, ip=client_ip(request)
     )
@@ -594,8 +630,12 @@ async def add_exam_questions(
     me: CurrentUserDep,
 ) -> dict:
     out = await exam_service.add_exam_questions(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        payload=payload, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        payload=payload,
+        ip=client_ip(request),
     )
     return ok(out.model_dump(), message=out.message)
 
@@ -622,7 +662,11 @@ async def remove_exam_question(
     me: CurrentUserDep,
 ) -> dict:
     out = await exam_service.remove_exam_question(
-        db, actor=me, actor_name=me.display_name, exam_id=exam_id,
-        exam_question_id=exam_question_id, ip=client_ip(request),
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        exam_id=exam_id,
+        exam_question_id=exam_question_id,
+        ip=client_ip(request),
     )
     return ok(out.model_dump(), message=out.message)

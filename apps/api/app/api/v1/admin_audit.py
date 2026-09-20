@@ -40,7 +40,9 @@ async def list_audit_logs(
     action: Annotated[
         str | None, Query(max_length=64, description="动作码，精确匹配，如 user.assign_roles")
     ] = None,
-    entity_type: Annotated[str | None, Query(max_length=32, description="对象类型，如 user")] = None,
+    entity_type: Annotated[
+        str | None, Query(max_length=32, description="对象类型，如 user")
+    ] = None,
     entity_id: Annotated[int | None, Query(description="对象 ID")] = None,
     success: Annotated[bool | None, Query(description="true 只看成功 / false 只看失败")] = None,
     start: Annotated[datetime | None, Query(description="起始时间（含），ISO8601")] = None,

@@ -1,6 +1,15 @@
 "use client";
 
-import { BookOpen, ClipboardList, ListChecks, ScrollText, ShieldCheck, Upload, Users, type LucideIcon } from "lucide-react";
+import {
+  BookOpen,
+  ClipboardList,
+  ListChecks,
+  ScrollText,
+  ShieldCheck,
+  Upload,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -77,9 +86,7 @@ export function Sidebar() {
         ) : (
           <div className="rounded-md border border-dashed p-3 text-xs leading-relaxed text-muted-foreground">
             当前角色没有任何后台菜单可访问。
-            <span className="mt-1 block">
-              你的角色：{roles.length ? roles.join("、") : "无"}
-            </span>
+            <span className="mt-1 block">你的角色：{roles.length ? roles.join("、") : "无"}</span>
             <span className="mt-1 block">请联系系统管理员分配权限。</span>
           </div>
         )}

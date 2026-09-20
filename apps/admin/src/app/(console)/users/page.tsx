@@ -74,9 +74,7 @@ export default function UsersPage() {
       key: "id",
       title: "用户 ID",
       headClassName: "w-[190px]",
-      render: (u) => (
-        <span className="yj-json text-xs text-muted-foreground">{u.id}</span>
-      ),
+      render: (u) => <span className="yj-json text-xs text-muted-foreground">{u.id}</span>,
     },
     {
       key: "phone",
@@ -325,12 +323,16 @@ export default function UsersPage() {
           statusTarget?.status === "active" ? (
             <div className="space-y-2 text-sm">
               <p>
-                将停用 <strong>{statusTarget.nickname || statusTarget.phone}</strong>
-                （{statusTarget.phone}）：
+                将停用 <strong>{statusTarget.nickname || statusTarget.phone}</strong>（
+                {statusTarget.phone}）：
               </p>
               <ul className="list-disc space-y-0.5 pl-4 text-xs text-muted-foreground">
-                <li>该用户<strong>下一个请求即被拒绝</strong>（不需要等令牌过期）；</li>
-                <li>同时<strong>注销其全部设备会话</strong>；</li>
+                <li>
+                  该用户<strong>下一个请求即被拒绝</strong>（不需要等令牌过期）；
+                </li>
+                <li>
+                  同时<strong>注销其全部设备会话</strong>；
+                </li>
                 <li>无法再登录，直到被重新启用。</li>
               </ul>
               <div className="space-y-1 pt-1">
@@ -374,7 +376,10 @@ export default function UsersPage() {
             action: () =>
               updateStatus.mutateAsync({
                 userId: target.id,
-                payload: { status: next, reason: next === "disabled" ? statusReason || null : null },
+                payload: {
+                  status: next,
+                  reason: next === "disabled" ? statusReason || null : null,
+                },
               }),
             // 状态切换是幂等的（设成同一个值无害），允许重试
             retryable: true,

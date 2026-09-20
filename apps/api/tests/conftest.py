@@ -83,7 +83,9 @@ def admin_token(client: httpx.Client) -> str:
         )
     )
     if b["code"] != 0:
-        pytest.skip(f"超管登录失败（{b['code']} {b['message']}）：请先执行 python -m app.cli seed-admin")
+        pytest.skip(
+            f"超管登录失败（{b['code']} {b['message']}）：请先执行 python -m app.cli seed-admin"
+        )
     return b["data"]["access_token"]
 
 
@@ -116,6 +118,7 @@ def client() -> httpx.Client:
 
 
 # ---------------------------------------------------------------- 直连库（测试公用）
+
 
 def _dsn() -> str | None:
     """`DATABASE_URL` 转成 asyncpg 能用的 DSN；没设就返回 None（调用方自行 skip）。"""
@@ -158,7 +161,6 @@ def sql_fetch(statement: str, *args):
             await conn.close()
 
     return asyncio.run(_run())
-
 
 
 def fresh_user(client: httpx.Client, *, nickname: str = "测试用户") -> dict:

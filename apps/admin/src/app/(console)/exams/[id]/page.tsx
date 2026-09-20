@@ -101,7 +101,9 @@ export default function ExamDetailPage() {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [unpublishOpen, setUnpublishOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
-  const [removeTarget, setRemoveTarget] = useState<{ eq: ExamQuestionItem; title: string } | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<{ eq: ExamQuestionItem; title: string } | null>(
+    null,
+  );
 
   const exam = query.data;
 
@@ -239,7 +241,18 @@ type BodyProps = {
 };
 
 function ExamDetailBody(props: BodyProps) {
-  const { exam, validation, validating, onValidate, publish, unpublish, archive, restore, removeQuestion, fb } = props;
+  const {
+    exam,
+    validation,
+    validating,
+    onValidate,
+    publish,
+    unpublish,
+    archive,
+    restore,
+    removeQuestion,
+    fb,
+  } = props;
   const { hasPermission } = props;
 
   const canCreate = hasPermission(P.examCreate);
@@ -300,7 +313,12 @@ function ExamDetailBody(props: BodyProps) {
                 need={P.examPublish}
                 hint="已发布的卷恢复后立刻重新对外可见，所以按发布对待"
               >
-                <Button variant="default" size="sm" disabled={!canPublish} onClick={() => props.setRestoreOpen(true)}>
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={!canPublish}
+                  onClick={() => props.setRestoreOpen(true)}
+                >
                   <ArchiveRestore className="h-3.5 w-3.5" />
                   恢复
                 </Button>
@@ -308,18 +326,19 @@ function ExamDetailBody(props: BodyProps) {
             ) : (
               <>
                 <Gate allowed={canCreate} need={P.examCreate} hint="加题 / 改卷面结构都要它">
-                  <Button variant="outline" size="sm" disabled={!canCreate || frozen} onClick={() => props.setAddOpen(true)}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!canCreate || frozen}
+                    onClick={() => props.setAddOpen(true)}
+                  >
                     <Plus className="h-3.5 w-3.5" />
                     加题
                   </Button>
                 </Gate>
 
                 {/* 发布：禁用原因必须可见 */}
-                <Gate
-                  allowed={canPublish}
-                  need={P.examPublish}
-                  hint="发布需要 exam:publish 权限"
-                >
+                <Gate allowed={canPublish} need={P.examPublish} hint="发布需要 exam:publish 权限">
                   <Button
                     size="sm"
                     disabled={!canPublish || frozen || publishBlocked}
@@ -439,7 +458,10 @@ function ExamDetailBody(props: BodyProps) {
           </div>
           <ul className="divide-y">
             {exam.shortfalls.map((s) => (
-              <li key={`${s.rule_index}-${s.question_type}`} className="flex flex-wrap items-center gap-x-3 px-4 py-2 text-xs">
+              <li
+                key={`${s.rule_index}-${s.question_type}`}
+                className="flex flex-wrap items-center gap-x-3 px-4 py-2 text-xs"
+              >
                 <span className="font-medium">{s.rule_label}</span>
                 <span className="text-muted-foreground">{s.reason}</span>
                 <span className="yj-json ml-auto whitespace-nowrap text-muted-foreground">
@@ -527,7 +549,10 @@ function ExamDetailBody(props: BodyProps) {
                       {qTypeLabel(s.question_type)}
                     </Badge>
                     <span
-                      className={cn("text-xs", bad ? "font-medium text-destructive" : "text-muted-foreground")}
+                      className={cn(
+                        "text-xs",
+                        bad ? "font-medium text-destructive" : "text-muted-foreground",
+                      )}
                     >
                       {/* 一句人话，不是干巴巴的 -8 */}
                       {gap.text}
@@ -540,7 +565,7 @@ function ExamDetailBody(props: BodyProps) {
                   {s.questions.length === 0 ? (
                     <p className="px-4 py-3 text-xs text-muted-foreground">
                       这个分段还没有题。点右上角「加题」从题库里挑，
-                      {(exam.shortfalls.length > 0) && "或先解决上面的组卷缺口。"}
+                      {exam.shortfalls.length > 0 && "或先解决上面的组卷缺口。"}
                     </p>
                   ) : (
                     <ul className="divide-y">
@@ -595,9 +620,8 @@ function ExamDetailBody(props: BodyProps) {
         description={
           <div className="space-y-3 text-sm">
             <p>
-              将发布 <strong>{exam.title}</strong>：卷面{" "}
-              <strong>{exam.question_count}</strong> 道题、合计{" "}
-              <strong>{exam.total_score}</strong> 分。
+              将发布 <strong>{exam.title}</strong>：卷面 <strong>{exam.question_count}</strong>{" "}
+              道题、合计 <strong>{exam.total_score}</strong> 分。
             </p>
             <p className="text-xs text-muted-foreground">
               发布时会给卷面每一道题<strong>锁定当前版本</strong>
@@ -619,8 +643,7 @@ function ExamDetailBody(props: BodyProps) {
                 允许发布后编辑。
                 <span className="text-muted-foreground">
                   {" "}
-                  勾选后这张卷可以在发布状态下继续改卷面 —— 修改会影响正在进行的考试，
-                  通常不建议。
+                  勾选后这张卷可以在发布状态下继续改卷面 —— 修改会影响正在进行的考试， 通常不建议。
                 </span>
               </span>
             </label>
@@ -731,13 +754,10 @@ function ExamDetailBody(props: BodyProps) {
         confirmText="恢复这份试卷"
         description={
           <div className="space-y-2 text-sm">
-            <p>
-              将把这份试卷从归档状态恢复，它立刻重新出现在默认列表里。
-            </p>
+            <p>将把这份试卷从归档状态恢复，它立刻重新出现在默认列表里。</p>
             <p className="text-xs text-muted-foreground">
               恢复<strong>不会改变试卷状态</strong>（仍是「
-              {EXAM_STATUS_LABELS[exam.status]}」）
-              ，也不会改动任何题目。
+              {EXAM_STATUS_LABELS[exam.status]}」） ，也不会改动任何题目。
             </p>
           </div>
         }
@@ -784,9 +804,8 @@ function ExamDetailBody(props: BodyProps) {
                 </p>
                 <p className="text-xs text-amber-700">
                   ⚠️ 移出后该分段的计划题数<strong>不会自动变小</strong>
-                  （计划 {props.removeTarget.eq.score} 分不变），
-                  校验会提示分段的题数与计划不符 —— 由你决定补一道题，
-                  还是把计划题数改成实际值。
+                  （计划 {props.removeTarget.eq.score} 分不变）， 校验会提示分段的题数与计划不符 ——
+                  由你决定补一道题， 还是把计划题数改成实际值。
                 </p>
               </>
             ) : null}
@@ -917,8 +936,7 @@ function QuestionRow({
               <TooltipContent className="max-w-sm space-y-1.5">
                 <p className="text-xs">
                   这道题在<strong>发布之后被改过</strong>：考生作答与展示用的是锁定版
-                  <code className="yj-json mx-1">v{q.locked_version}</code>，
-                  题库里现在已是
+                  <code className="yj-json mx-1">v{q.locked_version}</code>， 题库里现在已是
                   <code className="yj-json mx-1">v{q.current_version}</code>。
                 </p>
                 <p className="text-xs text-muted-foreground">

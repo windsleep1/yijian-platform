@@ -50,19 +50,39 @@ SIM_BANK_TOOL = REPO / "tools" / "local-verify" / "import-sim-bank.py"
 
 # 导入模板的 24 列（与 docs/07 §4.2 一一对应；option_a..option_f 是同一行规则的展开）
 COLUMNS = (
-    "subject_code", "chapter_code", "kp_code", "type", "stem",
-    "option_a", "option_b", "option_c", "option_d", "option_e", "option_f",
-    "answer", "answer_points", "analysis", "score", "difficulty", "exam_year",
-    "source_type", "source_name", "source_license", "tags",
-    "case_group_id", "material", "media_urls",
+    "subject_code",
+    "chapter_code",
+    "kp_code",
+    "type",
+    "stem",
+    "option_a",
+    "option_b",
+    "option_c",
+    "option_d",
+    "option_e",
+    "option_f",
+    "answer",
+    "answer_points",
+    "analysis",
+    "score",
+    "difficulty",
+    "exam_year",
+    "source_type",
+    "source_name",
+    "source_license",
+    "tags",
+    "case_group_id",
+    "material",
+    "media_urls",
 )
 
-SZ_SUBJECT_ID = 2007      # 市政实务
-SZ_CHAPTER = "SZ-01"      # 该科目下真实存在的章节编码
-JZ_SUBJECT_ID = 2001      # 建筑实务（用于"越权"对照）
+SZ_SUBJECT_ID = 2007  # 市政实务
+SZ_CHAPTER = "SZ-01"  # 该科目下真实存在的章节编码
+JZ_SUBJECT_ID = 2001  # 建筑实务（用于"越权"对照）
 
 
 # ================================================================ 工具
+
 
 def csv_bytes(rows: list[dict]) -> bytes:
     """按导入模板列拼 CSV。刻意带 UTF-8 BOM —— 覆盖"Excel 另存为 CSV"的真实形态。"""
@@ -74,11 +94,15 @@ def csv_bytes(rows: list[dict]) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
-def row(*, subject: str = "SW-SZ", chapter: str = SZ_CHAPTER, tag: str | None = None, **over) -> dict:
+def row(
+    *, subject: str = "SW-SZ", chapter: str = SZ_CHAPTER, tag: str | None = None, **over
+) -> dict:
     """一道内容唯一的单选题的导入行。tag 保证不会撞上 content_hash 去重。"""
     tag = tag or uuid.uuid4().hex[:10]
     r = {
-        "subject_code": subject, "chapter_code": chapter, "kp_code": "",
+        "subject_code": subject,
+        "chapter_code": chapter,
+        "kp_code": "",
         "type": "single",
         "stem": f"【自动化-导入】{tag} 关于施工管理与验收，下列说法正确的是？",
         "option_a": f"A-{tag} 未经验收即投入使用",
@@ -86,8 +110,10 @@ def row(*, subject: str = "SW-SZ", chapter: str = SZ_CHAPTER, tag: str | None = 
         "option_c": f"C-{tag} 口头交底代替书面交底",
         "answer": "B",
         "analysis": f"解析 {tag}：验收合格是进入下道工序的前置条件，故选 B。",
-        "score": "1", "difficulty": "3",
-        "source_type": "self", "tags": "自动化|单选题",
+        "score": "1",
+        "difficulty": "3",
+        "source_type": "self",
+        "tags": "自动化|单选题",
     }
     r.update(over)
     return r
@@ -99,27 +125,35 @@ def _kw(timeout):
 
 
 def upload(client, headers, content: bytes, *, name="t.csv", timeout=None, **form):
-    return body(client.post(
-        f"{API}/admin/imports/upload", headers=headers,
-        files={"file": (name, content, "text/csv")},
-        data={"mode": "insert", "source_type": "self", **{k: str(v) for k, v in form.items()}},
-        **_kw(timeout),
-    ))
+    return body(
+        client.post(
+            f"{API}/admin/imports/upload",
+            headers=headers,
+            files={"file": (name, content, "text/csv")},
+            data={"mode": "insert", "source_type": "self", **{k: str(v) for k, v in form.items()}},
+            **_kw(timeout),
+        )
+    )
 
 
 def validate(client, headers, bid, *, timeout=None):
-    return body(client.post(f"{API}/admin/imports/{bid}/validate", headers=headers,
-                            **_kw(timeout)))
+    return body(client.post(f"{API}/admin/imports/{bid}/validate", headers=headers, **_kw(timeout)))
 
 
 def execute(client, headers, bid, *, timeout=None, **payload):
-    return body(client.post(f"{API}/admin/imports/{bid}/execute", headers=headers,
-                            json=payload, **_kw(timeout)))
+    return body(
+        client.post(
+            f"{API}/admin/imports/{bid}/execute", headers=headers, json=payload, **_kw(timeout)
+        )
+    )
 
 
 def rollback(client, headers, bid, *, timeout=None, **payload):
-    return body(client.post(f"{API}/admin/imports/{bid}/rollback", headers=headers,
-                            json=payload, **_kw(timeout)))
+    return body(
+        client.post(
+            f"{API}/admin/imports/{bid}/rollback", headers=headers, json=payload, **_kw(timeout)
+        )
+    )
 
 
 def count_questions(client, headers) -> int:
@@ -183,13 +217,22 @@ def fresh_user(client: httpx.Client, *, nickname: str = "导入用例") -> dict:
     ip = f"203.0.113.{random.randint(2, 250)}"
     h = {"X-Forwarded-For": ip}
     phone = "13" + "".join(random.choice(string.digits) for _ in range(9))
-    b = body(client.post(f"{API}/auth/sms/send",
-                         json={"phone": phone, "scene": "register"}, headers=h))
+    b = body(
+        client.post(f"{API}/auth/sms/send", json={"phone": phone, "scene": "register"}, headers=h)
+    )
     assert b["code"] == 0, b
-    b = body(client.post(f"{API}/auth/register", headers=h, json={
-        "phone": phone, "code": b["data"]["dev_code"],
-        "password": TEST_PASSWORD, "nickname": nickname,
-    }))
+    b = body(
+        client.post(
+            f"{API}/auth/register",
+            headers=h,
+            json={
+                "phone": phone,
+                "code": b["data"]["dev_code"],
+                "password": TEST_PASSWORD,
+                "nickname": nickname,
+            },
+        )
+    )
     assert b["code"] == 0, b
     return b["data"]
 
@@ -207,6 +250,7 @@ def sz(client: httpx.Client, admin_h: dict[str, str]) -> tuple[int, str]:
 
 
 # ================================================================ 1. 上传
+
 
 def test_upload_rejects_unsupported_and_malformed_files(client: httpx.Client, admin_h) -> None:
     """上传闸门：只收 csv/json；xlsx 给出可执行的替代建议；表头缺列当场拒绝。"""
@@ -235,6 +279,7 @@ def test_upload_rejects_unsupported_and_malformed_files(client: httpx.Client, ad
 
 # ================================================================ 2. 验收① 错误文件
 
+
 def test_wrong_file_reports_row_and_field_and_writes_nothing(
     client: httpx.Client, admin_h, sz
 ) -> None:
@@ -246,8 +291,8 @@ def test_wrong_file_reports_row_and_field_and_writes_nothing(
     before = count_questions(client, admin_h)
 
     rows = [row(chapter=chapter_code) for _ in range(100)]
-    rows[56].update({"option_d": "", "answer": "D"})       # 第 57 行：答案 D 不在 A/B/C 里
-    rows[99]["chapter_code"] = "SZ-99"                     # 第 100 行：章节编码不存在
+    rows[56].update({"option_d": "", "answer": "D"})  # 第 57 行：答案 D 不在 A/B/C 里
+    rows[99]["chapter_code"] = "SZ-99"  # 第 100 行：章节编码不存在
 
     up = upload(client, admin_h, csv_bytes(rows), name="wrong-100.csv")
     assert up["code"] == 0 and up["data"]["total_rows"] == 100, up
@@ -259,7 +304,9 @@ def test_wrong_file_reports_row_and_field_and_writes_nothing(
     by_row = {e["row_no"]: e for e in v["error_report"]["errors"]}
     assert set(by_row) == {57, 100}, v["error_report"]
     assert by_row[57]["field"] == "answer" and "不在选项中" in by_row[57]["message"], by_row[57]
-    assert by_row[100]["field"] == "chapter_code" and "不存在" in by_row[100]["message"], by_row[100]
+    assert by_row[100]["field"] == "chapter_code" and "不存在" in by_row[100]["message"], by_row[
+        100
+    ]
 
     # 校验是 dry-run
     assert count_questions(client, admin_h) == before
@@ -280,6 +327,7 @@ def test_wrong_file_reports_row_and_field_and_writes_nothing(
 
 
 # ================================================================ 3. 验收② 幂等
+
 
 def test_idempotent_import_ten_times(client: httpx.Client, admin_h, sz) -> None:
     """验收②：同一份正确文件导入 10 次，题量只增加一次。"""
@@ -306,6 +354,7 @@ def test_idempotent_import_ten_times(client: httpx.Client, admin_h, sz) -> None:
 
 
 # ================================================================ 4. 验收③ 全链路
+
 
 def test_full_pipeline_execute_publish_rollback(client: httpx.Client, admin_h, sz) -> None:
     """验收③：导入 → 草稿 → 发布 → 整批回滚，题量回到导入前。"""
@@ -342,8 +391,8 @@ def test_full_pipeline_execute_publish_rollback(client: httpx.Client, admin_h, s
     assert q["is_deleted"] is True, q
 
     logs = db_fetch(
-        "SELECT count(*) AS n FROM content_change_logs "
-        "WHERE batch_id = $1 AND action = 'rollback'", bid,
+        "SELECT count(*) AS n FROM content_change_logs WHERE batch_id = $1 AND action = 'rollback'",
+        bid,
     )
     assert logs[0]["n"] == 4, logs
 
@@ -358,9 +407,13 @@ def test_rollback_restores_upserted_questions(client: httpx.Client, admin_h, sz)
     # 先 insert 建两题
     bid1, _, ex1 = import_once(client, admin_h, content)
     assert ex1["data"]["success_rows"] == 2, ex1
-    qids = [r["question_id"] for r in body(
-        client.get(f"{API}/admin/imports/{bid1}", headers=admin_h))["data"]["rows"]]
-    ver_before = body(client.get(f"{API}/admin/questions/{qids[0]}", headers=admin_h))["data"]["version"]
+    qids = [
+        r["question_id"]
+        for r in body(client.get(f"{API}/admin/imports/{bid1}", headers=admin_h))["data"]["rows"]
+    ]
+    ver_before = body(client.get(f"{API}/admin/questions/{qids[0]}", headers=admin_h))["data"][
+        "version"
+    ]
 
     # 同一份文件再来一次，这次 upsert → 命中同内容题，走 update 分支
     up = upload(client, admin_h, content, name="ups-2.csv", mode="upsert")
@@ -368,7 +421,9 @@ def test_rollback_restores_upserted_questions(client: httpx.Client, admin_h, sz)
     validate(client, admin_h, bid2)
     ex2 = execute(client, admin_h, bid2)
     assert ex2["code"] == 0 and ex2["data"]["updated_rows"] == 2, ex2
-    ver_after = body(client.get(f"{API}/admin/questions/{qids[0]}", headers=admin_h))["data"]["version"]
+    ver_after = body(client.get(f"{API}/admin/questions/{qids[0]}", headers=admin_h))["data"][
+        "version"
+    ]
     assert ver_after == ver_before + 1, (ver_before, ver_after)
 
     # 回滚第 2 批 → 还原到导入前版本，题目**不能**被软删除
@@ -385,6 +440,7 @@ def test_rollback_restores_upserted_questions(client: httpx.Client, admin_h, sz)
 
 # ================================================================ 5. 验收④ 事务
 
+
 def test_mid_import_failure_rolls_back_everything(client: httpx.Client, admin_h, sz) -> None:
     """验收④：执行中途某行写库失败 → 整批回滚，库里不留半截数据。
 
@@ -395,14 +451,19 @@ def test_mid_import_failure_rolls_back_everything(client: httpx.Client, admin_h,
     _, chapter_code = sz
     before = count_questions(client, admin_h)
     rows = [row(chapter=chapter_code) for _ in range(5)]
-    rows.append(row(chapter=chapter_code, source_type="authorized",
-                    source_name="授权来源" * 50,        # 200 字 > 160
-                    source_license="HT-2026-0001"))
+    rows.append(
+        row(
+            chapter=chapter_code,
+            source_type="authorized",
+            source_name="授权来源" * 50,  # 200 字 > 160
+            source_license="HT-2026-0001",
+        )
+    )
 
     up = upload(client, admin_h, csv_bytes(rows), name="boom.csv")
     bid = int(up["data"]["id"])
     v = validate(client, admin_h, bid)["data"]
-    assert v["failed_rows"] == 0 and v["success_rows"] == 6, v   # 校验阶段查不出列宽问题
+    assert v["failed_rows"] == 0 and v["success_rows"] == 6, v  # 校验阶段查不出列宽问题
 
     ex = execute(client, admin_h, bid)
     assert ex["code"] != 0 and "已整批回滚" in ex["message"], ex
@@ -434,6 +495,7 @@ def test_execute_twice_and_rollback_twice_are_rejected(client: httpx.Client, adm
 
 # ================================================================ 6. 验收⑥ 数据范围
 
+
 def test_researcher_data_scope(client: httpx.Client, admin_h, sz) -> None:
     """验收⑥：researcher 挂 `subject` 范围（市政）后，只能导入自己专业的题。
 
@@ -446,21 +508,34 @@ def test_researcher_data_scope(client: httpx.Client, admin_h, sz) -> None:
 
     # 造一个只有 researcher 角色 + subject 范围的账号
     u = fresh_user(client, nickname="教研-范围")
-    ar = assign_roles(client, admin_h, u["user"]["id"], ["researcher"],
-                      scope_type="subject", scope_id=subject_id)
+    ar = assign_roles(
+        client, admin_h, u["user"]["id"], ["researcher"], scope_type="subject", scope_id=subject_id
+    )
     assert ar["code"] == 0, ar
-    rh = auth(u["access_token"])   # 权限每次请求从库里取，旧 token 立刻生效
+    rh = auth(u["access_token"])  # 权限每次请求从库里取，旧 token 立刻生效
 
     # 闸 1：批次科目越权
-    up = upload(client, rh, csv_bytes([row(subject="SW-JZ", chapter="JZ-01")]),
-                name="x.csv", subject_id=JZ_SUBJECT_ID)
+    up = upload(
+        client,
+        rh,
+        csv_bytes([row(subject="SW-JZ", chapter="JZ-01")]),
+        name="x.csv",
+        subject_id=JZ_SUBJECT_ID,
+    )
     assert up["code"] == 40301 and "数据范围" in up["message"], up
 
     # 闸 2：文件里混入别专业的行
-    up = upload(client, rh, csv_bytes([
-        row(subject="SW-SZ", chapter=chapter_code, tag="own-1"),
-        row(subject="SW-JZ", chapter="JZ-01", tag="other-1"),
-    ]), name="mixed.csv")
+    up = upload(
+        client,
+        rh,
+        csv_bytes(
+            [
+                row(subject="SW-SZ", chapter=chapter_code, tag="own-1"),
+                row(subject="SW-JZ", chapter="JZ-01", tag="other-1"),
+            ]
+        ),
+        name="mixed.csv",
+    )
     assert up["code"] == 0, up
     bid = int(up["data"]["id"])
     v = validate(client, rh, bid)["data"]
@@ -497,6 +572,7 @@ def test_permission_wall(client: httpx.Client, sz) -> None:
 
 # ================================================================ 7. 列表 / 详情契约
 
+
 def test_list_and_detail_contract(client: httpx.Client, admin_h, sz) -> None:
     """列表与详情的形状契约：分页信封、共用字段、BigIntStr（ID 必须是字符串）。"""
     _, chapter_code = sz
@@ -514,9 +590,23 @@ def test_list_and_detail_contract(client: httpx.Client, admin_h, sz) -> None:
     one = items[bid]
     # ID 一律是字符串，否则 JS 会静默丢精度（Batch 4 的坑，这里必须守住）
     assert isinstance(one["id"], str) and int(one["id"]) > 2**53 - 1, one["id"]
-    for key in ("batch_no", "file_name", "file_type", "file_hash", "source_type", "mode",
-                "status", "total_rows", "success_rows", "failed_rows",
-                "duplicate_rows", "updated_rows", "can_execute", "can_publish", "can_rollback"):
+    for key in (
+        "batch_no",
+        "file_name",
+        "file_type",
+        "file_hash",
+        "source_type",
+        "mode",
+        "status",
+        "total_rows",
+        "success_rows",
+        "failed_rows",
+        "duplicate_rows",
+        "updated_rows",
+        "can_execute",
+        "can_publish",
+        "can_rollback",
+    ):
         assert key in one, (key, sorted(one))
 
     assert one["total_rows"] == 3 and one["success_rows"] == 3
@@ -539,7 +629,9 @@ def test_status_filter(client: httpx.Client, admin_h, sz) -> None:
     """列表支持按 status 过滤。"""
     _, chapter_code = sz
     bid, _, _ = import_once(client, admin_h, csv_bytes([row(chapter=chapter_code)]))
-    done = body(client.get(f"{API}/admin/imports?status=done&page_size=100", headers=admin_h))["data"]
+    done = body(client.get(f"{API}/admin/imports?status=done&page_size=100", headers=admin_h))[
+        "data"
+    ]
     assert all(i["status"] == "done" for i in done["items"]), done["items"][:3]
     assert bid in {int(i["id"]) for i in done["items"]}
 
@@ -550,6 +642,7 @@ def test_status_filter(client: httpx.Client, admin_h, sz) -> None:
 
 
 # ================================================================ 8. 验收⑤ 6000 道仿真题
+
 
 def _load_sim_bank_tool():
     spec = importlib.util.spec_from_file_location("_import_sim_bank", SIM_BANK_TOOL)
@@ -605,8 +698,8 @@ def test_seed_bank_mapping_matches_existing_rows(client: httpx.Client, admin_h) 
 @pytest.mark.skipif(
     os.environ.get("YIJIAN_BIG_IMPORT") != "1",
     reason="全量 6000 道灌库耗时约 30s 且会写 6000 条 version/变更日志；"
-           "需要时用 YIJIAN_BIG_IMPORT=1 pytest 开启（或跑 "
-           "tools/local-verify/import-sim-bank.py）",
+    "需要时用 YIJIAN_BIG_IMPORT=1 pytest 开启（或跑 "
+    "tools/local-verify/import-sim-bank.py）",
 )
 def test_seed_bank_full_6000_upsert(client: httpx.Client, admin_h) -> None:
     """验收⑤ 全量：6000 道仿真题经导入管道真灌进库 → success=6000, failed=0。
@@ -647,6 +740,7 @@ def test_seed_bank_full_6000_upsert(client: httpx.Client, admin_h) -> None:
 
 # ================================================================ 9. Batch 6：批次变更日志
 
+
 def test_batch_changes_contract(client: httpx.Client, admin_h, sz) -> None:
     """批次变更日志：B 端「批次详情」要能回答"这一批到底动了哪几道题"。
 
@@ -658,7 +752,9 @@ def test_batch_changes_contract(client: httpx.Client, admin_h, sz) -> None:
       - 批次不存在要 40401，**不是空列表**（"什么都没改" ≠ "批次不存在"）。
     """
     _, chapter_code = sz
-    bid, _, ex = import_once(client, admin_h, csv_bytes([row(chapter=chapter_code) for _ in range(3)]))
+    bid, _, ex = import_once(
+        client, admin_h, csv_bytes([row(chapter=chapter_code) for _ in range(3)])
+    )
     assert ex["code"] == 0, ex
 
     ch = body(client.get(f"{API}/admin/imports/{bid}/changes", headers=admin_h))
@@ -671,8 +767,16 @@ def test_batch_changes_contract(client: httpx.Client, admin_h, sz) -> None:
     assert d["total"] == 3, d
 
     it = d["items"][0]
-    for key in ("id", "entity_type", "entity_id", "action", "change_log",
-                "question_stem", "operator_name", "created_at"):
+    for key in (
+        "id",
+        "entity_type",
+        "entity_id",
+        "action",
+        "change_log",
+        "question_stem",
+        "operator_name",
+        "created_at",
+    ):
         assert key in it, (key, sorted(it))
     assert isinstance(it["id"], str) and isinstance(it["entity_id"], str), it
     assert it["entity_type"] == "question" and it["action"] == "create", it
@@ -680,13 +784,17 @@ def test_batch_changes_contract(client: httpx.Client, admin_h, sz) -> None:
     assert it["operator_name"], it
 
     # 分页：汇总不随分页变化
-    p2 = body(client.get(f"{API}/admin/imports/{bid}/changes?page=2&page_size=2", headers=admin_h))["data"]
+    p2 = body(client.get(f"{API}/admin/imports/{bid}/changes?page=2&page_size=2", headers=admin_h))[
+        "data"
+    ]
     assert len(p2["items"]) == 1, p2
     assert p2["total"] == 3 and p2["has_more"] is False and p2["counts"].get("create") == 3, p2
 
     # 回滚后再看：多出 3 条 rollback，create 仍是 3
     assert rollback(client, admin_h, bid)["code"] == 0
-    ch2 = body(client.get(f"{API}/admin/imports/{bid}/changes?page_size=200", headers=admin_h))["data"]
+    ch2 = body(client.get(f"{API}/admin/imports/{bid}/changes?page_size=200", headers=admin_h))[
+        "data"
+    ]
     assert ch2["counts"].get("rollback") == 3, ch2["counts"]
     assert ch2["counts"].get("create") == 3, ch2["counts"]
     assert ch2["total"] == 6, ch2["total"]

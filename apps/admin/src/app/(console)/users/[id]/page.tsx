@@ -61,9 +61,7 @@ export default function UserDetailPage() {
         <div className="mb-4 inline-flex rounded-full bg-muted p-4">
           <UserX className="h-7 w-7 text-muted-foreground" />
         </div>
-        <h2 className="text-base font-semibold">
-          {notFound ? "用户不存在" : "加载用户详情失败"}
-        </h2>
+        <h2 className="text-base font-semibold">{notFound ? "用户不存在" : "加载用户详情失败"}</h2>
         <p className="mt-2 text-sm text-muted-foreground">
           {notFound
             ? `ID「${id}」对应的用户不存在，或已被注销。请确认链接是否正确。`
@@ -252,7 +250,10 @@ export default function UserDetailPage() {
           {user.recent_audits.length ? (
             <ul className="divide-y">
               {user.recent_audits.map((a) => (
-                <li key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 text-sm">
+                <li
+                  key={a.id}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 text-sm"
+                >
                   <code className="yj-json rounded bg-muted px-1.5 py-0.5 text-[11px]">
                     {a.action}
                   </code>

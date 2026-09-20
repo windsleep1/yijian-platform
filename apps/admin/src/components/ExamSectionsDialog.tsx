@@ -108,7 +108,12 @@ export function ExamSectionsDialog({
   const addRow = () =>
     setDrafts((prev) => [
       ...prev,
-      { name: `第 ${prev.length + 1} 部分`, question_type: "single", question_count: "0", score_per: "1" },
+      {
+        name: `第 ${prev.length + 1} 部分`,
+        question_type: "single",
+        question_count: "0",
+        score_per: "1",
+      },
     ]);
 
   const removeRow = (i: number) => setDrafts((prev) => prev.filter((_, idx) => idx !== i));
@@ -153,8 +158,8 @@ export function ExamSectionsDialog({
             <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
               <p className="font-medium text-destructive">卷面已变化，请刷新后重试</p>
               <p className="mt-1 text-muted-foreground">
-                从你打开这个对话框到现在，这张卷的题数被改过了
-                （当前是 <strong>{exam.question_count}</strong> 道）。
+                从你打开这个对话框到现在，这张卷的题数被改过了 （当前是{" "}
+                <strong>{exam.question_count}</strong> 道）。
                 为避免误清掉别人刚加的题，后端拒绝了这次提交，<strong>没有写入任何数据</strong>。
                 点「刷新」拿到最新版本后，请重新确认一遍再提交。
               </p>
@@ -182,8 +187,8 @@ export function ExamSectionsDialog({
                 保存会<strong>清空卷面现有的 {exam.question_count} 道题</strong>，并重建分段。
               </p>
               <p>
-                分段是卷面的骨架，重建骨架必须重排题目 —— 后端会把
-                `exam_questions` 里这张卷的行全部删掉再按新分段重建。
+                分段是卷面的骨架，重建骨架必须重排题目 —— 后端会把 `exam_questions`
+                里这张卷的行全部删掉再按新分段重建。
                 <strong>题目本身在题库里不受影响</strong>，之后可以重新组卷或手动加题补回来。
               </p>
             </div>
@@ -224,7 +229,9 @@ export function ExamSectionsDialog({
                   <Input
                     value={d.question_count}
                     inputMode="numeric"
-                    onChange={(e) => patch(i, { question_count: e.target.value.replace(/[^\d]/g, "") })}
+                    onChange={(e) =>
+                      patch(i, { question_count: e.target.value.replace(/[^\d]/g, "") })
+                    }
                     className="h-9"
                   />
                 </div>
@@ -258,8 +265,8 @@ export function ExamSectionsDialog({
                 添加分段
               </Button>
               <span className="text-xs text-muted-foreground">
-                计划合计 <span className="font-medium text-foreground">{plannedTotal}</span> 道
-                · 满分{" "}
+                计划合计 <span className="font-medium text-foreground">{plannedTotal}</span> 道 ·
+                满分{" "}
                 <span className="font-medium text-foreground">
                   {payloadSections.reduce((s, x) => s + x.question_count * x.score_per, 0)}
                 </span>{" "}
@@ -269,7 +276,11 @@ export function ExamSectionsDialog({
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={replace.isPending}>
+            <Button
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={replace.isPending}
+            >
               取消
             </Button>
             <Button
@@ -299,8 +310,8 @@ export function ExamSectionsDialog({
         description={
           <div className="space-y-3 text-sm">
             <p>
-              即将把卷面结构改为 <strong>{drafts.length}</strong> 个分段、
-              计划 <strong>{plannedTotal}</strong> 道题。
+              即将把卷面结构改为 <strong>{drafts.length}</strong> 个分段、 计划{" "}
+              <strong>{plannedTotal}</strong> 道题。
             </p>
             <p className="rounded-md bg-destructive/10 p-2 text-destructive">
               这会<strong>清空卷面现有的 {exam.question_count} 道题</strong>
@@ -314,8 +325,7 @@ export function ExamSectionsDialog({
                 className="mt-0.5"
               />
               <span>
-                我明白这会清空卷面现有的 {exam.question_count} 道题，
-                且需要重新补题才能发布。
+                我明白这会清空卷面现有的 {exam.question_count} 道题， 且需要重新补题才能发布。
               </span>
             </label>
           </div>
@@ -335,7 +345,11 @@ export function ExamSectionsDialog({
           } catch (err) {
             // 「卷面已变化」要单独处理：用户必须先刷新拿到最新数据，
             // 否则改多少次都会撞同一堵墙（错误 toast 只说了一次，容易漏）。
-            if (err instanceof ApiError && err.code === 40901 && err.message.includes("卷面已变化")) {
+            if (
+              err instanceof ApiError &&
+              err.code === 40901 &&
+              err.message.includes("卷面已变化")
+            ) {
               setStale(true);
               setConfirmOpen(false);
               setAck(false);

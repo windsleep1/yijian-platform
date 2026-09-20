@@ -72,7 +72,11 @@ export function StepWizard({ steps, current, maxReached, onStepClick, className 
               <span
                 className={cn(
                   "block text-sm font-medium",
-                  isCurrent ? "text-foreground" : isDone ? "text-foreground" : "text-muted-foreground",
+                  isCurrent
+                    ? "text-foreground"
+                    : isDone
+                      ? "text-foreground"
+                      : "text-muted-foreground",
                 )}
               >
                 {step.title}

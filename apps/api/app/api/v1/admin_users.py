@@ -48,7 +48,9 @@ router = APIRouter(prefix="/admin/users", tags=["管理端 · 用户"])
 async def list_users(
     db: DbSession,
     page_info: Annotated[tuple[int, int], Depends(pagination)],
-    keyword: Annotated[str | None, Query(max_length=64, description="按手机号/昵称/用户名模糊搜索")] = None,
+    keyword: Annotated[
+        str | None, Query(max_length=64, description="按手机号/昵称/用户名模糊搜索")
+    ] = None,
     status: Annotated[str | None, Query(description="active / disabled / locked")] = None,
 ) -> dict:
     page, page_size = page_info

@@ -135,8 +135,8 @@ function LoginForm() {
           <p className="font-medium text-foreground">本地联调默认超管</p>
           <p className="yj-json mt-1">13800000000 / Admin@123456</p>
           <p className="mt-1">
-            该账号由 <code className="yj-json">python -m app.cli seed-admin</code> 创建
-            （docker compose 启动时自动执行，本地验收脚本
+            该账号由 <code className="yj-json">python -m app.cli seed-admin</code> 创建 （docker
+            compose 启动时自动执行，本地验收脚本
             <code className="yj-json"> tools/local-verify/run-smoke.ps1</code> 也会执行）。
           </p>
         </div>

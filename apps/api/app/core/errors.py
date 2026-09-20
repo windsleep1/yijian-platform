@@ -38,6 +38,7 @@ class BizError(Exception):
 
 # ---------------- 常用错误构造快捷方式 ----------------
 
+
 def bad_request(message: str, code: int = 40001) -> BizError:
     return BizError(code, message, 400)
 
@@ -86,7 +87,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(StarletteHTTPException)
-    async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    async def _http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
         code_map = {401: 40101, 403: 40301, 404: 40401, 405: 40001, 429: 42901}
         code = code_map.get(exc.status_code, 50001 if exc.status_code >= 500 else 40001)
         message = exc.detail if isinstance(exc.detail, str) else "请求失败"

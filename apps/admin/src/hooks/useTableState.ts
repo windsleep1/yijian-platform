@@ -82,10 +82,7 @@ export function useTableState<T extends TableDefaults>(
   );
 
   /** 只改页码，不动筛选。 */
-  const setPage = useCallback(
-    (page: number) => push({ ...state, page }),
-    [push, state],
-  );
+  const setPage = useCallback((page: number) => push({ ...state, page }), [push, state]);
 
   /**
    * 清空全部筛选（保留 page/page_size 这类结构性参数的默认值）。

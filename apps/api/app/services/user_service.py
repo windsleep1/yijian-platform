@@ -78,14 +78,18 @@ async def list_users(
     ).scalar_one()
 
     rows = (
-        await db.execute(
-            select(User)
-            .where(*conditions)
-            .order_by(User.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+        (
+            await db.execute(
+                select(User)
+                .where(*conditions)
+                .order_by(User.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     role_map = await _roles_map(db, [u.id for u in rows])
     items = [
@@ -120,9 +124,7 @@ async def assign_user_roles(
     user_agent: str | None = None,
 ) -> AssignRolesOut:
     target = (
-        await db.execute(
-            select(User).where(User.id == target_user_id, User.is_deleted.is_(False))
-        )
+        await db.execute(select(User).where(User.id == target_user_id, User.is_deleted.is_(False)))
     ).scalar_one_or_none()
     if target is None:
         raise not_found("用户不存在", 40401)
@@ -236,9 +238,7 @@ async def update_user_status(
         )
 
     target = (
-        await db.execute(
-            select(User).where(User.id == target_user_id, User.is_deleted.is_(False))
-        )
+        await db.execute(select(User).where(User.id == target_user_id, User.is_deleted.is_(False)))
     ).scalar_one_or_none()
     if target is None:
         raise not_found("用户不存在", 40401)
@@ -265,16 +265,16 @@ async def update_user_status(
     if target.status in ("locked", "deleted"):
         raise conflict(
             f"该账号当前是「{target.status}」，不通过本接口变更。"
-            + ("锁定由登录失败计数自动触发，登录成功会自动解除。"
-               if target.status == "locked"
-               else "注销要走注销流程（涉及订单与权益处理）。"),
+            + (
+                "锁定由登录失败计数自动触发，登录成功会自动解除。"
+                if target.status == "locked"
+                else "注销要走注销流程（涉及订单与权益处理）。"
+            ),
             40901,
         )
 
     if target.status == status:
-        raise conflict(
-            "该账号已经是目标状态，无需重复操作。", 40901
-        )
+        raise conflict("该账号已经是目标状态，无需重复操作。", 40901)
 
     before_status = target.status
     revoke_sessions = status == "disabled"
@@ -369,9 +369,7 @@ async def get_user_detail(
     F12 里就是明文。
     """
     user = (
-        await db.execute(
-            select(User).where(User.id == user_id, User.is_deleted.is_(False))
-        )
+        await db.execute(select(User).where(User.id == user_id, User.is_deleted.is_(False)))
     ).scalar_one_or_none()
     if user is None:
         raise not_found("用户不存在", 40401)
@@ -382,9 +380,10 @@ async def get_user_detail(
 
     # 角色 + 数据范围一次查全（比 _roles_map 多带回 scope_type / scope_id）
     scope_rows = (
-        await db.execute(
-            text(
-                """
+        (
+            await db.execute(
+                text(
+                    """
                 SELECT r.code AS role_code, ur.scope_type, ur.scope_id
                 FROM user_roles ur
                 JOIN roles r ON r.id = ur.role_id
@@ -392,10 +391,13 @@ async def get_user_detail(
                   AND (ur.expires_at IS NULL OR ur.expires_at > now())
                 ORDER BY r.sort_no
                 """
-            ),
-            {"uid": user_id},
+                ),
+                {"uid": user_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     can_export = "user:export" in viewer_permissions
 

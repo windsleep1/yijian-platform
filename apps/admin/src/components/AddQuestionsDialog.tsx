@@ -100,10 +100,7 @@ function PickerBody({
 
   /** ⚠️ 全是字符串，绝不 Number()（雪花 ID 精度，见 lib/json-bigint.ts） */
   const existingIds = useMemo(
-    () =>
-      new Set(
-        exam.sections.flatMap((s) => s.questions.map((q) => q.question_id)),
-      ),
+    () => new Set(exam.sections.flatMap((s) => s.questions.map((q) => q.question_id))),
     [exam.sections],
   );
 
@@ -117,10 +114,7 @@ function PickerBody({
   }, [exam.sections]);
 
   const tree = useChapterTree(exam.subject_id);
-  const chapterOptions = useMemo(
-    () => tree.data?.items[0]?.chapters ?? [],
-    [tree.data],
-  );
+  const chapterOptions = useMemo(() => tree.data?.items[0]?.chapters ?? [], [tree.data]);
 
   const kps = useKnowledgePoints({
     subject_id: exam.subject_id,
@@ -197,11 +191,7 @@ function PickerBody({
       <DialogContent className="max-w-5xl">
         <DialogHeader>
           <DialogTitle>
-            {step === "pick"
-              ? "手动加题"
-              : step === "confirm"
-                ? "确认加入卷面"
-                : "加题结果"}
+            {step === "pick" ? "手动加题" : step === "confirm" ? "确认加入卷面" : "加题结果"}
           </DialogTitle>
           <DialogDescription>
             {step === "pick" ? (
@@ -260,7 +250,10 @@ function PickerBody({
                 </SelectContent>
               </Select>
 
-              <Select value={qtype || ANY} onValueChange={(v) => setQtype(v === ANY ? "" : (v as QType))}>
+              <Select
+                value={qtype || ANY}
+                onValueChange={(v) => setQtype(v === ANY ? "" : (v as QType))}
+              >
                 <SelectTrigger className="w-[130px]">
                   <SelectValue placeholder="全部题型" />
                 </SelectTrigger>
@@ -353,7 +346,9 @@ function PickerBody({
                           aria-label={`选择题目 ${q.id}`}
                         />
                         <div className="min-w-0 flex-1">
-                          <p className="line-clamp-2 text-sm leading-relaxed">{q.stem || "（空题干）"}</p>
+                          <p className="line-clamp-2 text-sm leading-relaxed">
+                            {q.stem || "（空题干）"}
+                          </p>
                           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
                             <Badge variant="outline" className="text-[10px]">
                               {qTypeLabel(q.type)}
@@ -361,11 +356,12 @@ function PickerBody({
                             <span className="text-muted-foreground">
                               {difficultyLabel(q.difficulty)}
                             </span>
-                            <span className="text-muted-foreground">
-                              v{q.version}
-                            </span>
+                            <span className="text-muted-foreground">v{q.version}</span>
                             {/* ③ 筛选结果要能看出挂在哪 —— 章节 + **知识点名** */}
-                            <span className="truncate text-muted-foreground" title={q.chapter_name ?? ""}>
+                            <span
+                              className="truncate text-muted-foreground"
+                              title={q.chapter_name ?? ""}
+                            >
                               {q.chapter_name ?? "未指定章节"}
                             </span>
                             {q.knowledge_point_name ? (
@@ -436,7 +432,8 @@ function PickerBody({
                 将加入 <span className="font-semibold">{preview.willAdd.length}</span> 道题
                 {preview.willSkipNoSection.length > 0 ? (
                   <>
-                    ，另有 <span className="font-semibold text-amber-700">
+                    ，另有{" "}
+                    <span className="font-semibold text-amber-700">
                       {preview.willSkipNoSection.length}
                     </span>{" "}
                     道因卷面缺少对应题型的分段会被跳过
@@ -476,9 +473,9 @@ function PickerBody({
                   以下题型在卷面里没有对应分段，提交后会被跳过
                 </p>
                 <p className="mt-1 text-amber-800">
-                  {Array.from(new Set(preview.willSkipNoSection.map((x) => qTypeLabel(x.type)))).join(
-                    "、",
-                  )}
+                  {Array.from(
+                    new Set(preview.willSkipNoSection.map((x) => qTypeLabel(x.type))),
+                  ).join("、")}
                   —— 先在「卷面结构」里加一个该题型的分段，再回来加题。
                 </p>
               </div>
@@ -503,8 +500,8 @@ function PickerBody({
                     <span className="font-semibold text-amber-700">{result.skipped.length}</span> 道
                   </>
                 ) : null}
-                。卷面现有 <span className="font-semibold">{result.question_count}</span> 题、
-                共 <span className="font-semibold">{result.total_score}</span> 分。
+                。卷面现有 <span className="font-semibold">{result.question_count}</span> 题、 共{" "}
+                <span className="font-semibold">{result.total_score}</span> 分。
               </p>
             </div>
 

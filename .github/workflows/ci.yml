@@ -3,9 +3,11 @@
 # ## 跑什么（全部**拦截式**）
 #
 #     ruff check                   后端静态检查
+#     ruff format --check          后端格式（ruff.toml 的 line-length = 100）
 #     pytest                       后端全量用例（真 PostgreSQL）
 #     coverage report              后端覆盖率（门槛 = `.coveragerc` 的 fail_under）
 #     npm run lint                 前端 eslint（规则全 error）
+#     npm run format:check         前端格式（prettier，配置见 prettier.config.mjs）
 #     tsc --noEmit                 前端类型
 #
 # ## 拦截式 vs 上报式（演进的痕迹，留着有用）
@@ -17,13 +19,16 @@
 # | `ruff check` | 上报（`continue-on-error`） | **拦截**（存量 19 条清零后转的） |
 # | `npm run lint` | 不在 CI（本地全 warn，退出码 0） | **拦截**（存量 14 条清零 + 提级后上来的） |
 # | `coverage report` | 无 | **拦截**（门槛依据见 `.coveragerc`） |
+# | `ruff format --check` | 无 | **拦截**（Commit B：先全仓格式化，再挂 check） |
+# | `npm run format:check` | 无 | **拦截**（同上） |
 #
 # 两步都遵循同一条取舍：**存量没清完之前只上报，不清完就设拦截会让 CI 恒红，
 # 而恒红的门禁等于没有门禁**（硬约定 H）——
 # 人很快就不看了，跟"没配置"效果完全一样。
 #
-# 格式检查（`prettier --check` / `ruff format --check`）**不在本批**：
-# 它属于 Commit B「纯格式」，要先做一次全仓格式化再挂 check，否则 CI 一上来就红。
+# ⚠️ 格式检查的挂载顺序也很重要：**必须先做完那次全仓格式化，再挂 check**。
+# 反过来（先挂 check）CI 会从第一秒就红，而红着的门禁没有人会读 ——
+# 结果就是有人把它加进 ignore 列表，永久失效。
 #
 # ## 每一步都在复刻 `run-smoke.ps1` 的链路
 #
@@ -102,6 +107,12 @@ jobs:
       # 而**恒红的门禁等于没有门禁**（硬约定 H 的同一逻辑）。
       - name: ruff check（拦截式）
         run: ruff check apps/api
+
+      # ---- 格式检查（拦截式，Commit B 起）----
+      # 行宽取 100 而不是 ruff 默认的 88 —— 依据是实测（Python p95=83 / p99=97），
+      # 贴着现有代码选能把格式化 diff 压到最小。配置在仓库根 ruff.toml。
+      - name: ruff format --check（拦截式）
+        run: ruff format --check apps/api
 
       # ---- 建表 + 迁移：与 run-smoke.ps1 的第 2/3/3.5 步等价 ----
       # ⚠️ schema.sql 只在**首次建库**时载入，之后的列/种子变更全靠 db/migrations/
@@ -234,6 +245,15 @@ jobs:
       - name: npm run lint（拦截式）
         working-directory: apps/admin
         run: npm run lint
+
+      # ---- 格式检查（拦截式，Commit B 起）----
+      # prettier 的配置在 apps/admin/prettier.config.mjs（printWidth 100，理由写在注释里）。
+      # ⚠️ `.prettierignore` 里**刻意排除了 Markdown 与 docs/** —— 那些是手写文档，
+      # 换行是刻意的（手工对齐的表格、按语义断的列表），格式化它们不带来工程收益，
+      # 只会产出几百行无信息量的 diff。
+      - name: npm run format:check（拦截式）
+        working-directory: apps/admin
+        run: npm run format:check
 
       # ---- 三件事之三：tsc（拦截式）----
       - name: tsc --noEmit

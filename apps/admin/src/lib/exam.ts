@@ -37,7 +37,9 @@ export function examStatusLabel(s: string): string {
 }
 
 /** 与 `lib/question.ts` 的 `qStatusVariant` 同一套语义。 */
-export function examStatusVariant(s: ExamStatus): "default" | "secondary" | "success" | "warning" | "destructive" | "outline" {
+export function examStatusVariant(
+  s: ExamStatus,
+): "default" | "secondary" | "success" | "warning" | "destructive" | "outline" {
   switch (s) {
     case "published":
       return "success";
@@ -113,7 +115,9 @@ export type SectionGap = {
  * ——"只给数字差异"是 B 端最容易被诟病的表达方式：用户看到 `-3`
  * 得自己反应过来是少 3 道、还得回头看这是哪个分段。
  */
-export function sectionGap(section: Pick<ExamSectionOut, "question_count" | "actual_count" | "question_type">): SectionGap {
+export function sectionGap(
+  section: Pick<ExamSectionOut, "question_count" | "actual_count" | "question_type">,
+): SectionGap {
   const planned = section.question_count;
   const actual = section.actual_count;
   const diff = actual - planned;
@@ -141,7 +145,9 @@ export function sectionGap(section: Pick<ExamSectionOut, "question_count" | "act
 }
 
 /** 整张卷有没有对不上的分段。 */
-export function hasSectionGap(sections: Pick<ExamSectionOut, "question_count" | "actual_count">[]): boolean {
+export function hasSectionGap(
+  sections: Pick<ExamSectionOut, "question_count" | "actual_count">[],
+): boolean {
   return sections.some((s) => s.question_count !== s.actual_count);
 }
 
@@ -231,7 +237,9 @@ export function validateGuidance(code: string): ValidateGuidance {
  * `need / got / missing` 三个数字光摆出来，用户得自己算"到底差多少"；
  * 直接说"共缺 73 道"（并把最大的那条点名）才有用。
  */
-export function shortfallSummary(gaps: { need: number; got: number; missing: number; rule_label: string }[]): string {
+export function shortfallSummary(
+  gaps: { need: number; got: number; missing: number; rule_label: string }[],
+): string {
   if (!gaps.length) return "没有缺口";
   const totalMissing = gaps.reduce((s, g) => s + g.missing, 0);
   const worst = [...gaps].sort((a, b) => b.missing - a.missing)[0];

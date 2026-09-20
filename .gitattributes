@@ -1,0 +1,36 @@
+# 行尾与二进制识别 —— 门禁整顿第二步（Commit B）引入。
+#
+# ## 为什么需要它
+#
+# 本机 `core.autocrlf=true`：检出时把文本转成 CRLF、提交时转回 LF。
+# 于是"**工作区是 CRLF、index 是 LF**"——格式化器、diff 工具在这种混合状态下
+# 容易把「只改了一行」看成「整个文件都变了」，diff 直接失去可读性。
+#
+# 写死 `eol=lf` 之后，三处（index / 工作区 / CI）统一为 LF，行为一致。
+#
+# ## 现状核对（2026-09-20，加本文件之前）
+#
+#     git ls-files --eol  →  208 个文本文件全部 i/lf，0 个 i/crlf
+#
+# 也就是说 **index 里本来就是 LF** —— 本文件不会产生任何 renormalize 差异，
+# 它只是把这个事实**固定下来**，防止将来某台机器/某个工具把它改回去。
+#
+# 改动前的自检：`git add --renormalize .` 之后 `git status` 应当**没有新增改动**。
+
+* text=auto eol=lf
+
+# ---- 二进制：显式声明 ----
+#
+# `text=auto` 靠"内容里有 NUL 字节"来判定二进制，对现代格式（尤其体积小的 PNG/ICO）
+# 并不总是可靠；显式写死更稳，也避免被上面的 eol 规则误伤。
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+*.pdf   binary

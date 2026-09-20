@@ -107,7 +107,9 @@ export function RollbackDialog({
                       <li>· 新增 {inserts} 道 → 软删除（`is_deleted=true`，数据仍在库里可追溯）</li>
                       {updates > 0 ? <li>· 更新 {updates} 道 → 版本回退到导入前那一版</li> : null}
                       {(batch.duplicate_rows ?? 0) > 0 ? (
-                        <li>· 跳过 {batch.duplicate_rows} 道重复题 → 本就不属于本批写入，不受影响</li>
+                        <li>
+                          · 跳过 {batch.duplicate_rows} 道重复题 → 本就不属于本批写入，不受影响
+                        </li>
                       ) : null}
                     </ul>
                   </div>
@@ -134,7 +136,8 @@ export function RollbackDialog({
 
                   <div className="space-y-1.5">
                     <Label htmlFor="rb-batchno" className="text-xs">
-                      请输入批次号 <code className="yj-json text-foreground">{expected}</code> 以确认
+                      请输入批次号 <code className="yj-json text-foreground">{expected}</code>{" "}
+                      以确认
                     </Label>
                     <Input
                       id="rb-batchno"

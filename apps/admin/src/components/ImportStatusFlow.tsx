@@ -42,7 +42,10 @@ export function ImportStatusFlow({ batch, compact = false }: Props) {
       {!compact ? (
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">状态流转</span>
-          <Badge variant={importStatusVariant(batch.status)} className="whitespace-nowrap text-[10px]">
+          <Badge
+            variant={importStatusVariant(batch.status)}
+            className="whitespace-nowrap text-[10px]"
+          >
             {importStatusLabel(batch.status)}
           </Badge>
           <span className="yj-json text-[11px] text-muted-foreground">status = {batch.status}</span>

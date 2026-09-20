@@ -62,10 +62,13 @@ async def write_audit(
         )
         await db.flush()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("写审计日志失败 action=%s entity=%s/%s: %s", action, entity_type, entity_id, exc)
+        logger.warning(
+            "写审计日志失败 action=%s entity=%s/%s: %s", action, entity_type, entity_id, exc
+        )
 
 
 # ---------------------------------------------------------------- 查询
+
 
 def _to_item(row: AuditLog) -> AuditLogItem:
     """ORM → 出参。
@@ -159,15 +162,19 @@ async def query_audit_logs(
 
     order_col = AuditLog.created_at.asc() if order == "asc" else AuditLog.created_at.desc()
     rows = (
-        await db.execute(
-            select(AuditLog)
-            .where(*conds)
-            # 同一毫秒内的顺序不稳定，用 id 兜底保证分页不重不漏
-            .order_by(order_col, AuditLog.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+        (
+            await db.execute(
+                select(AuditLog)
+                .where(*conds)
+                # 同一毫秒内的顺序不稳定，用 id 兜底保证分页不重不漏
+                .order_by(order_col, AuditLog.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     return [_to_item(r) for r in rows], total
 
@@ -177,16 +184,20 @@ async def recent_audits_for_user(
 ) -> list[AuditLogItem]:
     """某用户相关的最近 N 条审计：**他操作的** + **他被操作的**。"""
     rows = (
-        await db.execute(
-            select(AuditLog)
-            .where(
-                or_(
-                    AuditLog.actor_id == user_id,
-                    and_(AuditLog.entity_type == "user", AuditLog.entity_id == user_id),
+        (
+            await db.execute(
+                select(AuditLog)
+                .where(
+                    or_(
+                        AuditLog.actor_id == user_id,
+                        and_(AuditLog.entity_type == "user", AuditLog.entity_id == user_id),
+                    )
                 )
+                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                .limit(limit)
             )
-            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-            .limit(limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [_to_item(r) for r in rows]

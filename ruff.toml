@@ -19,11 +19,23 @@
 
 target-version = "py312"
 
+# ---- 行宽（`ruff format` 用；`E501` 仍然没开）----
+#
+# **100 而不是默认的 88** —— 依据是**实测现有代码的分布**，不是偏好：
+#
+#     apps/api 共 17623 行  →  p95=83  p99=97  max=217
+#     超过 88 列：516 行（2.9%）   超过 100 列：86 行（0.5%）
+#
+# 取 100 意味着 ruff 只需要碰 0.5% 的行；取默认 88 会多动 2.9%。
+# **格式化的第一原则是"别让 diff 里混进样式噪音"**，所以贴着现有宽度选。
+# （前端 prettier 同样取 100，两边口径一致。）
+line-length = 100
+
 # 虚拟环境 / 构建产物 / 缓存不进（它们本来也在 .gitignore 里，
 # 但显式列出来才不会因为"某天仓库里多了个 .venv"而突然刷屏）。
 # ⚠️ `extend-exclude` 是**顶层**键（文件发现阶段用），不在 `[lint]` 下 ——
 # 放错位置会让 ruff 直接报 `unknown field` 并退出码 2（实测踩到）。
-extend-exclude = [".venv", "venv", "__pycache__", ".ruff_cache"]
+extend-exclude = [".venv", "venv", "__pycache__", ".ruff_cache", "node_modules", ".next", "data"]
 
 [lint]
 select = ["E4", "E7", "E9", "F"]

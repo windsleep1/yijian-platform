@@ -97,9 +97,7 @@ export default function AuditLogsPage() {
       key: "created_at",
       title: "时间",
       headClassName: "w-[190px]",
-      render: (a) => (
-        <span className="yj-json text-xs">{formatDateTime(a.created_at)}</span>
-      ),
+      render: (a) => <span className="yj-json text-xs">{formatDateTime(a.created_at)}</span>,
     },
     {
       key: "action",
@@ -192,7 +190,9 @@ export default function AuditLogsPage() {
             <Input
               id="f-actor"
               value={draft.actor_id}
-              onChange={(e) => setDraft({ ...draft, actor_id: e.target.value.replace(/[^\d]/g, "") })}
+              onChange={(e) =>
+                setDraft({ ...draft, actor_id: e.target.value.replace(/[^\d]/g, "") })
+              }
               placeholder="精确匹配，如 375228939615866880"
               className="yj-json h-9 text-xs"
             />
@@ -224,7 +224,9 @@ export default function AuditLogsPage() {
             <Input
               id="f-entity-id"
               value={draft.entity_id}
-              onChange={(e) => setDraft({ ...draft, entity_id: e.target.value.replace(/[^\d]/g, "") })}
+              onChange={(e) =>
+                setDraft({ ...draft, entity_id: e.target.value.replace(/[^\d]/g, "") })
+              }
               placeholder="精确匹配"
               className="yj-json h-9 text-xs"
             />

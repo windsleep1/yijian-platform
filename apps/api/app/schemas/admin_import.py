@@ -104,7 +104,9 @@ class ErrorReport(BaseModel):
 class ImportUploadMeta(BaseModel):
     """上传接口除文件外的元信息（multipart 的 Form 字段）。"""
 
-    subject_id: int | None = Field(None, description="批次所属科目 ID（可与文件内 subject_code 并存）")
+    subject_id: int | None = Field(
+        None, description="批次所属科目 ID（可与文件内 subject_code 并存）"
+    )
     source_type: str = Field("self", description="批次默认来源类型，行内未填时兜底")
     license_note: str | None = Field(None, max_length=500, description="授权/来源说明，写入批次")
     mode: ImportMode = Field("insert", description="insert=跳过重复；upsert=更新已存在")

@@ -217,10 +217,14 @@ async def _assert_subject_usable(db: AsyncSession, subject_id: int) -> None:
     `exam_sections` / `exam_questions` 都没有。查表结构请以 `db/schema.sql` 为准。）
     """
     row = (
-        await db.execute(
-            text("SELECT name, status FROM subjects WHERE id = :sid"), {"sid": subject_id}
+        (
+            await db.execute(
+                text("SELECT name, status FROM subjects WHERE id = :sid"), {"sid": subject_id}
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if row is None:
         raise errors.bad_request("科目不存在", 40001)
     if row["status"] != "on":
@@ -295,18 +299,20 @@ async def list_paper_rules(
         params["rule_type"] = rule_type
 
     where_sql = " AND ".join(where)
-    total = await db.scalar(
-        text(f"SELECT count(*) FROM paper_rules r WHERE {where_sql}"), params
-    )
+    total = await db.scalar(text(f"SELECT count(*) FROM paper_rules r WHERE {where_sql}"), params)
     rows = (
-        await db.execute(
-            text(
-                f"{_RULE_SELECT} WHERE {where_sql} "
-                "ORDER BY r.updated_at DESC, r.id DESC LIMIT :limit OFFSET :offset"
-            ),
-            {**params, "limit": page_size, "offset": (page - 1) * page_size},
+        (
+            await db.execute(
+                text(
+                    f"{_RULE_SELECT} WHERE {where_sql} "
+                    "ORDER BY r.updated_at DESC, r.id DESC LIMIT :limit OFFSET :offset"
+                ),
+                {**params, "limit": page_size, "offset": (page - 1) * page_size},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [_rule_out(r, viewer) for r in rows], int(total or 0)
 
 
@@ -338,16 +344,26 @@ async def create_paper_rule(
             "VALUES (:id, :name, :sid, :type, :dur, CAST(:rules AS jsonb), :strategy, 'on', :by)"
         ),
         {
-            "id": rid, "name": payload.name, "sid": payload.subject_id, "type": payload.type,
+            "id": rid,
+            "name": payload.name,
+            "sid": payload.subject_id,
+            "type": payload.type,
             "dur": payload.duration_min,
             "rules": _json([r.model_dump() for r in payload.rules]),
-            "strategy": payload.strategy, "by": actor.id,
+            "strategy": payload.strategy,
+            "by": actor.id,
         },
     )
     await _write_change_log(
-        db, entity_type="paper_rule", entity_id=rid, action="create",
-        actor_id=actor.id, ip=ip, change_log=f"新建组卷规则「{payload.name}」",
-        before=None, after={"name": payload.name, "rules": [r.model_dump() for r in payload.rules]},
+        db,
+        entity_type="paper_rule",
+        entity_id=rid,
+        action="create",
+        actor_id=actor.id,
+        ip=ip,
+        change_log=f"新建组卷规则「{payload.name}」",
+        before=None,
+        after={"name": payload.name, "rules": [r.model_dump() for r in payload.rules]},
     )
     await db.commit()
     row = await _load_rule_row(db, rid)
@@ -390,7 +406,9 @@ async def update_paper_rule(
         new_rules = [r.model_dump() for r in payload.rules]
         sets.append("rules = CAST(:rules AS jsonb)")
         params["rules"] = _json(new_rules)
-        before["rules"] = row["rules"] if isinstance(row["rules"], list) else json.loads(row["rules"])
+        before["rules"] = (
+            row["rules"] if isinstance(row["rules"], list) else json.loads(row["rules"])
+        )
         after["rules"] = new_rules
     if payload.strategy is not None:
         _set("strategy", "strategy", payload.strategy, row["strategy"])
@@ -403,9 +421,15 @@ async def update_paper_rule(
     sets.append("updated_at = now()")
     await db.execute(text(f"UPDATE paper_rules SET {', '.join(sets)} WHERE id = :rid"), params)
     await _write_change_log(
-        db, entity_type="paper_rule", entity_id=rule_id, action="update",
-        actor_id=actor.id, ip=ip, change_log=f"编辑组卷规则「{after.get('name', row['name'])}」",
-        before=before, after=after,
+        db,
+        entity_type="paper_rule",
+        entity_id=rule_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
+        change_log=f"编辑组卷规则「{after.get('name', row['name'])}」",
+        before=before,
+        after=after,
     )
     await db.commit()
     return _rule_out(await _load_rule_row(db, rule_id), actor)
@@ -424,9 +448,15 @@ async def delete_paper_rule(
     _ensure_subject_visible(actor, int(row["subject_id"]), "规则所属科目")
     await db.execute(text("DELETE FROM paper_rules WHERE id = :rid"), {"rid": rule_id})
     await _write_change_log(
-        db, entity_type="paper_rule", entity_id=rule_id, action="delete",
-        actor_id=actor.id, ip=ip, change_log=f"删除组卷规则「{row['name']}」（硬删除）",
-        before={"name": row["name"], "rules": row["rules"]}, after=None,
+        db,
+        entity_type="paper_rule",
+        entity_id=rule_id,
+        action="delete",
+        actor_id=actor.id,
+        ip=ip,
+        change_log=f"删除组卷规则「{row['name']}」（硬删除）",
+        before={"name": row["name"], "rules": row["rules"]},
+        after=None,
     )
     await db.commit()
     return PaperRuleDeleteOut(
@@ -512,14 +542,18 @@ async def list_exams(
     where_sql = " AND ".join(where)
     total = await db.scalar(text(f"SELECT count(*) FROM exams e WHERE {where_sql}"), params)
     rows = (
-        await db.execute(
-            text(
-                f"{_EXAM_SELECT} WHERE {where_sql} "
-                "ORDER BY e.updated_at DESC, e.id DESC LIMIT :limit OFFSET :offset"
-            ),
-            {**params, "limit": page_size, "offset": (page - 1) * page_size},
+        (
+            await db.execute(
+                text(
+                    f"{_EXAM_SELECT} WHERE {where_sql} "
+                    "ORDER BY e.updated_at DESC, e.id DESC LIMIT :limit OFFSET :offset"
+                ),
+                {**params, "limit": page_size, "offset": (page - 1) * page_size},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [_exam_item(r) for r in rows], int(total or 0)
 
 
@@ -550,7 +584,9 @@ async def create_exam(
 
     exam_id = next_id()
     total_planned = sum(s.question_count for s in payload.sections)
-    score_planned = round(sum(_section_score(s.question_count, s.score_per) for s in payload.sections), 2)
+    score_planned = round(
+        sum(_section_score(s.question_count, s.score_per) for s in payload.sections), 2
+    )
     has_subjective = any(s.question_type not in OBJECTIVE_TYPES for s in payload.sections)
 
     await db.execute(
@@ -562,28 +598,47 @@ async def create_exam(
             "  :subj, :intro, CAST('{}' AS jsonb), :free, 'draft', :by)"
         ),
         {
-            "id": exam_id, "sid": payload.subject_id, "prof": payload.professional,
-            "title": payload.title, "type": payload.type, "year": payload.exam_year,
-            "paper_no": payload.paper_no, "pass": payload.pass_score,
-            "dur": payload.duration_min, "subj": has_subjective,
-            "intro": payload.intro_html, "free": payload.is_free, "by": actor.id,
+            "id": exam_id,
+            "sid": payload.subject_id,
+            "prof": payload.professional,
+            "title": payload.title,
+            "type": payload.type,
+            "year": payload.exam_year,
+            "paper_no": payload.paper_no,
+            "pass": payload.pass_score,
+            "dur": payload.duration_min,
+            "subj": has_subjective,
+            "intro": payload.intro_html,
+            "free": payload.is_free,
+            "by": actor.id,
         },
     )
     for idx, s in enumerate(sorted(payload.sections, key=lambda x: x.sort_no) or []):
         await _insert_section(db, exam_id, seq=idx + 1, section=s)
 
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="create",
-        actor_id=actor.id, ip=ip, change_log=f"新建试卷「{payload.title}」",
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="create",
+        actor_id=actor.id,
+        ip=ip,
+        change_log=f"新建试卷「{payload.title}」",
         before=None,
-        after={"title": payload.title, "subject_id": payload.subject_id,
-               "sections": total_planned, "planned_score": score_planned},
+        after={
+            "title": payload.title,
+            "subject_id": payload.subject_id,
+            "sections": total_planned,
+            "planned_score": score_planned,
+        },
     )
     await db.commit()
     return await get_exam_detail(db, exam_id=exam_id, viewer=actor)
 
 
-async def _insert_section(db: AsyncSession, exam_id: int, *, seq: int, section: ExamSectionIn) -> int:
+async def _insert_section(
+    db: AsyncSession, exam_id: int, *, seq: int, section: ExamSectionIn
+) -> int:
     sid = next_id()
     await db.execute(
         text(
@@ -592,9 +647,12 @@ async def _insert_section(db: AsyncSession, exam_id: int, *, seq: int, section: 
             "VALUES (:id, :eid, :seq, :name, :qt, :cnt, :sp, :ss, :sort)"
         ),
         {
-            "id": sid, "eid": exam_id, "seq": seq,
+            "id": sid,
+            "eid": exam_id,
+            "seq": seq,
             "name": section.name or TYPE_LABELS.get(section.question_type, section.question_type),
-            "qt": section.question_type, "cnt": section.question_count,
+            "qt": section.question_type,
+            "cnt": section.question_count,
             "sp": section.score_per,
             "ss": _section_score(section.question_count, section.score_per),
             "sort": section.sort_no,
@@ -658,9 +716,15 @@ async def update_exam(
         await db.execute(text(f"UPDATE exams SET {', '.join(sets)} WHERE id = :eid"), params)
 
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="update",
-        actor_id=actor.id, ip=ip, change_log=f"编辑试卷「{after.get('title', row['title'])}」",
-        before=before, after=after,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
+        change_log=f"编辑试卷「{after.get('title', row['title'])}」",
+        before=before,
+        after=after,
     )
     await db.commit()
     return await get_exam_detail(db, exam_id=exam_id, viewer=actor)
@@ -671,21 +735,25 @@ async def update_exam(
 
 async def _load_sections(db: AsyncSession, exam_id: int) -> list[Any]:
     return (
-        await db.execute(
-            text(
-                "SELECT s.id, s.seq, s.name, s.question_type, s.question_count, s.score_per, "
-                "       s.section_score, s.sort_no, "
-                "       COALESCE(x.cnt, 0) AS actual_count, COALESCE(x.sc, 0) AS actual_score "
-                "FROM exam_sections s "
-                "LEFT JOIN (SELECT section_id, count(*) cnt, COALESCE(sum(score),0) sc "
-                "             FROM exam_questions WHERE exam_id = :eid GROUP BY section_id) x "
-                "       ON x.section_id = s.id "
-                "WHERE s.exam_id = :eid "
-                "ORDER BY s.sort_no, s.seq"
-            ),
-            {"eid": exam_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT s.id, s.seq, s.name, s.question_type, s.question_count, s.score_per, "
+                    "       s.section_score, s.sort_no, "
+                    "       COALESCE(x.cnt, 0) AS actual_count, COALESCE(x.sc, 0) AS actual_score "
+                    "FROM exam_sections s "
+                    "LEFT JOIN (SELECT section_id, count(*) cnt, COALESCE(sum(score),0) sc "
+                    "             FROM exam_questions WHERE exam_id = :eid GROUP BY section_id) x "
+                    "       ON x.section_id = s.id "
+                    "WHERE s.exam_id = :eid "
+                    "ORDER BY s.sort_no, s.seq"
+                ),
+                {"eid": exam_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
 
 async def _load_exam_questions(db: AsyncSession, exam_id: int) -> list[Any]:
@@ -695,20 +763,24 @@ async def _load_exam_questions(db: AsyncSession, exam_id: int) -> list[Any]:
     该列为 NULL 时由 `_question_locks()` 回退到 `rule_config.question_locks`。
     """
     return (
-        await db.execute(
-            text(
-                "SELECT eq.id, eq.section_id, eq.question_id, eq.seq, eq.score, "
-                "       eq.locked_version, "
-                "       q.type AS question_type, q.stem, q.difficulty, q.chapter_id, "
-                "       q.version AS current_version, q.is_deleted, q.status AS q_status "
-                "FROM exam_questions eq "
-                "JOIN questions q ON q.id = eq.question_id "
-                "WHERE eq.exam_id = :eid "
-                "ORDER BY eq.seq, eq.id"
-            ),
-            {"eid": exam_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT eq.id, eq.section_id, eq.question_id, eq.seq, eq.score, "
+                    "       eq.locked_version, "
+                    "       q.type AS question_type, q.stem, q.difficulty, q.chapter_id, "
+                    "       q.version AS current_version, q.is_deleted, q.status AS q_status "
+                    "FROM exam_questions eq "
+                    "JOIN questions q ON q.id = eq.question_id "
+                    "WHERE eq.exam_id = :eid "
+                    "ORDER BY eq.seq, eq.id"
+                ),
+                {"eid": exam_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
 
 def _question_locks(qrows: Sequence[Any], rc: dict[str, Any]) -> dict[str, int]:
@@ -732,23 +804,31 @@ def _question_locks(qrows: Sequence[Any], rc: dict[str, Any]) -> dict[str, int]:
     return out
 
 
-async def _load_locked_snapshots(db: AsyncSession, pairs: Sequence[tuple[int, int]]) -> dict[tuple[int, int], dict]:
+async def _load_locked_snapshots(
+    db: AsyncSession, pairs: Sequence[tuple[int, int]]
+) -> dict[tuple[int, int], dict]:
     """批量取锁定版本快照。`pairs` = [(question_id, version), ...]。"""
     if not pairs:
         return {}
     qids = sorted({p[0] for p in pairs})
     rows = (
-        await db.execute(
-            text(
-                "SELECT question_id, version, snapshot FROM question_versions "
-                "WHERE question_id = ANY(CAST(:qids AS bigint[]))"
-            ),
-            {"qids": qids},
+        (
+            await db.execute(
+                text(
+                    "SELECT question_id, version, snapshot FROM question_versions "
+                    "WHERE question_id = ANY(CAST(:qids AS bigint[]))"
+                ),
+                {"qids": qids},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return {
         (int(r["question_id"]), int(r["version"])): (
-            json.loads(r["snapshot"]) if isinstance(r["snapshot"], str) else dict(r["snapshot"] or {})
+            json.loads(r["snapshot"])
+            if isinstance(r["snapshot"], str)
+            else dict(r["snapshot"] or {})
         )
         for r in rows
     }
@@ -819,10 +899,15 @@ async def get_exam_detail(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer
 
     sections = [
         ExamSectionDetail(
-            id=int(s["id"]), seq=int(s["seq"]), name=s["name"],
-            question_type=s["question_type"], question_count=int(s["question_count"]),
-            score_per=float(s["score_per"]), section_score=float(s["section_score"]),
-            sort_no=int(s["sort_no"]), actual_count=int(s["actual_count"]),
+            id=int(s["id"]),
+            seq=int(s["seq"]),
+            name=s["name"],
+            question_type=s["question_type"],
+            question_count=int(s["question_count"]),
+            score_per=float(s["score_per"]),
+            section_score=float(s["section_score"]),
+            sort_no=int(s["sort_no"]),
+            actual_count=int(s["actual_count"]),
             actual_score=float(s["actual_score"]),
             questions=by_section.get(int(s["id"]), []),
         )
@@ -910,8 +995,12 @@ async def replace_exam_sections(
     await _refresh_exam_totals(db, exam_id)
 
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="update",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
         change_log=(
             f"重建卷面结构：{len(payload.sections)} 个分段、计划 {planned} 道题"
             + (f"，清空原有 {current} 道卷面题" if current else "")
@@ -1098,7 +1187,9 @@ async def _resolve_rules(
     if payload.rule_id is not None:
         rule_row = await _load_rule_row(db, payload.rule_id)
         if rule_row["status"] != "on":
-            raise errors.bad_request("该组卷规则已停用（status=off），请先启用或改用内联规则", 40001)
+            raise errors.bad_request(
+                "该组卷规则已停用（status=off），请先启用或改用内联规则", 40001
+            )
         raw = rule_row["rules"]
         if isinstance(raw, str):
             raw = json.loads(raw)
@@ -1152,7 +1243,9 @@ async def _draw_rule(
         )
         step_counts[stage] = len(rows)
         if len(rows) >= rule.count:
-            return weighted_sample(rows, rule.count, rng, prefer_unused=rule.prefer_unused), step_counts
+            return weighted_sample(
+                rows, rule.count, rng, prefer_unused=rule.prefer_unused
+            ), step_counts
         # 这一档不够：先记下它作为当前最好的候选，继续放宽
         picked_rows = rows
 
@@ -1231,12 +1324,13 @@ async def compose_exam(
         section_id: int | None = None
         if payload.apply_sections:
             section_id = await _insert_section(
-                db, exam_id,
+                db,
+                exam_id,
                 seq=idx + 1,
                 section=ExamSectionIn(
                     name=TYPE_LABELS.get(rule.type, rule.type),
                     question_type=rule.type,
-                    question_count=rule.count,          # ★ 计划题数（用于校验是否填满）
+                    question_count=rule.count,  # ★ 计划题数（用于校验是否填满）
                     score_per=rule.score,
                     sort_no=idx,
                 ),
@@ -1248,9 +1342,7 @@ async def compose_exam(
                 (
                     int(r["id"]),
                     rule,
-                    section_id
-                    if section_id is not None
-                    else _reserve_section(rule.type),
+                    section_id if section_id is not None else _reserve_section(rule.type),
                 )
             )
 
@@ -1264,8 +1356,12 @@ async def compose_exam(
                 "VALUES (:id, :eid, :sid, :qid, :seq, :score)"
             ),
             {
-                "id": next_id(), "eid": exam_id, "sid": sec_id,
-                "qid": question_id, "seq": seq, "score": rule.score,
+                "id": next_id(),
+                "eid": exam_id,
+                "sid": sec_id,
+                "qid": question_id,
+                "seq": seq,
+                "score": rule.score,
             },
         )
 
@@ -1295,23 +1391,30 @@ async def compose_exam(
         locked_at=None,
     )
     await db.execute(
-        text("UPDATE exams SET rule_config = CAST(:rc AS jsonb), updated_at = now() WHERE id = :eid"),
+        text(
+            "UPDATE exams SET rule_config = CAST(:rc AS jsonb), updated_at = now() WHERE id = :eid"
+        ),
         {"rc": _json(new_rc), "eid": exam_id},
     )
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="update",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
         change_log=f"自动组卷：写入 {len(chosen)} 题，缺口 {len(shortfalls)} 条",
         before=None,
-        after={"filled": len(chosen), "requested": sum(r.count for r in rules),
-               "shortfalls": shortfall_dump},
+        after={
+            "filled": len(chosen),
+            "requested": sum(r.count for r in rules),
+            "shortfalls": shortfall_dump,
+        },
     )
 
     # ---- 兜底：这次组卷把卷面题数砍掉太多？（坑 42）----
     # 放在 commit **之前**：一旦拦下，交易整体回滚，一行都没写。
-    await _assert_no_mass_question_loss(
-        db, exam_id, before=rows_before, action="这次组卷"
-    )
+    await _assert_no_mass_question_loss(db, exam_id, before=rows_before, action="这次组卷")
 
     await db.commit()
 
@@ -1342,10 +1445,15 @@ async def compose_exam(
 
 def _section_out(row: Any) -> ExamSectionOut:
     return ExamSectionOut(
-        id=int(row["id"]), seq=int(row["seq"]), name=row["name"],
-        question_type=row["question_type"], question_count=int(row["question_count"]),
-        score_per=float(row["score_per"]), section_score=float(row["section_score"]),
-        sort_no=int(row["sort_no"]), actual_count=int(row["actual_count"]),
+        id=int(row["id"]),
+        seq=int(row["seq"]),
+        name=row["name"],
+        question_type=row["question_type"],
+        question_count=int(row["question_count"]),
+        score_per=float(row["score_per"]),
+        section_score=float(row["section_score"]),
+        sort_no=int(row["sort_no"]),
+        actual_count=int(row["actual_count"]),
         actual_score=float(row["actual_score"]),
     )
 
@@ -1357,25 +1465,31 @@ async def _refresh_exam_totals(db: AsyncSession, exam_id: int) -> None:
     卷面缺题时，实际总分必须如实反映，否则就成了"账面上 100 分、实际 92 分"。
     """
     row = (
-        await db.execute(
-            text(
-                "SELECT count(*) AS cnt, COALESCE(sum(eq.score), 0) AS score, "
-                "       COALESCE(avg(q.difficulty), 0) AS diff, "
-                "       bool_or(q.type NOT IN ('single','multiple','judge')) AS subj "
-                "FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
-                "WHERE eq.exam_id = :eid"
-            ),
-            {"eid": exam_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT count(*) AS cnt, COALESCE(sum(eq.score), 0) AS score, "
+                    "       COALESCE(avg(q.difficulty), 0) AS diff, "
+                    "       bool_or(q.type NOT IN ('single','multiple','judge')) AS subj "
+                    "FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
+                    "WHERE eq.exam_id = :eid"
+                ),
+                {"eid": exam_id},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     await db.execute(
         text(
             "UPDATE exams SET question_count = :cnt, total_score = :score, "
             "  difficulty = :diff, has_subjective = :subj, updated_at = now() WHERE id = :eid"
         ),
         {
-            "cnt": int(row["cnt"] or 0), "score": round(float(row["score"] or 0), 2),
-            "diff": round(float(row["diff"] or 0), 1), "subj": bool(row["subj"]),
+            "cnt": int(row["cnt"] or 0),
+            "score": round(float(row["score"] or 0), 2),
+            "diff": round(float(row["diff"] or 0), 1),
+            "subj": bool(row["subj"]),
             "eid": exam_id,
         },
     )
@@ -1461,11 +1575,15 @@ async def preview_paper_rule(
     if sampled:
         ids = [int(r["id"]) for _, _, r in sampled]
         rows = (
-            await db.execute(
-                text("SELECT id, stem FROM questions WHERE id = ANY(CAST(:ids AS bigint[]))"),
-                {"ids": ids},
+            (
+                await db.execute(
+                    text("SELECT id, stem FROM questions WHERE id = ANY(CAST(:ids AS bigint[]))"),
+                    {"ids": ids},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         stems = {int(r["id"]): (r["stem"] or "") for r in rows}
 
     sample = [
@@ -1619,8 +1737,11 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
 
     if total_q == 0:
         errors_out.append(
-            ExamValidateIssue(level="error", code="NO_QUESTIONS",
-                              message="卷面一道题都没有。请先自动组卷或手工加题。")
+            ExamValidateIssue(
+                level="error",
+                code="NO_QUESTIONS",
+                message="卷面一道题都没有。请先自动组卷或手工加题。",
+            )
         )
 
     for s in sections:
@@ -1629,7 +1750,8 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
         if planned != actual:
             errors_out.append(
                 ExamValidateIssue(
-                    level="error", code="SECTION_NOT_FILLED",
+                    level="error",
+                    code="SECTION_NOT_FILLED",
                     message=(
                         f"分段「{s['name']}」计划 {planned} 道，实际 {actual} 道，"
                         f"差 {abs(planned - actual)} 道。请补齐题目，或把分段题数改成 {actual}。"
@@ -1640,7 +1762,8 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
         if abs(expect - float(s["section_score"])) > 0.01:
             errors_out.append(
                 ExamValidateIssue(
-                    level="error", code="SECTION_SCORE_MISMATCH",
+                    level="error",
+                    code="SECTION_SCORE_MISMATCH",
                     message=f"分段「{s['name']}」分值 {s['section_score']} ≠ 题数×每题分 {expect}。",
                 )
             )
@@ -1648,14 +1771,16 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
     if abs(float(row["total_score"] or 0) - total_score) > 0.01:
         errors_out.append(
             ExamValidateIssue(
-                level="error", code="TOTAL_SCORE_MISMATCH",
+                level="error",
+                code="TOTAL_SCORE_MISMATCH",
                 message=f"试卷登记总分 {row['total_score']} 与实际卷面题分之和 {total_score} 不一致。",
             )
         )
     if int(row["question_count"] or 0) != total_q:
         errors_out.append(
             ExamValidateIssue(
-                level="error", code="TOTAL_COUNT_MISMATCH",
+                level="error",
+                code="TOTAL_COUNT_MISMATCH",
                 message=f"试卷登记题量 {row['question_count']} 与实际 {total_q} 不一致。",
             )
         )
@@ -1663,24 +1788,27 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
     dup = [r["question_id"] for r in qrows]
     if len(dup) != len(set(dup)):
         errors_out.append(
-            ExamValidateIssue(level="error", code="DUPLICATE_QUESTION",
-                              message="同一道题在卷面出现了多次。")
+            ExamValidateIssue(
+                level="error", code="DUPLICATE_QUESTION", message="同一道题在卷面出现了多次。"
+            )
         )
 
     not_published = [r for r in qrows if r["q_status"] != "published"]
     if not_published:
         errors_out.append(
             ExamValidateIssue(
-                level="error", code="QUESTION_NOT_PUBLISHED",
+                level="error",
+                code="QUESTION_NOT_PUBLISHED",
                 message=f"有 {len(not_published)} 道题不是「已发布」状态（如草稿）。"
-                        "试卷只能使用已发布的题目。",
+                "试卷只能使用已发布的题目。",
             )
         )
     deleted = [r for r in qrows if r["is_deleted"]]
     if deleted:
         errors_out.append(
             ExamValidateIssue(
-                level="error", code="QUESTION_DELETED",
+                level="error",
+                code="QUESTION_DELETED",
                 message=f"有 {len(deleted)} 道题已被归档（软删除），需要替换。",
             )
         )
@@ -1690,27 +1818,31 @@ async def validate_exam(db: AsyncSession, *, exam_id: int, viewer: ScopeViewer) 
     if sf:
         warnings.append(
             ExamValidateIssue(
-                level="warning", code="COMPOSE_SHORTFALL",
+                level="warning",
+                code="COMPOSE_SHORTFALL",
                 message=f"上次组卷有 {len(sf)} 条规则没凑够题，卷面存在明确缺口（未自动顶替）。",
             )
         )
     if float(row["pass_score"] or 0) <= 0:
         warnings.append(
-            ExamValidateIssue(level="warning", code="NO_PASS_SCORE",
-                              message="未设置及格线（pass_score=0）。")
+            ExamValidateIssue(
+                level="warning", code="NO_PASS_SCORE", message="未设置及格线（pass_score=0）。"
+            )
         )
     locks = _question_locks(qrows, rc)
     drift = [
-        r for r in qrows
+        r
+        for r in qrows
         if str(int(r["question_id"])) in locks
         and int(locks[str(int(r["question_id"]))]) != int(r["current_version"])
     ]
     if drift:
         warnings.append(
             ExamValidateIssue(
-                level="warning", code="VERSION_DRIFT",
+                level="warning",
+                code="VERSION_DRIFT",
                 message=f"有 {len(drift)} 道题在发布后被修改过。试卷仍按**锁定版本**作答与展示"
-                        "（不影响已出成绩），如需同步最新内容请重新组卷。",
+                "（不影响已出成绩），如需同步最新内容请重新组卷。",
             )
         )
 
@@ -1792,10 +1924,15 @@ async def publish_exam(
         {"rc": _json(new_rc), "eid": exam_id},
     )
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="publish",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="publish",
+        actor_id=actor.id,
+        ip=ip,
         change_log=f"发布试卷，锁定 {len(locks)} 道题的版本",
-        before={"status": row["status"]}, after={"status": "published", "question_locks": locks},
+        before={"status": row["status"]},
+        after={"status": "published", "question_locks": locks},
     )
     await db.commit()
 
@@ -1875,10 +2012,15 @@ async def unpublish_exam(
         {"eid": exam_id},
     )
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="update",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
         change_log="下线试卷（published → off）",
-        before={"status": "published"}, after={"status": "off"},
+        before={"status": "published"},
+        after={"status": "off"},
     )
     await db.commit()
 
@@ -1932,8 +2074,12 @@ async def soft_delete_exam(
         {"eid": exam_id},
     )
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="delete",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="delete",
+        actor_id=actor.id,
+        ip=ip,
         change_log=f"归档试卷「{row['title']}」" + (f"：{reason}" if reason else ""),
         before={"is_deleted": False, "status": row["status"]},
         after={"is_deleted": True, "status": row["status"]},
@@ -1972,11 +2118,15 @@ async def _assert_exam_relations_ok(db: AsyncSession, row: Any) -> None:
     problems: list[str] = []
 
     sub = (
-        await db.execute(
-            text("SELECT name, status FROM subjects WHERE id = :sid"),
-            {"sid": int(row["subject_id"])},
+        (
+            await db.execute(
+                text("SELECT name, status FROM subjects WHERE id = :sid"),
+                {"sid": int(row["subject_id"])},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if sub is None:
         problems.append("试卷所属科目已不存在")
     elif sub["status"] != "on":
@@ -1993,8 +2143,7 @@ async def _assert_exam_relations_ok(db: AsyncSession, row: Any) -> None:
         )
         if n:
             problems.append(
-                f"这是一份**已发布**的卷，但卷面有 {int(n)} 道题已被归档"
-                "（考生会看到残缺的卷面）"
+                f"这是一份**已发布**的卷，但卷面有 {int(n)} 道题已被归档（考生会看到残缺的卷面）"
             )
 
     if problems:
@@ -2026,7 +2175,10 @@ async def restore_exam(
 
     if not row["is_deleted"]:
         return ExamRestoreOut(
-            id=exam_id, title=row["title"], is_deleted=False, status=row["status"],
+            id=exam_id,
+            title=row["title"],
+            is_deleted=False,
+            status=row["status"],
             already_active=True,
             message="试卷当前未被归档，无需恢复。",
         )
@@ -2038,8 +2190,12 @@ async def restore_exam(
         {"eid": exam_id},
     )
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="restore",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="restore",
+        actor_id=actor.id,
+        ip=ip,
         change_log=f"恢复试卷「{row['title']}」",
         before={"is_deleted": True, "status": row["status"]},
         after={"is_deleted": False, "status": row["status"]},
@@ -2047,7 +2203,10 @@ async def restore_exam(
     await db.commit()
 
     return ExamRestoreOut(
-        id=exam_id, title=row["title"], is_deleted=False, status=row["status"],
+        id=exam_id,
+        title=row["title"],
+        is_deleted=False,
+        status=row["status"],
         message=(
             f"试卷已恢复，状态仍是「{STATUS_LABELS.get(row['status'], row['status'])}」，"
             "现在会重新出现在默认列表里。"
@@ -2123,14 +2282,18 @@ async def add_exam_questions(
     wanted = list(dict.fromkeys(int(q) for q in payload.question_ids))
 
     rows = (
-        await db.execute(
-            text(
-                "SELECT id, subject_id, type, status, is_deleted FROM questions "
-                "WHERE id = ANY(CAST(:ids AS bigint[]))"
-            ),
-            {"ids": wanted},
+        (
+            await db.execute(
+                text(
+                    "SELECT id, subject_id, type, status, is_deleted FROM questions "
+                    "WHERE id = ANY(CAST(:ids AS bigint[]))"
+                ),
+                {"ids": wanted},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     info = {int(r["id"]): r for r in rows}
 
     existing = {
@@ -2140,7 +2303,9 @@ async def add_exam_questions(
                 text("SELECT question_id FROM exam_questions WHERE exam_id = :eid"),
                 {"eid": exam_id},
             )
-        ).mappings().all()
+        )
+        .mappings()
+        .all()
     }
     seq = int(
         await db.scalar(
@@ -2169,9 +2334,7 @@ async def add_exam_questions(
             )
             continue
         if int(r["subject_id"]) != int(exam["subject_id"]):
-            skipped.append(
-                SkippedQuestion(question_id=qid, reason="题目不属于本试卷的科目")
-            )
+            skipped.append(SkippedQuestion(question_id=qid, reason="题目不属于本试卷的科目"))
             continue
         if qid in existing:
             skipped.append(SkippedQuestion(question_id=qid, reason="该题已在卷面中"))
@@ -2203,8 +2366,12 @@ async def add_exam_questions(
 
     await _refresh_exam_totals(db, exam_id)
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="update",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
         change_log=f"手动加题：成功 {len(to_add)} 道，跳过 {len(skipped)} 道",
         before=None,
         after={
@@ -2259,13 +2426,17 @@ async def remove_exam_question(
     _assert_exam_mutable(exam, action="加题/移题")
 
     row = (
-        await db.execute(
-            text(
-                "SELECT id, question_id FROM exam_questions WHERE id = :eqid AND exam_id = :eid"
-            ),
-            {"eqid": exam_question_id, "eid": exam_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT id, question_id FROM exam_questions WHERE id = :eqid AND exam_id = :eid"
+                ),
+                {"eqid": exam_question_id, "eid": exam_id},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if row is None:
         raise errors.not_found("卷面题目不存在（可能已被移走）", 40401)
 
@@ -2278,8 +2449,12 @@ async def remove_exam_question(
     )
     await _refresh_exam_totals(db, exam_id)
     await _write_change_log(
-        db, entity_type="exam", entity_id=exam_id, action="update",
-        actor_id=actor.id, ip=ip,
+        db,
+        entity_type="exam",
+        entity_id=exam_id,
+        action="update",
+        actor_id=actor.id,
+        ip=ip,
         change_log=f"移出题目 {row['question_id']}",
         before={"exam_question_id": exam_question_id, "question_id": int(row["question_id"])},
         after=None,
@@ -2290,13 +2465,8 @@ async def remove_exam_question(
     fresh = await _load_exam_row(db, exam_id)
     sections_out = await _load_sections(db, exam_id)
     unfinished = [s for s in sections_out if int(s["actual_count"]) != int(s["question_count"])]
-    msg = (
-        f"已移出该题，卷面现有 {int(fresh['question_count'] or 0)} 题。"
-        + (
-            f"⚠️ 有 {len(unfinished)} 个分段的题数与计划不符，发布前会被校验拦住。"
-            if unfinished
-            else ""
-        )
+    msg = f"已移出该题，卷面现有 {int(fresh['question_count'] or 0)} 题。" + (
+        f"⚠️ 有 {len(unfinished)} 个分段的题数与计划不符，发布前会被校验拦住。" if unfinished else ""
     )
     return ExamRemoveQuestionOut(
         exam_id=exam_id,
@@ -2336,9 +2506,14 @@ async def _write_change_log(
             "VALUES (:id, :etype, :eid, :action, NULL, CAST(:diff AS jsonb), :cl, :op, :ip)"
         ),
         {
-            "id": next_id(), "etype": entity_type, "eid": entity_id, "action": action,
+            "id": next_id(),
+            "etype": entity_type,
+            "eid": entity_id,
+            "action": action,
             "diff": _json({"before": before, "after": after}),
-            "cl": (change_log or "")[:500], "op": actor_id, "ip": to_inet(ip),
+            "cl": (change_log or "")[:500],
+            "op": actor_id,
+            "ip": to_inet(ip),
         },
     )
 

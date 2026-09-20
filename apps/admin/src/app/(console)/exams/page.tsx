@@ -22,16 +22,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  useArchiveExam,
-  useExams,
-  useRestoreExam,
-} from "@/hooks/useExams";
+import { useArchiveExam, useExams, useRestoreExam } from "@/hooks/useExams";
 import { useRowActionFeedback } from "@/hooks/useRowActionFeedback";
 import { useChapterTree } from "@/hooks/useQuestions";
 import { useTableState } from "@/hooks/useTableState";
 import { useAuth } from "@/lib/auth-context";
-import { EXAM_STATUS_LABELS, EXAM_TYPE_LABELS, examStatusLabel, examStatusVariant, examTypeLabel } from "@/lib/exam";
+import {
+  EXAM_STATUS_LABELS,
+  EXAM_TYPE_LABELS,
+  examStatusLabel,
+  examStatusVariant,
+  examTypeLabel,
+} from "@/lib/exam";
 import { formatDateMinute } from "@/lib/format";
 import { P } from "@/lib/permission";
 import type { ExamListItem, ExamStatus, ExamType } from "@/lib/types";
@@ -367,7 +369,10 @@ export default function ExamsPage() {
             </SelectContent>
           </Select>
 
-          <Select value={state.type || ANY} onValueChange={(v) => setState({ type: v === ANY ? "" : v })}>
+          <Select
+            value={state.type || ANY}
+            onValueChange={(v) => setState({ type: v === ANY ? "" : v })}
+          >
             <SelectTrigger className="w-[132px]">
               <SelectValue placeholder="全部类型" />
             </SelectTrigger>
@@ -463,9 +468,13 @@ export default function ExamsPage() {
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
         <span>
           排序：
-          {sort ? `${ORDER_LABELS[sort.key] ?? sort.key} ${sort.order === "asc" ? "升序" : "降序"}` : "—"}
+          {sort
+            ? `${ORDER_LABELS[sort.key] ?? sort.key} ${sort.order === "asc" ? "升序" : "降序"}`
+            : "—"}
         </span>
-        <span>每页 {pageSize} 条 · 本页 {rows.length} 条</span>
+        <span>
+          每页 {pageSize} 条 · 本页 {rows.length} 条
+        </span>
         <span className={cn(includeDeleted && "text-amber-700")}>
           {includeDeleted ? "范围：含已归档试卷" : "范围：仅未归档试卷"}
         </span>
@@ -533,8 +542,7 @@ export default function ExamsPage() {
         description={
           <div className="space-y-2 text-sm">
             <p>
-              将把这份试卷<strong>从归档状态恢复</strong>，
-              它立刻重新出现在默认列表里。
+              将把这份试卷<strong>从归档状态恢复</strong>， 它立刻重新出现在默认列表里。
             </p>
             <p className="text-xs text-muted-foreground">
               恢复<strong>不会改变试卷状态</strong>
@@ -542,8 +550,8 @@ export default function ExamsPage() {
               ，也不会改动任何题目。
             </p>
             <p className="text-xs text-muted-foreground">
-              恢复后本行会先标记「已恢复」，3 秒后从当前视图移除；点 toast 里的
-              [查看] 可以跳到默认列表。
+              恢复后本行会先标记「已恢复」，3 秒后从当前视图移除；点 toast 里的 [查看]
+              可以跳到默认列表。
             </p>
           </div>
         }
@@ -561,9 +569,7 @@ export default function ExamsPage() {
             action: () => restore.mutateAsync({ id: target.id }),
             successToast: (res) => ({
               title: `已恢复「${target.title}」`,
-              description: res.already_active
-                ? "这份卷本来就没有被归档。"
-                : res.message,
+              description: res.already_active ? "这份卷本来就没有被归档。" : res.message,
               actionLabel: "查看默认列表",
               onAction: () => router.push("/exams"),
             }),

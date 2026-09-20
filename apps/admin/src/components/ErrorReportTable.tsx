@@ -13,11 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  downloadTextFile,
-  errorReportFilename,
-  errorsToCsv,
-} from "@/lib/import";
+import { downloadTextFile, errorReportFilename, errorsToCsv } from "@/lib/import";
 import type { RowError } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -135,7 +131,9 @@ export function ErrorReportTable({
                         <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
                       )}
                     </TableCell>
-                    <TableCell className="yj-json py-2 text-xs font-medium">第 {e.row_no} 行</TableCell>
+                    <TableCell className="yj-json py-2 text-xs font-medium">
+                      第 {e.row_no} 行
+                    </TableCell>
                     <TableCell className="py-2">
                       <code className="rounded bg-muted px-1.5 py-0.5 text-[11px]">{e.field}</code>
                     </TableCell>

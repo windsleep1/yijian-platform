@@ -33,8 +33,7 @@
 const ACCESS_KEY = "yj_access_token";
 const REFRESH_KEY = "yj_refresh_token";
 
-export const AUTH_HINT_COOKIE =
-  process.env.NEXT_PUBLIC_AUTH_HINT_COOKIE || "yj_authed";
+export const AUTH_HINT_COOKIE = process.env.NEXT_PUBLIC_AUTH_HINT_COOKIE || "yj_authed";
 
 /** 当前用户信息不放 localStorage —— 由 AuthProvider 用 TanStack Query 持有，
  *  登录成功后直接把 `/auth/login` 返回的 user 灌进 query cache，无需二次落盘。 */

@@ -40,6 +40,7 @@ JS_MAX_SAFE_INT = 2**53 - 1
 
 # ================================================================ 工具
 
+
 def _q(*, subject_id: int, chapter_id: int | None = None, **over) -> dict:
     """构造一道**内容唯一**的单选题 payload。唯一的 tag 保证不会撞上 content_hash 去重。"""
     tag = uuid.uuid4().hex[:10]
@@ -109,6 +110,7 @@ def sz(client: httpx.Client, admin_h: dict[str, str]) -> tuple[int, int | None]:
 
 
 # ================================================================ 0. 纯函数（不依赖 API）
+
 
 def test_content_hash_and_answer_derivation() -> None:
     """去重指纹的归一化 + 答案由选项推导 —— 这是「多选答案必在选项里」的结构保证。"""
@@ -210,10 +212,13 @@ def test_new_modules_have_no_undefined_globals() -> None:
 
     for mod in (question_service, admin_question):
         missing = undefined_globals(mod)
-        assert not missing, f"{mod.__name__} 引用了未定义的全局名：{sorted(missing)}（多半是忘了 import）"
+        assert not missing, (
+            f"{mod.__name__} 引用了未定义的全局名：{sorted(missing)}（多半是忘了 import）"
+        )
 
 
 # ================================================================ 1. 章节树
+
 
 def test_chapter_tree_contract(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     sid, _ = sz
@@ -243,7 +248,9 @@ def test_chapter_tree_contract(client: httpx.Client, admin_h: dict[str, str], sz
     assert in_tree > 0, "章节题目数全为 0：疑似读到了未刷新的冗余列"
 
     lst = body(
-        client.get(f"{API}/admin/questions", headers=admin_h, params={"subject_id": sid, "page_size": 1})
+        client.get(
+            f"{API}/admin/questions", headers=admin_h, params={"subject_id": sid, "page_size": 1}
+        )
     )
     assert lst["code"] == 0
     assert in_tree <= lst["data"]["total"], (
@@ -253,9 +260,16 @@ def test_chapter_tree_contract(client: httpx.Client, admin_h: dict[str, str], sz
 
 # ================================================================ 2. 列表筛选 / 分页 / 排序
 
+
 def test_question_list_filter_and_sort(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     sid, _ = sz
-    params = {"subject_id": sid, "type": "single", "status": "published", "page": 1, "page_size": 20}
+    params = {
+        "subject_id": sid,
+        "type": "single",
+        "status": "published",
+        "page": 1,
+        "page_size": 20,
+    }
 
     b = body(client.get(f"{API}/admin/questions", headers=admin_h, params=params))
     assert b["code"] == 0, b
@@ -310,7 +324,10 @@ def test_question_list_filter_and_sort(client: httpx.Client, admin_h: dict[str, 
 
 # ================================================================ 3. 新建 + 回读
 
-def test_create_single_question_and_read_back(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+
+def test_create_single_question_and_read_back(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
     sid, cid = sz
     payload = _q(subject_id=sid, chapter_id=cid)
 
@@ -346,7 +363,9 @@ def test_create_single_question_and_read_back(client: httpx.Client, admin_h: dic
 
     # 列表里能立刻看到
     lst = body(
-        client.get(f"{API}/admin/questions", headers=admin_h, params={"keyword": payload["stem"][:20]})
+        client.get(
+            f"{API}/admin/questions", headers=admin_h, params={"keyword": payload["stem"][:20]}
+        )
     )
     assert lst["code"] == 0
     assert lst["data"]["total"] >= 1
@@ -356,7 +375,10 @@ def test_create_single_question_and_read_back(client: httpx.Client, admin_h: dic
 
 # ================================================================ 4. 新建校验 + 去重
 
-def test_create_validation_and_compliance_rules(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+
+def test_create_validation_and_compliance_rules(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
     sid, _ = sz
 
     def post(payload: dict) -> dict:
@@ -435,15 +457,24 @@ def test_duplicate_content_conflict(client: httpx.Client, admin_h: dict[str, str
 
 # ================================================================ 5. 编辑：乐观锁 + 版本历史
 
-def test_edit_optimistic_lock_and_history(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+
+def test_edit_optimistic_lock_and_history(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
     sid, cid = sz
-    created = body(client.post(f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)))[
-        "data"
-    ]
+    created = body(
+        client.post(
+            f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)
+        )
+    )["data"]
     qid, v1_stem = created["id"], created["stem"]
 
     # 过期 version 提交 → 40901（不静默覆盖）
-    stale = body(client.put(f"{API}/admin/questions/{qid}", headers=admin_h, json={"version": 99, "stem": "占位"}))
+    stale = body(
+        client.put(
+            f"{API}/admin/questions/{qid}", headers=admin_h, json={"version": 99, "stem": "占位"}
+        )
+    )
     assert stale["code"] == 40901, stale
 
     # 正确 version=1：改题干、难度，并把正确答案从 B 换成 C
@@ -484,40 +515,55 @@ def test_edit_optimistic_lock_and_history(client: httpx.Client, admin_h: dict[st
 
     # 再用过期 version=1 提交 → 40901
     stale2 = body(
-        client.put(f"{API}/admin/questions/{qid}", headers=admin_h, json={"version": 1, "stem": "过期提交"})
+        client.put(
+            f"{API}/admin/questions/{qid}", headers=admin_h, json={"version": 1, "stem": "过期提交"}
+        )
     )
     assert stale2["code"] == 40901, stale2
 
     # 不存在的题 → 40401
-    nf = client.put(f"{API}/admin/questions/999999999999999999", headers=admin_h, json={"version": 1})
+    nf = client.put(
+        f"{API}/admin/questions/999999999999999999", headers=admin_h, json={"version": 1}
+    )
     assert nf.status_code == 404 and body(nf)["code"] == 40401
 
 
 # ================================================================ 6. 软删除
 
+
 def test_soft_delete_single(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     sid, cid = sz
-    created = body(client.post(f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)))[
-        "data"
-    ]
+    created = body(
+        client.post(
+            f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)
+        )
+    )["data"]
     qid = created["id"]
     kw = {"keyword": created["stem"][:20]}
 
-    assert body(client.get(f"{API}/admin/questions", headers=admin_h, params=kw))["data"]["total"] >= 1
+    assert (
+        body(client.get(f"{API}/admin/questions", headers=admin_h, params=kw))["data"]["total"] >= 1
+    )
 
     dele = body(
-        client.delete(f"{API}/admin/questions/{qid}", headers=admin_h, params={"reason": "自动化用例软删除"})
+        client.delete(
+            f"{API}/admin/questions/{qid}", headers=admin_h, params={"reason": "自动化用例软删除"}
+        )
     )
     assert dele["code"] == 0, dele
     assert dele["data"]["is_deleted"] is True
     assert dele["data"]["version"] == 2, "软删除也推进版本号"
 
     # 默认列表隐藏
-    assert body(client.get(f"{API}/admin/questions", headers=admin_h, params=kw))["data"]["total"] == 0
+    assert (
+        body(client.get(f"{API}/admin/questions", headers=admin_h, params=kw))["data"]["total"] == 0
+    )
 
     # 「显示已归档」带出来
     shown = body(
-        client.get(f"{API}/admin/questions", headers=admin_h, params={**kw, "include_deleted": True})
+        client.get(
+            f"{API}/admin/questions", headers=admin_h, params={**kw, "include_deleted": True}
+        )
     )
     assert shown["data"]["total"] >= 1
     row = next(i for i in shown["data"]["items"] if i["id"] == qid)
@@ -529,7 +575,11 @@ def test_soft_delete_single(client: httpx.Client, admin_h: dict[str, str], sz) -
 
     # 已归档不可编辑
     assert (
-        body(client.put(f"{API}/admin/questions/{qid}", headers=admin_h, json={"version": 2, "stem": "想改"}))["code"]
+        body(
+            client.put(
+                f"{API}/admin/questions/{qid}", headers=admin_h, json={"version": 2, "stem": "想改"}
+            )
+        )["code"]
         == 40001
     )
 
@@ -541,12 +591,15 @@ def test_soft_delete_single(client: httpx.Client, admin_h: dict[str, str], sz) -
 
 # ================================================================ 7. 批量删除
 
+
 def test_batch_delete(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     sid, cid = sz
     ids = [
-        body(client.post(f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)))[
-            "data"
-        ]["id"]
+        body(
+            client.post(
+                f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)
+            )
+        )["data"]["id"]
         for _ in range(3)
     ]
     ghost = "999999999999999998"
@@ -592,11 +645,16 @@ def test_batch_delete(client: httpx.Client, admin_h: dict[str, str], sz) -> None
 
 # ================================================================ 8. 变更日志 / 版本快照（直连核对）
 
-def test_change_logs_and_version_snapshots_in_db(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+
+def test_change_logs_and_version_snapshots_in_db(
+    client: httpx.Client, admin_h: dict[str, str], sz
+) -> None:
     sid, cid = sz
-    created = body(client.post(f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)))[
-        "data"
-    ]
+    created = body(
+        client.post(
+            f"{API}/admin/questions", headers=admin_h, json=_q(subject_id=sid, chapter_id=cid)
+        )
+    )["data"]
     qid = int(created["id"])
 
     # 编辑一次，制造 update 日志
@@ -624,7 +682,8 @@ def test_change_logs_and_version_snapshots_in_db(client: httpx.Client, admin_h: 
     assert "analysis" in diff["after"] or "analysis" in diff["before"], diff
 
     vers = db_fetch(
-        "SELECT version, snapshot FROM question_versions WHERE question_id = $1 ORDER BY version", qid
+        "SELECT version, snapshot FROM question_versions WHERE question_id = $1 ORDER BY version",
+        qid,
     )
     assert [r["version"] for r in vers] == [1, 2]
     snap1 = vers[0]["snapshot"]
@@ -635,6 +694,7 @@ def test_change_logs_and_version_snapshots_in_db(client: httpx.Client, admin_h: 
 
 # ================================================================ 9. 权限墙
 
+
 def test_question_permission_wall(client: httpx.Client, sz) -> None:
     """student 角色没有任何 question:* 权限 → 读写全被拦（前端按钮 disabled 对应的后端那道墙）。"""
     sid, _ = sz
@@ -644,11 +704,20 @@ def test_question_permission_wall(client: httpx.Client, sz) -> None:
     assert body(client.get(f"{API}/admin/questions", headers=h))["code"] == 40301
     assert body(client.get(f"{API}/admin/questions/1", headers=h))["code"] == 40301
     assert body(client.get(f"{API}/admin/chapters/tree", headers=h))["code"] == 40301
-    assert body(client.post(f"{API}/admin/questions", headers=h, json=_q(subject_id=sid)))["code"] == 40301
-    assert body(client.put(f"{API}/admin/questions/1", headers=h, json={"version": 1}))["code"] == 40301
+    assert (
+        body(client.post(f"{API}/admin/questions", headers=h, json=_q(subject_id=sid)))["code"]
+        == 40301
+    )
+    assert (
+        body(client.put(f"{API}/admin/questions/1", headers=h, json={"version": 1}))["code"]
+        == 40301
+    )
     assert body(client.delete(f"{API}/admin/questions/1", headers=h))["code"] == 40301
     assert (
-        body(client.post(f"{API}/admin/questions/batch-delete", headers=h, json={"ids": [1]}))["code"] == 40301
+        body(client.post(f"{API}/admin/questions/batch-delete", headers=h, json={"ids": [1]}))[
+            "code"
+        ]
+        == 40301
     )
 
     # 无 Token → 401（40100 = 未携带凭据）
@@ -664,8 +733,8 @@ def test_question_permission_wall(client: httpx.Client, sz) -> None:
 # `question` 模块的 read/create/update/delete，八条入口它**全部打得通**，
 # 正是"越权"要测的那个面（viewer 连 `question:read` 都没有，测不出范围这件事）。
 
-SZ_SUBJECT_ID = 2007      # 市政实务
-JZ_SUBJECT_ID = 2001      # 建筑实务（越权对照）
+SZ_SUBJECT_ID = 2007  # 市政实务
+JZ_SUBJECT_ID = 2001  # 建筑实务（越权对照）
 
 
 def _scoped_headers(
@@ -679,8 +748,12 @@ def _scoped_headers(
     """造一个只挂单个科目范围的 researcher，返回认证头。"""
     u = fresh_user(client, nickname=nickname)
     ar = assign_roles(
-        client, admin_h, u["user"]["id"], ["researcher"],
-        scope_type=scope_type, scope_id=scope_id,
+        client,
+        admin_h,
+        u["user"]["id"],
+        ["researcher"],
+        scope_type=scope_type,
+        scope_id=scope_id,
     )
     assert ar["code"] == 0, ar
     return auth(u["access_token"])
@@ -690,7 +763,8 @@ def _exists(client: httpx.Client, admin_h: dict[str, str], tag: str) -> bool:
     """按内容里的唯一 tag 查这道题在不在（admin 视角，不受范围影响）。"""
     b = body(
         client.get(
-            f"{API}/admin/questions", headers=admin_h,
+            f"{API}/admin/questions",
+            headers=admin_h,
             params={"keyword": tag, "page_size": 5},
         )
     )
@@ -708,8 +782,11 @@ def _tag_of(payload: dict) -> str:
 
 
 def _make(
-    client: httpx.Client, admin_h: dict[str, str], *,
-    subject_id: int, chapter_id: int | None = None,
+    client: httpx.Client,
+    admin_h: dict[str, str],
+    *,
+    subject_id: int,
+    chapter_id: int | None = None,
 ) -> tuple[str, str]:
     """建一道题，返回 `(id, tag)`。tag 用来按内容定位，不依赖 id 之外的线索。"""
     payload = _q(subject_id=subject_id, chapter_id=chapter_id)
@@ -778,32 +855,45 @@ def test_scope_update_wall_including_moving_subject(
 
     # ---- 改别科目的题 ----
     detail = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))["data"]
-    b = body(client.put(f"{API}/admin/questions/{jz_qid}", headers=h,
-                        json={"version": detail["version"], "stem": "越权改的题干"}))
+    b = body(
+        client.put(
+            f"{API}/admin/questions/{jz_qid}",
+            headers=h,
+            json={"version": detail["version"], "stem": "越权改的题干"},
+        )
+    )
     assert b["code"] == 40301 and "数据范围" in b["message"], b
     after = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))["data"]
     assert after["stem"] == detail["stem"], "越权编辑居然改了内容"
 
     # ---- 把自己的题搬去别的科目 ----
     mine = body(client.get(f"{API}/admin/questions/{my_qid}", headers=admin_h))["data"]
-    b = body(client.put(f"{API}/admin/questions/{my_qid}", headers=h,
-                        json={"version": mine["version"], "subject_id": JZ_SUBJECT_ID}))
+    b = body(
+        client.put(
+            f"{API}/admin/questions/{my_qid}",
+            headers=h,
+            json={"version": mine["version"], "subject_id": JZ_SUBJECT_ID},
+        )
+    )
     assert b["code"] == 40301 and "目标科目" in b["message"], b
     after = body(client.get(f"{API}/admin/questions/{my_qid}", headers=admin_h))["data"]
     assert after["subject_id"] == str(sz_id), "题被搬走了"
 
     # 本科目内改动照常
-    b = body(client.put(f"{API}/admin/questions/{my_qid}", headers=h,
-                        json={"version": mine["version"], "stem": mine["stem"] + "（教研改）"}))
+    b = body(
+        client.put(
+            f"{API}/admin/questions/{my_qid}",
+            headers=h,
+            json={"version": mine["version"], "stem": mine["stem"] + "（教研改）"},
+        )
+    )
     assert b["code"] == 0, b
 
     _drop(client, admin_h, my_qid)
     _drop(client, admin_h, jz_qid)
 
 
-def test_scope_delete_and_restore_wall(
-    client: httpx.Client, admin_h: dict[str, str], sz
-) -> None:
+def test_scope_delete_and_restore_wall(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     """**删除 / 恢复**：两条都要拦，且恢复的**幂等分支也拦得住**。
 
     幂等分支（"本来就没删"→ 200 + already_active）必须排在范围闸**之后** ——
@@ -833,8 +923,10 @@ def test_scope_delete_and_restore_wall(
     # 自己科目的题，删/恢复都正常
     my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
     assert body(client.delete(f"{API}/admin/questions/{my_qid}", headers=h))["code"] == 0
-    assert body(client.post(f"{API}/admin/questions/{my_qid}/restore",
-                            headers=h, json={}))["code"] == 0
+    assert (
+        body(client.post(f"{API}/admin/questions/{my_qid}/restore", headers=h, json={}))["code"]
+        == 0
+    )
     _drop(client, admin_h, my_qid)
 
 
@@ -852,8 +944,11 @@ def test_scope_batch_delete_is_all_or_nothing(
     jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
     h = _scoped_headers(client, admin_h, nickname="范围-批量删")
 
-    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h,
-                         json={"ids": [my_qid, jz_qid]}))
+    b = body(
+        client.post(
+            f"{API}/admin/questions/batch-delete", headers=h, json={"ids": [my_qid, jz_qid]}
+        )
+    )
     assert b["code"] == 40301, b
     assert "整批未执行" in b["message"] and jz_qid in b["message"], b["message"]
     for qid in (my_qid, jz_qid):
@@ -861,21 +956,17 @@ def test_scope_batch_delete_is_all_or_nothing(
         assert d["is_deleted"] is False, f"{qid} 被误删了 —— 整批拒绝必须零副作用"
 
     # 只传自己的 → 正常
-    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h,
-                         json={"ids": [my_qid]}))
+    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h, json={"ids": [my_qid]}))
     assert b["code"] == 0 and b["data"]["deleted"] == 1, b
 
     # 只传越权的 → 也是 40301（哪怕整批只有一条越权）
-    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h,
-                         json={"ids": [jz_qid]}))
+    b = body(client.post(f"{API}/admin/questions/batch-delete", headers=h, json={"ids": [jz_qid]}))
     assert b["code"] == 40301, b
 
     _drop(client, admin_h, jz_qid)
 
 
-def test_scope_dropdowns_are_filtered(
-    client: httpx.Client, admin_h: dict[str, str], sz
-) -> None:
+def test_scope_dropdowns_are_filtered(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     """**下拉数据源**（章节树 / 知识点）：只列有权限的科目；显式要范围外的 → 40301。
 
     下拉是"能选什么"的清单 —— 把没权限的科目摆上去，等于让用户点一个注定 403 的选项。
@@ -887,12 +978,19 @@ def test_scope_dropdowns_are_filtered(
     codes = {g["subject"]["code"] for g in b["data"]["items"]}
     assert codes == {"SW-SZ"}, f"教研看到了别科目的章节树分组：{codes}"
 
-    b = body(client.get(f"{API}/admin/chapters/tree", headers=h,
-                        params={"subject_id": JZ_SUBJECT_ID}))
+    b = body(
+        client.get(f"{API}/admin/chapters/tree", headers=h, params={"subject_id": JZ_SUBJECT_ID})
+    )
     assert b["code"] == 40301 and "数据范围" in b["message"], b
 
-    assert body(client.get(f"{API}/admin/chapters/tree", headers=h,
-                           params={"subject_id": SZ_SUBJECT_ID}))["code"] == 0
+    assert (
+        body(
+            client.get(
+                f"{API}/admin/chapters/tree", headers=h, params={"subject_id": SZ_SUBJECT_ID}
+            )
+        )["code"]
+        == 0
+    )
 
     # ---- 知识点：同理 ----
     b = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=h))
@@ -900,8 +998,13 @@ def test_scope_dropdowns_are_filtered(
     subs = {x["subject_id"] for x in b["data"]["items"]}
     assert subs <= {str(SZ_SUBJECT_ID)}, f"教研看到了别科目的知识点：{subs}"
 
-    b = body(client.get(f"{API}/admin/chapters/knowledge-points", headers=h,
-                        params={"subject_id": JZ_SUBJECT_ID}))
+    b = body(
+        client.get(
+            f"{API}/admin/chapters/knowledge-points",
+            headers=h,
+            params={"subject_id": JZ_SUBJECT_ID},
+        )
+    )
     assert b["code"] == 40301 and "数据范围" in b["message"], b
 
     # 对照组：超管不受影响（收口不能把全局岗也一起收掉）
@@ -922,13 +1025,13 @@ def test_scope_fails_closed_for_unmapped_scope_type(
     """
     sz_id, sz_chapter = sz
     my_qid, _ = _make(client, admin_h, subject_id=sz_id, chapter_id=sz_chapter)
-    h = _scoped_headers(client, admin_h, nickname="范围-未映射",
-                        scope_type="professional", scope_id=SZ_SUBJECT_ID)
+    h = _scoped_headers(
+        client, admin_h, nickname="范围-未映射", scope_type="professional", scope_id=SZ_SUBJECT_ID
+    )
 
     b = body(client.get(f"{API}/admin/questions", headers=h, params={"page_size": 5}))
     assert b["code"] == 0 and b["data"]["total"] == 0, (
-        "未映射范围应当收敛到空集（失败关闭），实际看到 "
-        f"{b['data'].get('total')} 条"
+        f"未映射范围应当收敛到空集（失败关闭），实际看到 {b['data'].get('total')} 条"
     )
 
     b = body(client.get(f"{API}/admin/questions/{my_qid}", headers=h))
@@ -940,9 +1043,7 @@ def test_scope_fails_closed_for_unmapped_scope_type(
     _drop(client, admin_h, my_qid)
 
 
-def test_scope_global_role_unrestricted(
-    client: httpx.Client, admin_h: dict[str, str], sz
-) -> None:
+def test_scope_global_role_unrestricted(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
     """对照组：`global` 范围**不受任何限制**。"""
     jz_qid, _ = _make(client, admin_h, subject_id=JZ_SUBJECT_ID)
     b = body(client.get(f"{API}/admin/questions/{jz_qid}", headers=admin_h))

@@ -115,9 +115,7 @@ async def current_user(
         raise unauthorized("账号状态异常，请联系客服", 40305)
 
     priv = await rbac_service.get_privileges(db, user_id, redis)
-    return CurrentUser(
-        user=user, privileges=priv, session_id=session_id, jti=payload.get("jti")
-    )
+    return CurrentUser(user=user, privileges=priv, session_id=session_id, jti=payload.get("jti"))
 
 
 CurrentUserDep = Annotated[CurrentUser, Depends(current_user)]

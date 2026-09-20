@@ -40,7 +40,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-EPOCH = 1_700_000_000_000          # 自定义纪元 2023-11-15，延长可用年限
+EPOCH = 1_700_000_000_000  # 自定义纪元 2023-11-15，延长可用年限
 WORKER_BITS = 10
 SEQUENCE_BITS = 12
 MAX_WORKER_ID = (1 << WORKER_BITS) - 1

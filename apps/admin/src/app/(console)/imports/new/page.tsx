@@ -45,12 +45,7 @@ import { formatDateMinute } from "@/lib/format";
 import { formatBytes, IMPORT_SOURCE_TYPES, validateLocalFile } from "@/lib/import";
 import { P } from "@/lib/permission";
 import { sourceTypeLabel } from "@/lib/question";
-import type {
-  ImportBatchDetail,
-  ImportExecuteOut,
-  ImportMode,
-  SourceType,
-} from "@/lib/types";
+import type { ImportBatchDetail, ImportExecuteOut, ImportMode, SourceType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const STEPS: WizardStep[] = [
@@ -330,7 +325,10 @@ export default function NewImportPage() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="space-y-1.5">
                 <Label className="text-xs">批次科目</Label>
-                <Select value={subjectId || ANY_SUBJECT} onValueChange={(v) => setSubjectId(v === ANY_SUBJECT ? "" : v)}>
+                <Select
+                  value={subjectId || ANY_SUBJECT}
+                  onValueChange={(v) => setSubjectId(v === ANY_SUBJECT ? "" : v)}
+                >
                   <SelectTrigger>
                     <SelectValue placeholder={tree.isLoading ? "加载中…" : "不指定"} />
                   </SelectTrigger>
@@ -434,7 +432,10 @@ export default function NewImportPage() {
                 "上传后系统会立刻逐行校验（不写库），你可以在下一步看到完整报告。"
               )}
             </p>
-            <Button onClick={() => void handleUploadAndValidate()} disabled={!file || busyUploading}>
+            <Button
+              onClick={() => void handleUploadAndValidate()}
+              disabled={!file || busyUploading}
+            >
               {busyUploading ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -571,11 +572,10 @@ export default function NewImportPage() {
                   </ul>
 
                   <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
-                    本次执行将向题库写入{" "}
-                    <strong className="yj-json text-sm">{willWrite}</strong> 道题
-                    {skipped > 0 ? <>，另有 {skipped} 道因重复保持不动</> : null}。
-                    整批在<strong>一个事务</strong>里完成：中途任何异常都会整体回滚，
-                    不会留下半截数据。
+                    本次执行将向题库写入 <strong className="yj-json text-sm">{willWrite}</strong>{" "}
+                    道题
+                    {skipped > 0 ? <>，另有 {skipped} 道因重复保持不动</> : null}。 整批在
+                    <strong>一个事务</strong>里完成：中途任何异常都会整体回滚， 不会留下半截数据。
                   </div>
                 </div>
               );
@@ -600,8 +600,8 @@ export default function NewImportPage() {
                   className="mt-0.5"
                 />
                 <span>
-                  仅导入通过校验的 {validation.total_rows - validation.failed_rows} 行
-                  （跳过 {validation.failed_rows} 个错误行）
+                  仅导入通过校验的 {validation.total_rows - validation.failed_rows} 行 （跳过{" "}
+                  {validation.failed_rows} 个错误行）
                   <span className="mt-0.5 block text-[11px] text-amber-800">
                     跳过错误行会让这一批的数据与文件不完全一致，请确认你清楚少了哪几行。
                   </span>
@@ -640,8 +640,8 @@ export default function NewImportPage() {
               <div className="text-xs leading-relaxed">
                 <p className="text-sm font-medium text-foreground">正在导入…</p>
                 <p className="mt-1 text-muted-foreground">
-                  整批 {validation.total_rows} 行在一个事务内写入，
-                  请<strong className="text-foreground">不要关闭页面或刷新</strong>。
+                  整批 {validation.total_rows} 行在一个事务内写入， 请
+                  <strong className="text-foreground">不要关闭页面或刷新</strong>。
                   期间系统会写题目、写版本快照、写变更日志，所以大文件需要几十秒。
                 </p>
               </div>
@@ -717,7 +717,10 @@ export default function NewImportPage() {
                   )}
                 </Button>
               ) : !publishedAt ? (
-                <Button onClick={() => void handlePublish()} disabled={publish.isPending || !mayPublish}>
+                <Button
+                  onClick={() => void handlePublish()}
+                  disabled={publish.isPending || !mayPublish}
+                >
                   {publish.isPending ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />

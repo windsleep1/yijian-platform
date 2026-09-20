@@ -61,7 +61,12 @@ export function ValidateReport({
           <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" />
         )}
         <div className="min-w-0 flex-1">
-          <p className={cn("text-sm font-medium", hasErrors ? "text-destructive" : "text-emerald-800")}>
+          <p
+            className={cn(
+              "text-sm font-medium",
+              hasErrors ? "text-destructive" : "text-emerald-800",
+            )}
+          >
             {hasErrors
               ? `校验未通过：有 ${validation.errors.length} 个必须修的问题，修好才能发布`
               : "校验通过：可以发布"}
@@ -98,8 +103,8 @@ export function ValidateReport({
             ))}
           </ul>
           <p className="border-t bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
-            两条出路：① 补题 / 移题让实际回到计划值；② 点「编辑卷面结构」把计划题数改成实际值
-            —— 那等于明确认可新的卷面构成。
+            两条出路：① 补题 / 移题让实际回到计划值；② 点「编辑卷面结构」把计划题数改成实际值 ——
+            那等于明确认可新的卷面构成。
           </p>
         </div>
       ) : null}
@@ -132,11 +137,21 @@ function IssueGroup({
 }: {
   tone: "error" | "warning";
   title: string;
-  issues: { level: string; code: string; message: string; guidance: { title: string; action: string } }[];
+  issues: {
+    level: string;
+    code: string;
+    message: string;
+    guidance: { title: string; action: string };
+  }[];
 }) {
   const isError = tone === "error";
   return (
-    <div className={cn("overflow-hidden rounded-lg border", isError ? "border-destructive/30" : "border-amber-300")}>
+    <div
+      className={cn(
+        "overflow-hidden rounded-lg border",
+        isError ? "border-destructive/30" : "border-amber-300",
+      )}
+    >
       <div className={cn("px-3 py-2", isError ? "bg-destructive/10" : "bg-amber-50")}>
         <p className={cn("text-xs font-medium", isError ? "text-destructive" : "text-amber-800")}>
           {title}

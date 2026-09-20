@@ -107,9 +107,7 @@ async def list_imports(
         db, viewer=me, page=page, page_size=page_size, status=status
     )
     return ok(
-        paginate(
-            [i.model_dump() for i in items], page=page, page_size=page_size, total=total
-        )
+        paginate([i.model_dump() for i in items], page=page, page_size=page_size, total=total)
     )
 
 
@@ -124,7 +122,7 @@ async def list_imports(
     summary="上传题库文件（建批次）",
     description=(
         "需要权限 `question:import`。**multipart/form-data**，字段：\n\n"
-        "- `file`：必传，`.csv`（UTF-8 with BOM 亦可）或 `.json`（数组 / `{\"questions\":[...]}`）。"
+        '- `file`：必传，`.csv`（UTF-8 with BOM 亦可）或 `.json`（数组 / `{"questions":[...]}`）。'
         "**不支持 xlsx** —— 上传前请另存为 CSV。\n"
         "- `subject_id`：可选，批次归属科目；会与调用者数据范围求交集。\n"
         "- `source_type`：批次默认来源类型（行内未填时兜底），默认 `self`。\n"

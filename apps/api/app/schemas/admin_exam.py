@@ -90,9 +90,7 @@ class RuleItem(BaseModel):
         default_factory=list, description="限定章节 ID（任一命中即可）。空 = 不限"
     )
     year: int | None = Field(None, ge=2000, le=2100, description="限定考试年份。不传 = 不限")
-    prefer_unused: bool = Field(
-        True, description="加权采样时是否优先选**从未被任何试卷用过**的题"
-    )
+    prefer_unused: bool = Field(True, description="加权采样时是否优先选**从未被任何试卷用过**的题")
 
     @model_validator(mode="after")
     def _check_difficulty(self) -> "RuleItem":
@@ -330,7 +328,9 @@ class PaperRulePreviewIn(BaseModel):
     rules: list[RuleItem] = Field(..., min_length=1, max_length=30)
     strategy: RuleStrategy = "random"
     seed: int | None = Field(
-        None, ge=0, le=2**31 - 1,
+        None,
+        ge=0,
+        le=2**31 - 1,
         description="传了就固定抽样结果（同一 seed + 同一题库 → 同一结果，方便对比调参）",
     )
     include_sample: bool = Field(True, description="是否回传抽到的题（前端展示抽题明细用）")
@@ -516,9 +516,7 @@ class ExamComposeIn(BaseModel):
     replace: bool = Field(
         True, description="是否清空已有题目再组卷（false = 追加，重复题自动跳过）"
     )
-    apply_sections: bool = Field(
-        True, description="是否按规则重写卷面分段（题型/题量/分值）"
-    )
+    apply_sections: bool = Field(True, description="是否按规则重写卷面分段（题型/题量/分值）")
 
     @model_validator(mode="after")
     def _check(self) -> "ExamComposeIn":

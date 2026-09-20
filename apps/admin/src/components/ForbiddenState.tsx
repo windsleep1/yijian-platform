@@ -25,7 +25,8 @@ export function ForbiddenState({ need }: { need?: string }) {
       <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
         {need ? (
           <>
-            访问这个页面需要 <code className="yj-json rounded bg-muted px-1.5 py-0.5">{need}</code> 权限。
+            访问这个页面需要 <code className="yj-json rounded bg-muted px-1.5 py-0.5">{need}</code>{" "}
+            权限。
           </>
         ) : (
           "当前账号没有被授权访问这个页面。"

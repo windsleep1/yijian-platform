@@ -157,7 +157,9 @@ export default function QuestionsPage() {
 
   const toggleAll = () => {
     setSelected((prev) =>
-      allSelected ? prev.filter((id) => !pageIds.includes(id)) : Array.from(new Set([...prev, ...pageIds])),
+      allSelected
+        ? prev.filter((id) => !pageIds.includes(id))
+        : Array.from(new Set([...prev, ...pageIds])),
     );
   };
 
@@ -231,10 +233,7 @@ export default function QuestionsPage() {
           <div className="truncate" title={q.subject_name ?? `#${q.subject_id}`}>
             {q.subject_name ?? `#${q.subject_id}`}
           </div>
-          <div
-            className="truncate text-muted-foreground"
-            title={q.chapter_name ?? "未指定章节"}
-          >
+          <div className="truncate text-muted-foreground" title={q.chapter_name ?? "未指定章节"}>
             {q.chapter_name ?? "未指定章节"}
           </div>
         </div>
@@ -285,7 +284,9 @@ export default function QuestionsPage() {
       title: "版本",
       headClassName: "w-[58px] whitespace-nowrap",
       render: (q) => (
-        <span className="yj-json whitespace-nowrap text-xs text-muted-foreground">v{q.version}</span>
+        <span className="yj-json whitespace-nowrap text-xs text-muted-foreground">
+          v{q.version}
+        </span>
       ),
     },
     {
@@ -296,7 +297,10 @@ export default function QuestionsPage() {
       render: (q) => (
         <div className="whitespace-nowrap text-xs text-muted-foreground">
           <div className="yj-json">{q.updated_at ? formatDateMinute(q.updated_at) : "—"}</div>
-          <div className="truncate text-[11px]" title={q.updated_by_name ?? q.created_by_name ?? ""}>
+          <div
+            className="truncate text-[11px]"
+            title={q.updated_by_name ?? q.created_by_name ?? ""}
+          >
             {q.updated_by_name ?? q.created_by_name ?? "—"}
           </div>
         </div>
@@ -565,7 +569,9 @@ export default function QuestionsPage() {
             ? `${ORDER_LABELS[sort.key] ?? sort.key} ${sort.order === "asc" ? "升序" : "降序"}`
             : "—"}
         </span>
-        <span>每页 {pageSize} 条 · 本页 {pageIds.length} 条</span>
+        <span>
+          每页 {pageSize} 条 · 本页 {pageIds.length} 条
+        </span>
         <span className={cn(includeDeleted && "text-amber-700")}>
           {includeDeleted ? "范围：含已归档题目" : "范围：仅未删除题目"}
         </span>

@@ -75,7 +75,9 @@ export function qStatusLabel(code: string): string {
 }
 
 /** 状态徽章配色（复用 ui/badge 的 variant）。 */
-export function qStatusVariant(code: string): "success" | "warning" | "info" | "secondary" | "destructive" {
+export function qStatusVariant(
+  code: string,
+): "success" | "warning" | "info" | "secondary" | "destructive" {
   switch (code) {
     case "published":
       return "success";
@@ -232,7 +234,8 @@ export function validateDraft(d: QuestionDraft): string | null {
     if (d.judge_answer === null) return "判断题必须选择「正确」或「错误」。";
   } else {
     const opts = d.options;
-    if (opts.length < MIN_OPTIONS) return `选项至少要有 ${MIN_OPTIONS} 个（当前 ${opts.length} 个）。`;
+    if (opts.length < MIN_OPTIONS)
+      return `选项至少要有 ${MIN_OPTIONS} 个（当前 ${opts.length} 个）。`;
     if (opts.length > MAX_OPTIONS) return `选项最多 ${MAX_OPTIONS} 个（当前 ${opts.length} 个）。`;
 
     const labels = opts.map((o) => o.label.trim().toUpperCase());
@@ -312,7 +315,7 @@ export function draftToCreate(d: QuestionDraft): QuestionCreateIn {
 
 /** 详情 → 草稿（用于"编辑"表单初始化）。 */
 export function draftFromDetail(q: QuestionDetail): QuestionDraft {
-  const judge = q.type === "judge" ? ((q.answer?.value?.[0] as boolean | undefined) ?? false) : null;
+  const judge = q.type === "judge" ? (q.answer?.value?.[0] as boolean | undefined) ?? false : null;
   return {
     subject_id: q.subject_id,
     chapter_id: q.chapter_id ?? "",
@@ -368,7 +371,8 @@ export function diffDraft(
   if (norm(before.stem) !== norm(d.stem)) patch.stem = d.stem.trim();
   if (norm(before.analysis) !== norm(d.analysis)) patch.analysis = normOrNull(d.analysis);
   if (before.type !== d.type) patch.type = d.type;
-  if (Number(before.score_default) !== Number(d.score_default)) patch.score_default = Number(d.score_default);
+  if (Number(before.score_default) !== Number(d.score_default))
+    patch.score_default = Number(d.score_default);
   if (before.difficulty !== d.difficulty) patch.difficulty = d.difficulty;
   if (before.status !== d.status) patch.status = d.status;
   if (norm(before.keywords) !== norm(d.keywords)) patch.keywords = normOrNull(d.keywords);
@@ -376,7 +380,8 @@ export function diffDraft(
     patch.exam_year = d.exam_year.trim() ? Number(d.exam_year) : null;
   }
   if (norm(before.source_type) !== norm(d.source_type)) patch.source_type = d.source_type;
-  if (norm(before.source_name) !== norm(d.source_name)) patch.source_name = normOrNull(d.source_name);
+  if (norm(before.source_name) !== norm(d.source_name))
+    patch.source_name = normOrNull(d.source_name);
   if (norm(before.source_license) !== norm(d.source_license)) {
     patch.source_license = normOrNull(d.source_license);
   }

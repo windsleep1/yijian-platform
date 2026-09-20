@@ -28,7 +28,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useComposeExam, useCreateExam, usePaperRules, usePreviewPaperRule } from "@/hooks/useExams";
+import {
+  useComposeExam,
+  useCreateExam,
+  usePaperRules,
+  usePreviewPaperRule,
+} from "@/hooks/useExams";
 import { useChapterTree } from "@/hooks/useQuestions";
 import { useAuth } from "@/lib/auth-context";
 import { EXAM_TYPE_LABELS, qtypeLabel } from "@/lib/exam";
@@ -41,7 +46,12 @@ const PREVIEW_DEBOUNCE_MS = 600;
 type Mode = "manual" | "rule";
 
 /** 手动模式的分段草稿。 */
-type SectionDraft = { name: string; question_type: QType; question_count: string; score_per: string };
+type SectionDraft = {
+  name: string;
+  question_type: QType;
+  question_count: string;
+  score_per: string;
+};
 
 function emptySection(qtype: QType = "single"): SectionDraft {
   return { name: qtypeLabel(qtype), question_type: qtype, question_count: "10", score_per: "1" };
@@ -100,7 +110,12 @@ export default function NewExamPage() {
     { ...emptyRuleDraft("judge"), count: "10" },
   ]);
 
-  const rulesQuery = usePaperRules({ page: 1, page_size: 100, status: "on", subject_id: subjectId || undefined });
+  const rulesQuery = usePaperRules({
+    page: 1,
+    page_size: 100,
+    status: "on",
+    subject_id: subjectId || undefined,
+  });
   const savedRules = rulesQuery.data?.items ?? [];
   const savedRule = savedRules.find((r) => r.id === savedRuleId) ?? null;
 
@@ -120,7 +135,8 @@ export default function NewExamPage() {
 
   // ---- 实时试算（防抖）：规则模式的核心 ----
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const canPreview = mode === "rule" && !!subjectId && effectiveRules.length > 0 && inlineIssues.length === 0;
+  const canPreview =
+    mode === "rule" && !!subjectId && effectiveRules.length > 0 && inlineIssues.length === 0;
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
     if (!canPreview) {
@@ -168,7 +184,9 @@ export default function NewExamPage() {
     passNum < 0;
   const submitBad =
     baseBad ||
-    (mode === "manual" ? sectionInvalid || sections.length === 0 : effectiveRules.length === 0 || inlineIssues.length > 0);
+    (mode === "manual"
+      ? sectionInvalid || sections.length === 0
+      : effectiveRules.length === 0 || inlineIssues.length > 0);
 
   const busy = create.isPending || compose.isPending;
 
@@ -453,7 +471,9 @@ export default function NewExamPage() {
                         value={s.name}
                         maxLength={96}
                         onChange={(e) =>
-                          setSections((p) => p.map((x, k) => (k === i ? { ...x, name: e.target.value } : x)))
+                          setSections((p) =>
+                            p.map((x, k) => (k === i ? { ...x, name: e.target.value } : x)),
+                          )
                         }
                       />
                     </div>
@@ -488,7 +508,9 @@ export default function NewExamPage() {
                         onChange={(e) =>
                           setSections((p) =>
                             p.map((x, k) =>
-                              k === i ? { ...x, question_count: e.target.value.replace(/[^\d]/g, "") } : x,
+                              k === i
+                                ? { ...x, question_count: e.target.value.replace(/[^\d]/g, "") }
+                                : x,
                             ),
                           )
                         }
@@ -503,7 +525,9 @@ export default function NewExamPage() {
                         onChange={(e) =>
                           setSections((p) =>
                             p.map((x, k) =>
-                              k === i ? { ...x, score_per: e.target.value.replace(/[^\d.]/g, "") } : x,
+                              k === i
+                                ? { ...x, score_per: e.target.value.replace(/[^\d.]/g, "") }
+                                : x,
                             ),
                           )
                         }
@@ -637,8 +661,8 @@ export default function NewExamPage() {
             ) : (
               <div className="space-y-2 rounded-lg border bg-muted/30 p-3 text-sm">
                 <p>
-                  将创建一份<strong>空卷</strong>，包含 {sections.length} 个分段、
-                  计划 {manualPlanned.count} 道题、满分 {manualPlanned.score} 分。
+                  将创建一份<strong>空卷</strong>，包含 {sections.length} 个分段、 计划{" "}
+                  {manualPlanned.count} 道题、满分 {manualPlanned.score} 分。
                 </p>
                 <p className="text-xs text-muted-foreground">
                   创建后会跳到详情页并自动打开「加题」面板，从题库里逐题挑选。

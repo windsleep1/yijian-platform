@@ -208,9 +208,7 @@ def scope_subject_ids(current_user: ScopeViewer) -> set[int] | None:
     return set()
 
 
-def ensure_subject_visible(
-    viewer: ScopeViewer, subject_id: int, what: str = "该科目"
-) -> None:
+def ensure_subject_visible(viewer: ScopeViewer, subject_id: int, what: str = "该科目") -> None:
     """科目的**准入闸**：不在数据范围内就 `40301`。与 `scope_subject_ids` 同一份判定。
 
     ## 为什么必须有它（数据范围收口的由来）
@@ -275,8 +273,9 @@ def apply_data_scope(query: QuestionQuery, current_user: ScopeViewer) -> Questio
     if not allowed:
         # 失败关闭：没有任何可见科目 → 恒假。用 `= ANY('{}')` 表达空集，
         # 比 `1 = 0` 更能说明"是范围为空，不是逻辑错误"。
-        return query.add("q.subject_id = ANY(CAST(:scope_subject_ids AS bigint[]))",
-                         scope_subject_ids=[])
+        return query.add(
+            "q.subject_id = ANY(CAST(:scope_subject_ids AS bigint[]))", scope_subject_ids=[]
+        )
     return query.add(
         "q.subject_id = ANY(CAST(:scope_subject_ids AS bigint[]))",
         scope_subject_ids=sorted(allowed),
@@ -483,9 +482,7 @@ async def list_questions(
 
     total = int(
         (
-            await db.execute(
-                text("SELECT count(*) FROM questions q" + where_sql), q.params
-            )
+            await db.execute(text("SELECT count(*) FROM questions q" + where_sql), q.params)
         ).scalar_one()
     )
 
@@ -498,17 +495,21 @@ async def list_questions(
     direction = "ASC" if str(order).lower() == "asc" else "DESC"
 
     rows = (
-        await db.execute(
-            text(
-                _Q_SELECT
-                + where_sql
-                # id 兜底：同一毫秒内的顺序不稳定，否则翻页会重复/漏项
-                + f" ORDER BY {order_col} {direction}, q.id {direction}"
-                + " LIMIT :limit OFFSET :offset"
-            ),
-            {**q.params, "limit": page_size, "offset": (page - 1) * page_size},
+        (
+            await db.execute(
+                text(
+                    _Q_SELECT
+                    + where_sql
+                    # id 兜底：同一毫秒内的顺序不稳定，否则翻页会重复/漏项
+                    + f" ORDER BY {order_col} {direction}, q.id {direction}"
+                    + " LIMIT :limit OFFSET :offset"
+                ),
+                {**q.params, "limit": page_size, "offset": (page - 1) * page_size},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     opt_map = await _options_by_question(db, [r["id"] for r in rows])
     items = [_row_to_list_item(dict(r), opt_map.get(r["id"], [])) for r in rows]
@@ -527,14 +528,18 @@ async def _load_question_row(
 
 async def _load_options(db: AsyncSession, question_id: int) -> list[dict[str, Any]]:
     rows = (
-        await db.execute(
-            text(
-                "SELECT id, label, content, content_html, is_correct, sort_no "
-                "FROM question_options WHERE question_id = :qid ORDER BY sort_no, label"
-            ),
-            {"qid": question_id},
+        (
+            await db.execute(
+                text(
+                    "SELECT id, label, content, content_html, is_correct, sort_no "
+                    "FROM question_options WHERE question_id = :qid ORDER BY sort_no, label"
+                ),
+                {"qid": question_id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
@@ -542,9 +547,10 @@ async def _load_versions(
     db: AsyncSession, question_id: int, current_version: int, *, limit: int = VERSION_LIMIT
 ) -> list[QuestionVersionItem]:
     rows = (
-        await db.execute(
-            text(
-                """
+        (
+            await db.execute(
+                text(
+                    """
                 SELECT v.id, v.version, v.change_log, v.operator_id, v.snapshot, v.created_at,
                        COALESCE(u.nickname, u.phone) AS operator_name
                 FROM question_versions v
@@ -553,10 +559,13 @@ async def _load_versions(
                 ORDER BY v.version DESC
                 LIMIT :lim
                 """
-            ),
-            {"qid": question_id, "lim": limit},
+                ),
+                {"qid": question_id, "lim": limit},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [
         QuestionVersionItem(
             id=r["id"],
@@ -734,27 +743,52 @@ async def create_question(
             },
         )
         await _insert_options(db, qid, options)
-        await _insert_version(db, qid, 1, _snapshot(
-            {
-                "stem": payload.stem, "stem_html": payload.stem_html, "analysis": payload.analysis,
-                "analysis_html": payload.analysis_html, "type": payload.type,
-                "difficulty": payload.difficulty, "score_default": payload.score_default,
-                "status": payload.status, "subject_id": payload.subject_id,
-                "chapter_id": payload.chapter_id, "exam_year": payload.exam_year,
-                "keywords": payload.keywords, "tags": list(payload.tags),
-                "source_type": payload.source_type, "source_name": payload.source_name,
-                "source_license": payload.source_license,
-            },
-            [{"label": lbl, "content": c, "content_html": h, "is_correct": ic, "sort_no": i}
-             for i, (lbl, c, ic, h) in enumerate(options)],
-            answer,
-        ), "创建题目 v1", actor.id)
+        await _insert_version(
+            db,
+            qid,
+            1,
+            _snapshot(
+                {
+                    "stem": payload.stem,
+                    "stem_html": payload.stem_html,
+                    "analysis": payload.analysis,
+                    "analysis_html": payload.analysis_html,
+                    "type": payload.type,
+                    "difficulty": payload.difficulty,
+                    "score_default": payload.score_default,
+                    "status": payload.status,
+                    "subject_id": payload.subject_id,
+                    "chapter_id": payload.chapter_id,
+                    "exam_year": payload.exam_year,
+                    "keywords": payload.keywords,
+                    "tags": list(payload.tags),
+                    "source_type": payload.source_type,
+                    "source_name": payload.source_name,
+                    "source_license": payload.source_license,
+                },
+                [
+                    {"label": lbl, "content": c, "content_html": h, "is_correct": ic, "sort_no": i}
+                    for i, (lbl, c, ic, h) in enumerate(options)
+                ],
+                answer,
+            ),
+            "创建题目 v1",
+            actor.id,
+        )
         await _record_change(
-            db, entity_id=qid, action="create", before=None,
-            after={"stem": payload.stem, "type": payload.type, "status": payload.status,
-                   "correct_labels": answer.get("value")},
+            db,
+            entity_id=qid,
+            action="create",
+            before=None,
+            after={
+                "stem": payload.stem,
+                "type": payload.type,
+                "status": payload.status,
+                "correct_labels": answer.get("value"),
+            },
             change_log="创建题目",
-            operator_id=actor.id, ip=ip,
+            operator_id=actor.id,
+            ip=ip,
         )
     except IntegrityError as exc:
         await db.rollback()
@@ -763,10 +797,18 @@ async def create_question(
         raise
 
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="question.create",
-        module="question", entity_type="question", entity_id=qid,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.create",
+        module="question",
+        entity_type="question",
+        entity_id=qid,
         after={"stem": payload.stem[:200], "type": payload.type, "status": payload.status},
-        method="POST", path="/api/v1/admin/questions", ip=ip, user_agent=user_agent,
+        method="POST",
+        path="/api/v1/admin/questions",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
     return await get_question_detail(db, question_id=qid, viewer=actor)
@@ -829,8 +871,10 @@ async def update_question(
         # 没传选项 → 沿用库里现有选项（转成入参形态参与统一校验）
         final_options_in = [
             QuestionOptionIn(
-                label=o["label"], content=o["content"],
-                content_html=o.get("content_html"), is_correct=o["is_correct"],
+                label=o["label"],
+                content=o["content"],
+                content_html=o.get("content_html"),
+                is_correct=o["is_correct"],
             )
             for o in old_options
         ]
@@ -863,9 +907,7 @@ async def update_question(
 
     dup = await _find_hash_conflict(db, new_hash, exclude_id=question_id)
     if dup is not None:
-        raise conflict(
-            f"内容重复：改完后与题目 {dup} 的题干与选项完全一致（去重指纹相同）", 40901
-        )
+        raise conflict(f"内容重复：改完后与题目 {dup} 的题干与选项完全一致（去重指纹相同）", 40901)
 
     final_answer = derive_answer(final_type, list(final_options_in), judge_answer)
 
@@ -876,25 +918,30 @@ async def update_question(
         "stem": final_stem,
         "stem_html": payload.stem_html if payload.stem_html is not None else row["stem_html"],
         "analysis": payload.analysis if payload.analysis is not None else row["analysis"],
-        "analysis_html": payload.analysis_html if payload.analysis_html is not None
+        "analysis_html": payload.analysis_html
+        if payload.analysis_html is not None
         else row["analysis_html"],
         "difficulty": payload.difficulty if payload.difficulty is not None else row["difficulty"],
-        "score_default": payload.score_default if payload.score_default is not None
+        "score_default": payload.score_default
+        if payload.score_default is not None
         else row["score_default"],
         "status": payload.status if payload.status is not None else row["status"],
         "exam_year": payload.exam_year if payload.exam_year is not None else row["exam_year"],
         "keywords": payload.keywords if payload.keywords is not None else row["keywords"],
-        "source_name": payload.source_name if payload.source_name is not None
+        "source_name": payload.source_name
+        if payload.source_name is not None
         else row["source_name"],
-        "source_license": payload.source_license if payload.source_license is not None
+        "source_license": payload.source_license
+        if payload.source_license is not None
         else row["source_license"],
-        "copyright_holder": payload.copyright_holder if payload.copyright_holder is not None
+        "copyright_holder": payload.copyright_holder
+        if payload.copyright_holder is not None
         else row["copyright_holder"],
         "type": final_type,
-        "subject_id": payload.subject_id if payload.subject_id is not None
-        else row["subject_id"],
+        "subject_id": payload.subject_id if payload.subject_id is not None else row["subject_id"],
         "chapter_id": payload.chapter_id if payload.chapter_id is not None else row["chapter_id"],
-        "source_type": payload.source_type if payload.source_type is not None
+        "source_type": payload.source_type
+        if payload.source_type is not None
         else row["source_type"],
     }
     for col, val in simple.items():
@@ -916,9 +963,7 @@ async def update_question(
     if params["chapter_id"] is not None and params["chapter_id"] != row["chapter_id"]:
         await _ensure_chapter(db, params["chapter_id"], params["subject_id"])
 
-    await db.execute(
-        text(f"UPDATE questions SET {', '.join(sets)} WHERE id = :qid"), params
-    )
+    await db.execute(text(f"UPDATE questions SET {', '.join(sets)} WHERE id = :qid"), params)
 
     # 选项整体替换：改标号比逐条 diff 简单且不会留下孤儿行
     if payload.options is not None or final_type != before_row["type"]:
@@ -928,7 +973,8 @@ async def update_question(
         await _insert_options(db, question_id, final_options)
 
     new_row = {
-        **row, **{k: v for k, v in simple.items()},
+        **row,
+        **{k: v for k, v in simple.items()},
         "answer": final_answer,
         "tags": params.get("tags", row["tags"]),
     }
@@ -936,15 +982,29 @@ async def update_question(
     # ---- 4. 变更字段 diff（只记变化的，保持可读）----
     changed: dict[str, dict[str, Any]] = {}
     for key in (
-        "stem", "stem_html", "analysis", "analysis_html", "type", "difficulty",
-        "score_default", "status", "exam_year", "keywords", "subject_id", "chapter_id",
-        "source_type", "source_name", "source_license",
+        "stem",
+        "stem_html",
+        "analysis",
+        "analysis_html",
+        "type",
+        "difficulty",
+        "score_default",
+        "status",
+        "exam_year",
+        "keywords",
+        "subject_id",
+        "chapter_id",
+        "source_type",
+        "source_name",
+        "source_license",
     ):
         old_v, new_v = row.get(key), simple.get(key)
         if old_v != new_v:
             changed[key] = {"before": _jsonable(old_v), "after": _jsonable(new_v)}
-    old_opts = [{"label": o["label"], "content": o["content"], "is_correct": o["is_correct"]}
-                for o in old_options]
+    old_opts = [
+        {"label": o["label"], "content": o["content"], "is_correct": o["is_correct"]}
+        for o in old_options
+    ]
     new_opts = [{"label": lbl, "content": c, "is_correct": ic} for lbl, c, ic, _ in final_options]
     if old_opts != new_opts:
         changed["options"] = {"before": old_opts, "after": new_opts}
@@ -957,25 +1017,45 @@ async def update_question(
     new_version = row["version"] + 1
     summary = "、".join(list(changed.keys())[:8]) or "无字段变化"
     await _insert_version(
-        db, question_id, new_version,
-        _snapshot(new_row, [{"label": lbl, "content": c, "content_html": h, "is_correct": ic,
-                             "sort_no": i} for i, (lbl, c, ic, h) in enumerate(final_options)],
-                  final_answer),
-        f"编辑题目：{summary}", actor.id,
+        db,
+        question_id,
+        new_version,
+        _snapshot(
+            new_row,
+            [
+                {"label": lbl, "content": c, "content_html": h, "is_correct": ic, "sort_no": i}
+                for i, (lbl, c, ic, h) in enumerate(final_options)
+            ],
+            final_answer,
+        ),
+        f"编辑题目：{summary}",
+        actor.id,
     )
     await _record_change(
-        db, entity_id=question_id, action="update",
+        db,
+        entity_id=question_id,
+        action="update",
         before={k: v["before"] for k, v in changed.items()} or None,
         after={k: v["after"] for k, v in changed.items()} or None,
         change_log=f"编辑题目，涉及字段：{summary}",
-        operator_id=actor.id, ip=ip,
+        operator_id=actor.id,
+        ip=ip,
     )
 
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="question.update",
-        module="question", entity_type="question", entity_id=question_id,
-        before={"version": row["version"]}, after={"version": new_version, "changed": list(changed)},
-        method="PUT", path=f"/api/v1/admin/questions/{question_id}", ip=ip, user_agent=user_agent,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.update",
+        module="question",
+        entity_type="question",
+        entity_id=question_id,
+        before={"version": row["version"]},
+        after={"version": new_version, "changed": list(changed)},
+        method="PUT",
+        path=f"/api/v1/admin/questions/{question_id}",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
     return await get_question_detail(db, question_id=question_id, viewer=actor)
@@ -1014,17 +1094,29 @@ async def soft_delete_question(
         {"actor": actor.id, "ver": new_version, "qid": question_id},
     )
     await _record_change(
-        db, entity_id=question_id, action="delete",
+        db,
+        entity_id=question_id,
+        action="delete",
         before={"is_deleted": False, "stem": row["stem"]},
         after={"is_deleted": True},
-        change_log=reason or "软删除题目", operator_id=actor.id, ip=ip,
+        change_log=reason or "软删除题目",
+        operator_id=actor.id,
+        ip=ip,
     )
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="question.delete",
-        module="question", entity_type="question", entity_id=question_id,
-        before={"stem": row["stem"][:200]}, after={"is_deleted": True, "reason": reason},
-        method="DELETE", path=f"/api/v1/admin/questions/{question_id}",
-        ip=ip, user_agent=user_agent,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.delete",
+        module="question",
+        entity_type="question",
+        entity_id=question_id,
+        before={"stem": row["stem"][:200]},
+        after={"is_deleted": True, "reason": reason},
+        method="DELETE",
+        path=f"/api/v1/admin/questions/{question_id}",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
     return QuestionDeleteOut(id=question_id, is_deleted=True, version=new_version)
@@ -1049,11 +1141,15 @@ async def _assert_question_relations_ok(db: AsyncSession, row: dict[str, Any]) -
     chapter_id = row.get("chapter_id")
     if chapter_id:
         r = (
-            await db.execute(
-                text("SELECT name, is_deleted FROM chapters WHERE id = :cid"),
-                {"cid": chapter_id},
+            (
+                await db.execute(
+                    text("SELECT name, is_deleted FROM chapters WHERE id = :cid"),
+                    {"cid": chapter_id},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if r is None:
             problems.append(f"章节已不存在（chapter_id={chapter_id}）")
         elif r["is_deleted"]:
@@ -1062,17 +1158,21 @@ async def _assert_question_relations_ok(db: AsyncSession, row: dict[str, Any]) -
     kp_id = row.get("knowledge_point_id")
     if kp_id:
         kp = (
-            await db.execute(
-                text(
-                    "SELECT k.name, k.is_deleted, k.chapter_id, c.name AS chapter_name, "
-                    "       c.is_deleted AS chapter_deleted, c.id AS chapter_exists "
-                    "FROM knowledge_points k "
-                    "LEFT JOIN chapters c ON c.id = k.chapter_id "
-                    "WHERE k.id = :kid"
-                ),
-                {"kid": kp_id},
+            (
+                await db.execute(
+                    text(
+                        "SELECT k.name, k.is_deleted, k.chapter_id, c.name AS chapter_name, "
+                        "       c.is_deleted AS chapter_deleted, c.id AS chapter_exists "
+                        "FROM knowledge_points k "
+                        "LEFT JOIN chapters c ON c.id = k.chapter_id "
+                        "WHERE k.id = :kid"
+                    ),
+                    {"kid": kp_id},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if kp is None:
             problems.append(f"知识点已不存在（knowledge_point_id={kp_id}）")
         else:
@@ -1140,17 +1240,29 @@ async def restore_question(
         {"actor": actor.id, "ver": new_version, "qid": question_id},
     )
     await _record_change(
-        db, entity_id=question_id, action="restore",
+        db,
+        entity_id=question_id,
+        action="restore",
         before={"is_deleted": True, "stem": row["stem"]},
         after={"is_deleted": False},
-        change_log="恢复题目", operator_id=actor.id, ip=ip,
+        change_log="恢复题目",
+        operator_id=actor.id,
+        ip=ip,
     )
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="question.restore",
-        module="question", entity_type="question", entity_id=question_id,
-        before={"is_deleted": True}, after={"is_deleted": False},
-        method="POST", path=f"/api/v1/admin/questions/{question_id}/restore",
-        ip=ip, user_agent=user_agent,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.restore",
+        module="question",
+        entity_type="question",
+        entity_id=question_id,
+        before={"is_deleted": True},
+        after={"is_deleted": False},
+        method="POST",
+        path=f"/api/v1/admin/questions/{question_id}/restore",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
     return QuestionRestoreOut(
@@ -1178,14 +1290,18 @@ async def batch_soft_delete(
     """
     uniq = list(dict.fromkeys(ids))
     rows = (
-        await db.execute(
-            text(
-                "SELECT id, subject_id, stem, is_deleted FROM questions "
-                "WHERE id = ANY(CAST(:ids AS bigint[]))"
-            ),
-            {"ids": uniq},
+        (
+            await db.execute(
+                text(
+                    "SELECT id, subject_id, stem, is_deleted FROM questions "
+                    "WHERE id = ANY(CAST(:ids AS bigint[]))"
+                ),
+                {"ids": uniq},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     found = {r["id"]: dict(r) for r in rows}
 
     # ---- 数据范围：**整批拒绝**，不是"把越权的那几条塞进 skipped" ----
@@ -1227,20 +1343,35 @@ async def batch_soft_delete(
         )
         for qid in to_delete:
             await _record_change(
-                db, entity_id=qid, action="delete", batch_id=batch_id,
+                db,
+                entity_id=qid,
+                action="delete",
+                batch_id=batch_id,
                 before={"is_deleted": False, "stem": found[qid]["stem"]},
                 after={"is_deleted": True},
                 change_log=reason or f"批量软删除（共 {len(to_delete)} 道）",
-                operator_id=actor.id, ip=ip,
+                operator_id=actor.id,
+                ip=ip,
             )
 
     await write_audit(
-        db, actor_id=actor.id, actor_name=actor_name, action="question.batch_delete",
-        module="question", entity_type="question", entity_id=None,
-        after={"ids": [str(i) for i in to_delete], "deleted": len(to_delete),
-               "skipped": [str(i) for i in skipped], "batch_id": str(batch_id)},
-        method="POST", path="/api/v1/admin/questions/batch-delete",
-        ip=ip, user_agent=user_agent,
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.batch_delete",
+        module="question",
+        entity_type="question",
+        entity_id=None,
+        after={
+            "ids": [str(i) for i in to_delete],
+            "deleted": len(to_delete),
+            "skipped": [str(i) for i in skipped],
+            "batch_id": str(batch_id),
+        },
+        method="POST",
+        path="/api/v1/admin/questions/batch-delete",
+        ip=ip,
+        user_agent=user_agent,
     )
     await db.commit()
     return QuestionBatchDeleteOut(deleted=len(to_delete), skipped=skipped, batch_id=batch_id)
@@ -1276,14 +1407,18 @@ async def list_chapter_tree(
         sub_params["sid"] = subject_id
 
     chapter_rows = (
-        await db.execute(
-            text(
-                "SELECT id, subject_id, parent_id, code, name, level, sort_no "
-                f"FROM chapters {sub_where} ORDER BY subject_id, sort_no, id"
-            ),
-            sub_params,
+        (
+            await db.execute(
+                text(
+                    "SELECT id, subject_id, parent_id, code, name, level, sort_no "
+                    f"FROM chapters {sub_where} ORDER BY subject_id, sort_no, id"
+                ),
+                sub_params,
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     q_params: dict[str, Any] = {}
     q_where = "WHERE is_deleted = false AND chapter_id IS NOT NULL"
@@ -1291,24 +1426,35 @@ async def list_chapter_tree(
         q_where += " AND subject_id = :sid"
         q_params["sid"] = subject_id
     count_rows = (
-        await db.execute(
-            text(f"SELECT chapter_id, count(*) AS n FROM questions {q_where} GROUP BY chapter_id"),
-            q_params,
+        (
+            await db.execute(
+                text(
+                    f"SELECT chapter_id, count(*) AS n FROM questions {q_where} GROUP BY chapter_id"
+                ),
+                q_params,
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     counts = {r["chapter_id"]: int(r["n"]) for r in count_rows}
 
     subject_rows = (
-        await db.execute(
-            text(
-                "SELECT id, code, name, short_name, professional FROM subjects "
-                "WHERE status = 'on' " + ("AND id = :sid " if subject_id is not None else "")
-                + scope_sql
-                + "ORDER BY sort_no, id"
-            ),
-            {**sub_params, **scope_params},
+        (
+            await db.execute(
+                text(
+                    "SELECT id, code, name, short_name, professional FROM subjects "
+                    "WHERE status = 'on' "
+                    + ("AND id = :sid " if subject_id is not None else "")
+                    + scope_sql
+                    + "ORDER BY sort_no, id"
+                ),
+                {**sub_params, **scope_params},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     # subject_id -> [节点]（先建扁平，再挂 children）
     by_subject: dict[int, list[dict[str, Any]]] = {}
@@ -1321,8 +1467,13 @@ async def list_chapter_tree(
         flat = by_subject.get(s["id"], [])
         nodes = {
             r["id"]: ChapterNode(
-                id=r["id"], subject_id=r["subject_id"], parent_id=r["parent_id"],
-                code=r["code"], name=r["name"], level=r["level"], sort_no=r["sort_no"],
+                id=r["id"],
+                subject_id=r["subject_id"],
+                parent_id=r["parent_id"],
+                code=r["code"],
+                name=r["name"],
+                level=r["level"],
+                sort_no=r["sort_no"],
                 question_count=counts.get(r["id"], 0),
             )
             for r in flat
@@ -1339,8 +1490,11 @@ async def list_chapter_tree(
         groups.append(
             SubjectChapterGroup(
                 subject=SubjectBrief(
-                    id=s["id"], code=s["code"], name=s["name"],
-                    short_name=s["short_name"], professional=s["professional"],
+                    id=s["id"],
+                    code=s["code"],
+                    name=s["name"],
+                    short_name=s["short_name"],
+                    professional=s["professional"],
                 ),
                 chapters=roots,
             )
@@ -1388,24 +1542,28 @@ async def list_knowledge_points(
     scope_sql, scope_params = scope_clause(viewer, "kp.subject_id")
 
     rows = (
-        await db.execute(
-            text(
-                "SELECT kp.id, kp.subject_id, kp.chapter_id, kp.code, kp.name, "
-                "       kp.importance, c.name AS chapter_name, "
-                "       COALESCE(cnt.n, 0) AS question_count "
-                "FROM knowledge_points kp "
-                "JOIN chapters c ON c.id = kp.chapter_id "
-                "LEFT JOIN ("
-                "    SELECT knowledge_point_id, count(*) AS n FROM questions "
-                "    WHERE is_deleted = false AND knowledge_point_id IS NOT NULL "
-                "    GROUP BY knowledge_point_id"
-                ") cnt ON cnt.knowledge_point_id = kp.id "
-                "WHERE " + " AND ".join(conds) + scope_sql + " "
-                "ORDER BY c.sort_no, kp.sort_no, kp.id"
-            ),
-            {**params, **scope_params},
+        (
+            await db.execute(
+                text(
+                    "SELECT kp.id, kp.subject_id, kp.chapter_id, kp.code, kp.name, "
+                    "       kp.importance, c.name AS chapter_name, "
+                    "       COALESCE(cnt.n, 0) AS question_count "
+                    "FROM knowledge_points kp "
+                    "JOIN chapters c ON c.id = kp.chapter_id "
+                    "LEFT JOIN ("
+                    "    SELECT knowledge_point_id, count(*) AS n FROM questions "
+                    "    WHERE is_deleted = false AND knowledge_point_id IS NOT NULL "
+                    "    GROUP BY knowledge_point_id"
+                    ") cnt ON cnt.knowledge_point_id = kp.id "
+                    "WHERE " + " AND ".join(conds) + scope_sql + " "
+                    "ORDER BY c.sort_no, kp.sort_no, kp.id"
+                ),
+                {**params, **scope_params},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     return KnowledgePointListOut(
         items=[
@@ -1438,15 +1596,24 @@ async def _insert_options(
                 "VALUES (:id, :qid, :label, :content, :content_html, :is_correct, :sort_no)"
             ),
             {
-                "id": next_id(), "qid": question_id, "label": label, "content": content,
-                "content_html": content_html, "is_correct": is_correct, "sort_no": i,
+                "id": next_id(),
+                "qid": question_id,
+                "label": label,
+                "content": content,
+                "content_html": content_html,
+                "is_correct": is_correct,
+                "sort_no": i,
             },
         )
 
 
 async def _insert_version(
-    db: AsyncSession, question_id: int, version: int, snapshot: dict[str, Any],
-    change_log: str, operator_id: int,
+    db: AsyncSession,
+    question_id: int,
+    version: int,
+    snapshot: dict[str, Any],
+    change_log: str,
+    operator_id: int,
 ) -> None:
     await db.execute(
         text(
@@ -1455,15 +1622,27 @@ async def _insert_version(
             "VALUES (:id, :qid, :ver, CAST(:snap AS jsonb), :cl, :op)"
         ),
         {
-            "id": next_id(), "qid": question_id, "ver": version, "snap": _json(snapshot),
-            "cl": change_log[:500], "op": operator_id,
+            "id": next_id(),
+            "qid": question_id,
+            "ver": version,
+            "snap": _json(snapshot),
+            "cl": change_log[:500],
+            "op": operator_id,
         },
     )
 
 
 async def _record_change(
-    db: AsyncSession, *, entity_id: int, action: str, before: Any, after: Any,
-    change_log: str, operator_id: int, ip: str | None = None, batch_id: int | None = None,
+    db: AsyncSession,
+    *,
+    entity_id: int,
+    action: str,
+    before: Any,
+    after: Any,
+    change_log: str,
+    operator_id: int,
+    ip: str | None = None,
+    batch_id: int | None = None,
 ) -> None:
     """写 `content_change_logs`。diff 固定是 `{before, after}` 形状 ——
     前端审计抽屉的 `diffJson` 就是按这个结构渲染字段级差异的。"""
@@ -1476,9 +1655,14 @@ async def _record_change(
             "VALUES (:id, 'question', :eid, :action, :batch_id, CAST(:diff AS jsonb), :cl, :op, :ip)"
         ),
         {
-            "id": next_id(), "eid": entity_id, "action": action, "batch_id": batch_id,
+            "id": next_id(),
+            "eid": entity_id,
+            "action": action,
+            "batch_id": batch_id,
             "diff": _json({"before": before, "after": after}),
-            "cl": change_log[:500], "op": operator_id, "ip": to_inet(ip),
+            "cl": change_log[:500],
+            "op": operator_id,
+            "ip": to_inet(ip),
         },
     )
 

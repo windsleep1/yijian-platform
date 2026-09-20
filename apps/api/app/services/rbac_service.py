@@ -235,9 +235,7 @@ async def ensure_role_assigned(
         )
     )
     if exists.scalar_one_or_none() is None:
-        db.add(
-            UserRole(id=next_id(), user_id=user_id, role_id=role_id, scope_type="global")
-        )
+        db.add(UserRole(id=next_id(), user_id=user_id, role_id=role_id, scope_type="global"))
         await db.flush()
 
 
@@ -284,9 +282,10 @@ async def list_roles_with_permissions(
     置灰并说明原因，而不是等用户点了提交才吃 `40003`。
     """
     rows = (
-        await db.execute(
-            text(
-                """
+        (
+            await db.execute(
+                text(
+                    """
                 SELECT r.id, r.code, r.name, r.description, r.is_system, r.sort_no,
                        p.code AS perm_code
                 FROM roles r
@@ -294,9 +293,12 @@ async def list_roles_with_permissions(
                 LEFT JOIN permissions p ON p.id = rp.permission_id
                 ORDER BY r.sort_no, p.sort_no, p.id
                 """
+                )
             )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     merged: dict[int, RoleItem] = {}
     for row in rows:

@@ -106,7 +106,9 @@ export function useRowActionFeedback(opts: UseRowActionFeedbackOptions = {}) {
 
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   /** toast 里的累计计数：taskKey → { count, timer } */
-  const batches = useRef(new Map<string, { count: number; timer?: ReturnType<typeof setTimeout> }>());
+  const batches = useRef(
+    new Map<string, { count: number; timer?: ReturnType<typeof setTimeout> }>(),
+  );
 
   // 卸载时清掉所有定时器，避免"组件没了还在 setState"
   useEffect(() => {
@@ -133,7 +135,7 @@ export function useRowActionFeedback(opts: UseRowActionFeedbackOptions = {}) {
   }, []);
 
   const run = useCallback(
-    async <T,>(args: RunArgs<T>): Promise<{ ok: boolean; result?: T }> => {
+    async <T>(args: RunArgs<T>): Promise<{ ok: boolean; result?: T }> => {
       const {
         id,
         pendingLabel = "处理中…",
@@ -215,11 +217,7 @@ export function useRowActionFeedback(opts: UseRowActionFeedbackOptions = {}) {
         return { ok: true, result };
       } catch (err) {
         const message =
-          err instanceof ApiError
-            ? err.message
-            : err instanceof Error
-              ? err.message
-              : String(err);
+          err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err);
         setOne(id, {
           phase: "error",
           label: errorTitle ?? "操作失败",
@@ -255,7 +253,7 @@ export function useRowActionFeedback(opts: UseRowActionFeedbackOptions = {}) {
     /** 有任意行在 pending —— 用于禁用"批量"类按钮，避免并发冲突 */
     hasPending: Object.values(feedback).some((f) => f.phase === "pending"),
     /** 从服务端列表里滤掉已移除的行 */
-    visibleRows: <R,>(rows: R[], keyOf: (r: R) => string): R[] =>
+    visibleRows: <R>(rows: R[], keyOf: (r: R) => string): R[] =>
       rows.filter((r) => !dismissed.has(keyOf(r))),
     run,
     reset,

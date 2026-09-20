@@ -1,6 +1,14 @@
 "use client";
 
-import { ArrowLeft, FileSpreadsheet, History, ListChecks, RotateCcw, Rocket, Send } from "lucide-react";
+import {
+  ArrowLeft,
+  FileSpreadsheet,
+  History,
+  ListChecks,
+  RotateCcw,
+  Rocket,
+  Send,
+} from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
@@ -270,7 +278,9 @@ export default function ImportDetailPage() {
                 onClick={async () => {
                   try {
                     await validate.mutateAsync(batch.id);
-                    toast.success("已重新校验", { description: "校验是 dry-run，没有写入任何题目。" });
+                    toast.success("已重新校验", {
+                      description: "校验是 dry-run，没有写入任何题目。",
+                    });
                   } catch {
                     /* 见 InlineError */
                   }

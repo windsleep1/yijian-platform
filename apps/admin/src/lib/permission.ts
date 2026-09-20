@@ -133,4 +133,3 @@ export function canEnterConsole(perms: string[] | undefined | null): boolean {
 export function landingPath(perms: string[] | undefined | null): string | null {
   return MODULE_ENTRIES.find((m) => can(perms, m.perm))?.href ?? null;
 }
-

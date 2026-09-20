@@ -127,7 +127,9 @@ function SectionCard({
     <section className="rounded-lg border bg-card p-4">
       <div className="mb-3">
         <h2 className="text-sm font-semibold">{title}</h2>
-        {desc ? <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{desc}</p> : null}
+        {desc ? (
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{desc}</p>
+        ) : null}
       </div>
       {children}
     </section>
@@ -191,7 +193,11 @@ export function QuestionForm({
       const first = options.findIndex((o) => o.is_correct);
       options = options.map((o, i) => ({ ...o, is_correct: i === first }));
     }
-    patch({ type: next, options, judge_answer: next === "judge" ? (draft.judge_answer ?? null) : null });
+    patch({
+      type: next,
+      options,
+      judge_answer: next === "judge" ? draft.judge_answer ?? null : null,
+    });
   };
 
   const submit = () => {
@@ -471,7 +477,11 @@ export function QuestionForm({
             />
           </Field>
 
-          <Field label="标签" hint="最多 20 个，逗号或空格分隔" className="sm:col-span-2 lg:col-span-4">
+          <Field
+            label="标签"
+            hint="最多 20 个，逗号或空格分隔"
+            className="sm:col-span-2 lg:col-span-4"
+          >
             <Input
               value={draft.tags}
               onChange={(e) => patch({ tags: e.target.value })}
@@ -570,7 +580,7 @@ export function QuestionForm({
               </Button>
             ) : null}
             <Button type="button" onClick={submit} disabled={!!error || submitting || !editable}>
-              {submitting ? "保存中…" : (submitLabel ?? (mode === "create" ? "创建题目" : "保存"))}
+              {submitting ? "保存中…" : submitLabel ?? (mode === "create" ? "创建题目" : "保存")}
             </Button>
           </div>
         </div>
