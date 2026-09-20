@@ -1,5 +1,21 @@
 # 本地验证（不依赖 Docker）
 
+> **CI 跑的是同一套。** `.github/workflows/ci.yml` 的后端 job 逐步复刻了
+> `run-smoke.ps1` 的链路（起 PG → 建表 → 迁移 → 种子 → 起 API → pytest），
+> 额外多一步**题库种子**（原因见下）。
+>
+> ⚠️ **与 CI 的一处口径分歧（2026-09-20 发现，下一批修）**
+>
+> 本目录的 `run-smoke.ps1` **不灌题库种子**（`data/seed/questions.sql`），
+> 而 `db/schema.sql` 本身也不含 `questions` / `knowledge_points`。
+> 因此它在**真正全新的库**上会 **32 条失败**（`test_admin_v7.py` 的组卷 / 加题 /
+> 知识点下拉无题可抽）；它在开发机上一直绿，只是因为**那个库早先被手工灌过种子题**。
+>
+> CI 已补上这一步（`gen_seed_questions.py` 生成 0.29s + `psql -f` 约 5s，自包含可复现），
+> 所以这条路径**每次 push 都会被覆盖到**，不会再被"开发机恰好有数据"藏住。
+> 详见 `apps/admin/docs/B端联调坑.md` 坑 51。
+
+
 > 用途：在没有 Docker 的机器上，用**真实 PostgreSQL** 把后端跑起来并验收
 > （Batch 2 起引入，后续批次持续复用；覆盖认证 / RBAC / 题库 CRUD / 导入管道）。
 > Redis 用 `fakeredis` 顶替（只模拟命令行为，其余代码路径 100% 真实）。

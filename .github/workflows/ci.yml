@@ -1,0 +1,197 @@
+# CI 门禁 —— 门禁整顿**第一步**（2026-09-20，用户定）
+#
+# ## 只跑三件事
+#
+#     tsc --noEmit     前端类型
+#     pytest           后端全量用例（真 PostgreSQL）
+#     ruff check       后端静态检查
+#
+# **刻意不上 eslint**（`npm run lint`）—— 它还没进 CI，等第二步把规则从 warn 提成
+# error 之后再挂上来。现在挂上去只会得到一个恒绿或恒红的装饰品。
+#
+# ## 拦截式 vs 上报式（本步的关键取舍）
+#
+# | 检查 | 本步行为 | 第二步 |
+# |---|---|---|
+# | `tsc --noEmit` | **拦截**（非 0 即失败） | 不变 |
+# | `pytest` | **拦截** | 不变 |
+# | `ruff check` | **上报**（`continue-on-error`） | 转成拦截 |
+#
+# 为什么 ruff 先只上报：本步「**不修问题、只让门禁能跑**」。当前 ruff 有 19 条存量
+# （10 未使用导入 / 8 歧义变量名 `l` / 1 未定义名），直接设成拦截会让 CI 恒红 ——
+# **一个恒红的门禁等于没有门禁**，人很快就不看了。所以先让它把清单报出来，
+# 第二步连同 `ruff format` 一起清完、再转成拦截。
+#
+# 这与前端 eslint 的处理**对称**：eslint 的规则全设 warn（退出码 0），也是上报式。
+# 第二步两件事一起做：eslint 的 `asWarn()` 去掉、ruff 的 `continue-on-error` 去掉。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支连续推送时取消上一次未跑完的 —— 省额度，结果也更贴近最新提交
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ================================================================ 后端
+  backend:
+    name: 后端（ruff + pytest）
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: yijian
+          POSTGRES_DB: yijian
+          # 本地/CI 用 trust 免密：与 tools/local-verify 里写死的 DSN
+          # （`postgresql+asyncpg://yijian@127.0.0.1:<port>/yijian`，**不带密码**）保持一致。
+          # 生产不走这条路（见 docs/06）。
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yijian"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PYTHONUTF8: "1"
+      DATABASE_URL: postgresql+asyncpg://yijian@127.0.0.1:5432/yijian
+      APP_ENV: local
+      # ⚠️ 必须与 `tools/local-verify/serve_fake_redis.py` 里写死的值一致：
+      #    它自己 `os.environ.setdefault` 了 JWT_SECRET / REDIS_URL / SMS_PROVIDER，
+      #    而 **seed-rbac / seed-admin / pytest 是另外三个进程**，
+      #    它们拿不到那个 setdefault —— 必须在这里对齐，否则 token 签验不上。
+      JWT_SECRET: local-verify-secret-not-for-production
+      SMS_PROVIDER: mock
+      ADMIN_INIT_PHONE: "13800000000"
+      ADMIN_INIT_PASSWORD: Admin@123456
+      AI_BASE: http://127.0.0.1:8123
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: 安装依赖
+        run: pip install -r apps/api/requirements.txt
+
+      # ---- 三件事之一：ruff（本步「上报式」，见文件头表格）----
+      - name: ruff check（本步只上报，第二步转拦截）
+        continue-on-error: true
+        run: ruff check apps/api
+
+      # ---- 建表 + 迁移：与 run-smoke.ps1 的第 2/3/3.5 步等价 ----
+      # ⚠️ schema.sql 只在**首次建库**时载入，之后的列/种子变更全靠 db/migrations/
+      #    （改 schema.sql 对已有库不生效 —— 见 B端联调坑.md「表结构陷阱」#12）
+      - name: 建表 + 应用迁移
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U yijian -d yijian -v ON_ERROR_STOP=1 -q -f db/schema.sql
+          shopt -s nullglob
+          for m in db/migrations/*.sql; do
+            echo "应用迁移 $m"
+            psql -h 127.0.0.1 -U yijian -d yijian -v ON_ERROR_STOP=1 -q -f "$m"
+          done
+
+      - name: 种子（RBAC + 超管）
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          python -m app.cli seed-rbac
+          python -m app.cli seed-admin
+
+      # ---- 题库种子：**CI 与本地口径在这里分叉，是刻意暴露出来的** ----
+      #
+      # ## 为什么必须有这一步（2026-09-20 实测发现）
+      #
+      # `db/schema.sql` 只灌 subjects / chapters / RBAC，**不含 questions 与
+      # knowledge_points**。题库来自 `db/seed/gen_seed_questions.py` 生成的
+      # `data/seed/questions.sql`，而 `data/` 是 **gitignored** 的（可复现，不入库）。
+      #
+      # 于是在一个**真正全新的库**上，不灌题库会 **32 条用例失败**（v7 的组卷/加题/
+      # 知识点下拉全都要有题可抽）。实测：
+      #
+      #     不灌题库 → 32 failed, 91 passed, 4 skipped
+      #     灌了题库 → 126 passed, 1 skipped
+      #
+      # 生成器**完全自包含、离线、可复现**（`--seed 20260915` 固定，跑一次 **0.29s**），
+      # 产出的 `questions.sql` 自带 `ON CONFLICT` 幂等，灌库约 5s。
+      #
+      # ## ⚠️ 已知的口径分歧（不藏，明确记在这里）
+      #
+      # `tools/local-verify/run-smoke.ps1` **没有这一步**。它在开发机上一直绿，是因为
+      # 那个库早先被手工灌过种子题 —— 换句话说，那个脚本在**干净机器上会红 32 条**。
+      # 两者口径不一致是真问题，但**本批（门禁整顿第一步）不改 run-smoke**：
+      # 用户把本批范围限定为「让门禁能跑、不上新风格」，改验收脚本属于下一批的事。
+      # 现在 CI 每次 push 都会覆盖「全新库」这条路径，这个洞**再也不会因为
+      # "开发机恰好有数据"而被藏住** —— 这本身就是门禁在起作用。
+      - name: 题库种子（生成 + 灌库）
+        run: |
+          set -euo pipefail
+          python db/seed/gen_seed_questions.py --format sql --out data/seed
+          psql -h 127.0.0.1 -U yijian -d yijian -v ON_ERROR_STOP=1 -q -f data/seed/questions.sql
+          psql -h 127.0.0.1 -U yijian -d yijian -tAc \
+            "SELECT 'questions=' || count(*) FROM questions"
+          psql -h 127.0.0.1 -U yijian -d yijian -tAc \
+            "SELECT 'knowledge_points=' || count(*) FROM knowledge_points"
+
+      # ---- 起 API：真 PostgreSQL + fakeredis 顶替 Redis ----
+      # 为什么用 nohup + 重定向：长生命周期子进程若继承本 step 的 stdout，
+      # Actions 会等这个管道 EOF 才认为 step 结束 —— 表现为**卡住直到超时**。
+      - name: 起 API 并等待就绪
+        working-directory: tools/local-verify
+        run: |
+          set -euo pipefail
+          nohup python serve_fake_redis.py --pg-port 5432 --api-port 8123 \
+            --log-file /tmp/yijian-api.log > /tmp/yijian-api.out 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8123/api/v1/health > /dev/null; then
+              echo "API 已就绪"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::API 未在 40s 内就绪"
+          echo "---- serve 输出 ----"; cat /tmp/yijian-api.out || true
+          echo "---- API 日志尾部 ----"; tail -40 /tmp/yijian-api.log || true
+          exit 1
+
+      # ---- 三件事之二：pytest（拦截式）----
+      - name: pytest
+        working-directory: apps/api
+        run: pytest tests -q
+
+  # ================================================================ 前端
+  frontend:
+    name: 前端（tsc --noEmit）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/admin/package-lock.json
+
+      - name: 安装依赖
+        working-directory: apps/admin
+        run: npm ci
+
+      # ---- 三件事之三：tsc（拦截式）----
+      - name: tsc --noEmit
+        working-directory: apps/admin
+        run: npm run typecheck

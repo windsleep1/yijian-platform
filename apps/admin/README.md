@@ -5,6 +5,15 @@
 
 技术栈：Next.js 14（App Router）+ TypeScript + Tailwind + shadcn/ui + TanStack Query v5。
 
+代码检查：`npm run typecheck`（`tsc --noEmit`，CI 拦截式）与 `npm run lint`
+（ESLint，配置在 `.eslintrc.cjs`）。
+
+> ⚠️ `npm run lint` 之前是**假门禁**：脚本写着 `next lint`，但仓库里没有任何 eslint 配置、
+> `eslint` 也不在 devDependencies 里 —— 真跑会进「How would you like to configure ESLint?」
+> **交互式提问**，在 CI / 脚本里直接卡死。也就是说它跑得动只是因为它从来没真跑过
+> （同一族问题见 `docs/B端联调坑.md` 坑 44 / 51）。现已补齐配置；
+> 规则**暂全部设为 `warn`**（当前 14 条存量），第二步再提为 `error` 并挂上 CI。
+
 ---
 
 ## 1. 快速开始

@@ -1,5 +1,7 @@
 # 一建通 · 一级建造师学习备考平台
 
+[![CI](https://github.com/windsleep1/yijian-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/windsleep1/yijian-platform/actions/workflows/ci.yml)
+
 > 面向一级建造师考生的 **学习 / 刷题 / 模拟考试 / 进度管理** 一体化平台。
 > 移动端优先（H5 + PWA），PC Web 作为管理端与深度阅读端。
 
@@ -111,7 +113,9 @@ yijian-platform/
 │   │       └─ api/v1/                # health / auth / admin_users / admin_rbac / admin_audit
 │   │                                 #   / admin_chapters / admin_questions / admin_imports
 │   │                                 #   / admin_exams（共 50 个接口）
-│   └─ admin/                         # 管理后台（Next.js 14，Batch 3–6）
+│   └─ admin/                         # 管理后台（Next.js 14，Batch 3–7）
+│       ├─ .eslintrc.cjs              # ESLint 配置：@typescript-eslint 基础集 + react-hooks
+│       │                             #   （规则暂全为 warn，第二步提为 error）
 │       ├─ src/app/(console)/         # questions（列表/new/[id]）/ imports（列表/new/[id]）
 │       │                             #   / users / audit-logs
 │       ├─ src/components/            # QuestionForm、QuestionVersionDrawer、DataTable、
@@ -126,6 +130,8 @@ yijian-platform/
 │           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）
 │           ├─ screenshots/batch7-pass2b/        # /paper-rules + /exams/new 实时试算（13 张）
 │           └─ screenshots/batch7-state-machine/ # 试卷下线 + 账号停用（4 张）
+├─ .github/workflows/ci.yml           # CI 门禁：tsc --noEmit + pytest + ruff check
+├─ ruff.toml                          # ruff 配置（只开默认集 E4/E7/E9/F，不含风格规则）
 ├─ tools/local-verify/                # 本地联调脚本：起服务 / 冒烟 / 回归探针 / 导入转换器
 ├─ db/
 │   ├─ schema.sql                     # 可直接执行的 PostgreSQL 建表脚本（64 表 + 3 视图 + 102 索引 + 基础数据）
@@ -335,7 +341,52 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 
 ---
 
-## 七、下一步
+## 七、门禁（CI 与本地检查）
+
+**三道检查，两个阶段。**
+
+| 检查 | 命令 | 本阶段 | 第二阶段 |
+|---|---|---|---|
+| 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | 不变 |
+| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 不变 |
+| 后端静态检查 | `ruff check apps/api` | **上报**（`continue-on-error`） | 转成拦截 |
+| 前端 lint | `npm run lint` | 只跑本地，**不上 CI** | 上 CI + 转成拦截 |
+
+CI 配置：`.github/workflows/ci.yml` —— push `main` 与 PR 触发，两个 job（后端 / 前端）。
+
+本地复刻 CI 的后端那一条（起真 PG → 建表 → 迁移 → 种子 → 起 API → pytest）：
+
+```bash
+powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
+```
+
+### 为什么前端 lint / ruff 先只「上报」不「拦截」
+
+本阶段（门禁整顿**第一步**）的目标是**让门禁能真跑起来并吐出清单**，**不修存量问题**。
+存量还在的时候把门禁设成拦截，结果只有一个：CI 恒红。**一个恒红的门禁等于没有门禁** ——
+人很快就不看了，跟现在没配置 lint 的效果一样。所以：
+
+- 前端：`.eslintrc.cjs` 里 `asWarn()` 把 `eslint:recommended` +
+  `@typescript-eslint/recommended` + `react-hooks` 的**每条规则都降成 warn**，
+  `npm run lint` 退出码为 0 但会打印清单（当前 **14 条 / 10 个文件**）。
+- 后端：ruff 走 `continue-on-error`（当前 **19 条**）。
+
+**第二步（独立批）**：先把存量清掉、再让两道门禁**同时**转成拦截，与 `ruff format` /
+`prettier` 全仓格式化**分开提交**（格式化的大 diff 会把业务改动淹掉）。
+
+### ⚠️ 一个已知的口径分歧（第一步发现，**留到下一批修**）
+
+`run-smoke.ps1` **不灌题库种子**（`data/seed/questions.sql`），
+而 `db/schema.sql` 也不含 `questions` / `knowledge_points`。
+所以在**真正全新的库**上它会 **32 条失败**；它在开发机上一直绿，只是因为那个库早先被手工灌过。
+
+CI 已经补上了这一步（生成 0.29s + 灌库 5s，自包含可复现），
+所以这条路径**每次 push 都会被覆盖到** —— 洞不会再被藏住。
+详见 `apps/admin/docs/B端联调坑.md` 坑 51。
+
+---
+
+## 八、下一步
 
 **Batch 1 ~ 7 全部完成**（认证/RBAC → 管理后台 → 题库 CRUD → 导入管道 → 导入向导 →
 组卷引擎（后端 + 前端）→ 状态机补齐），另有**数据范围收口**。往下可以接着推：
