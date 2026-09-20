@@ -2416,6 +2416,35 @@ LOCAL=$(git rev-parse HEAD)
 
 ### 4. 静态门禁 + 回归
 
-- [ ] `npm run typecheck`（前端）与 `python -m compileall`（后端）都 exit 0
+- [ ] `npm run typecheck` / `npm run lint`（前端）与 `python -m compileall` / `ruff check`（后端）都 exit 0
 - [ ] `run-smoke.ps1` 全绿，且**上一批的用例不回归**（对照上一批的 `passed` 数，+N 才对）
 - [ ] 跑 `build` **前**先杀掉 `next dev`（共用 `.next`，否则页面不 hydrate —— 坑 17）
+
+### 5. 覆盖率数字对照（每批必看）★
+
+- [ ] 跑一次 `coverage report`，**把当前数字记下来**，与门槛和"下一档触发条件"对照
+- [ ] 若**触发条件已满足** → 本批就把 `fail_under` 抬上去，并写一条新的"下一档 + 触发条件"
+
+```powershell
+# 一键跑完就有（run-smoke.ps1 收尾会打印 TOTAL 行）；手工复核：
+cd <repo>
+python -m coverage report --data-file .coverage --skip-covered
+# 单看某一层：
+python -m coverage report --data-file .coverage --include "*/app/services/*"
+```
+
+**为什么单列一节**：门槛是**棘轮**，而棘轮只有"会动"才叫棘轮。
+`fail_under` 一旦写死就没人回头看 —— 它会从"门禁"退化成"一个数字"。
+所以把"看当前数字 + 对照触发条件"做成**每批的固定动作**，
+而不是依赖"当时说过达到后要改"。
+
+当前（2026-09-20）状态与触发条件写在仓库根 `.coveragerc`：
+
+```
+fail_under = 65                      （首次实测 65.64%）
+触发：实测 ≥ 70%  或  services ≥ 60%   → 动作：改成 71
+```
+
+⚠️ 顺带记一条**易混的描述**：`services` 层的 49.6% **不是"未来批次还没写的代码"**，
+而是**已有代码里没被测试打到的部分**（错误分支 / 边界处理 / 辅助方法）——
+**补测现在就能做**。把它误当成"等未来"，就会一直等下去。
