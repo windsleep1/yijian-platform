@@ -34,18 +34,13 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.idgen import next_id, to_inet
 from app.core.security import hash_password
+from app.db.base import raw_asyncpg_connection
 
 # ---------------------------------------------------------------- 工具
 
 
 def _log(msg: str) -> None:
     print(f"[cli] {msg}", flush=True)
-
-
-async def _raw_conn():
-    import asyncpg
-
-    return await asyncpg.connect(settings.dsn)
 
 
 def _resolve_schema_file() -> Path | None:
@@ -125,7 +120,7 @@ async def _init_db() -> int:
         _log("db/schema.sql not found; skipping init-db")
         return 0
 
-    conn = await _raw_conn()
+    conn = await raw_asyncpg_connection()
     try:
         exists = await conn.fetchval("SELECT to_regclass('public.users')")
         if exists is not None:
@@ -193,7 +188,7 @@ async def _seed_rbac() -> int:
         )
         return 1
 
-    conn = await _raw_conn()
+    conn = await raw_asyncpg_connection()
     try:
         before = await conn.fetchval("SELECT count(*) FROM roles")
         before_perm = await conn.fetchval("SELECT count(*) FROM role_permissions")
@@ -289,7 +284,7 @@ async def _seed_questions() -> int:
         )
         return 0
 
-    conn = await _raw_conn()
+    conn = await raw_asyncpg_connection()
     try:
         has_subjects = await conn.fetchval("SELECT count(*) FROM subjects")
         if not has_subjects:

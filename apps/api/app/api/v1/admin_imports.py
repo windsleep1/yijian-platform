@@ -38,6 +38,7 @@ from app.core.deps import (
     DbSession,
     client_ip,
     pagination,
+    rate_limit,
     require_permission,
 )
 from app.core.errors import bad_request
@@ -132,7 +133,13 @@ async def list_imports(
         "**本接口不写任何题目**，只创建 `import_batches(status=pending)` 并返回 `batch_no`。\n"
         "单文件上限 20MB、单批上限 20000 行。"
     ),
-    dependencies=[Depends(require_permission("question:import"))],
+    dependencies=[
+        Depends(require_permission("question:import")),
+        # 用户维度限流：docs/04-API接口清单.md §1.4「用户维度 120 次/分钟 | Redis 令牌桶」。
+        # 上传是**不可逆写操作**入口（解析/写盘/建批次），是这一维度最该挂的地方。
+        # ⚠️ 权限门排在前：越权请求先吃 403，**不消耗**限流额度。
+        Depends(rate_limit("import_upload", limit=120, window_seconds=60, by="user")),
+    ],
 )
 async def upload_import(
     request: Request,

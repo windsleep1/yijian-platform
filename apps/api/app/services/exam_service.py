@@ -164,13 +164,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _rule_item_from_json(raw: Any) -> RuleItem:
-    """库里 `rules` 是 JSONB，取出来是 list[dict] / str，统一成 `RuleItem`。"""
-    if isinstance(raw, str):
-        raw = json.loads(raw)
-    return RuleItem.model_validate(raw)
-
-
 def _rule_config_of(row: Any) -> dict[str, Any]:
     """读 `exams.rule_config`。asyncpg 可能给 dict（已解码）或 str。"""
     rc = row.get("rule_config") if hasattr(row, "get") else row["rule_config"]
