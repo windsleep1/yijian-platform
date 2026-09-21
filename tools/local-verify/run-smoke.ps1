@@ -103,7 +103,10 @@ try {
     # ---------- 4. 选一个「真的装了依赖」的 Python ----------
     # 教训：PATH 上的 `python` 很可能是 Anaconda 之类，未必有 fastapi/asyncpg/fakeredis。
     # 这里按优先级逐个探测，第一个能 import 全部依赖的才用。
-    $probe = "import fastapi, sqlalchemy, asyncpg, fakeredis, uvicorn, pytest, httpx, coverage"
+    # ⚠️ `greenlet` 必须在列：`.coveragerc` 的 `[run] concurrency = greenlet` 依赖它。
+    #    它是 `sqlalchemy[asyncio]` 的传递依赖（本地"碰巧装了"≠ CI 装得到），
+    #    所以在这里显式声明为前置条件 —— 缺了要**当场报错**，而不是等覆盖率先跑出个错数字。
+    $probe = "import fastapi, sqlalchemy, asyncpg, fakeredis, uvicorn, pytest, httpx, coverage, greenlet"
     $cands = New-Object System.Collections.Generic.List[string]
     if ($Python -and $Python -ne "python") { $cands.Add($Python) }
     if ($env:YIJIAN_PYTHON) { $cands.Add($env:YIJIAN_PYTHON) }
@@ -122,7 +125,7 @@ try {
     }
     if (-not $pyExe) {
         # 注意：这里必须写成单行 —— PowerShell 5.1 在命令参数位置不接受跨行的括号表达式。
-        Fail "未找到满足依赖的 Python（需 fastapi/sqlalchemy/asyncpg/fakeredis/uvicorn/pytest/httpx/coverage）。可用 -Python <绝对路径> 指定，或先在目标解释器执行： pip install -r apps/api/requirements.txt"
+        Fail "未找到满足依赖的 Python（需 fastapi/sqlalchemy/asyncpg/fakeredis/uvicorn/pytest/httpx/coverage/greenlet）。可用 -Python <绝对路径> 指定，或先在目标解释器执行： pip install -r apps/api/requirements.txt"
     }
     Write-Host "[local-verify] 使用 Python: $pyExe"
 
