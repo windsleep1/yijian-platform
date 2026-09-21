@@ -134,7 +134,7 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 53 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 54 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
 │           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）
@@ -426,7 +426,7 @@ serve_fake_redis.py --coverage --cov-data-file <repo>/.coverage \
 与"run-smoke 从零库仍绿"冲突。取值理由写在 `.coveragerc` 里，不藏。）
 
 ⚠️ **`services` 那 49.6% 不是"未来批次还没写的代码"**（这个描述一开始写错了）：
-services 层是**已经写完、正在跑的代码**，那 1153 条未覆盖语句是**现有代码里没被测试打到的部分** ——
+services 层是**已经写完、正在跑的代码**，那 1154 条未覆盖语句是**现有代码里没被测试打到的部分** ——
 错误分支、边界处理、辅助方法。**区别很重要**：它意味着**补测是现在就能做的事**，不需要等任何未来批次。
 
 #### 抬门槛的**触发条件**（可判定，不靠"记得回来改"）
