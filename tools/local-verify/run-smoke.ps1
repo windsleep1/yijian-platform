@@ -161,10 +161,34 @@ try {
     $env:ADMIN_INIT_PHONE       = "13800000000"
     $env:ADMIN_INIT_PASSWORD    = "Admin@123456"
 
+    # ---------- 4.55 覆盖率数据文件的三个去向（硬约定 L：跨进程执行 = 跨进程测量）----------
+    # ⚠️ **三份分开采、最后 combine**，而不是只采 API 进程：
+    #      .coverage.api    API 进程（HTTP 用例打到的业务代码）
+    #      .coverage.cli    CLI 进程（seed-rbac / seed-admin 跑在**另一个进程**里）
+    #      .coverage.tests  pytest 进程（单元测试**直接调 app 代码**的那部分）
+    # 少任何一份，那条路径的执行就"不在账上"，而覆盖率**看起来仍然正常** ——
+    # 这正是硬约定 J / L 要防的假数字（实测：cli.py 曾报 190/190 全未覆盖，
+    # 而冒烟日志里它明明打印过 `[cli] RBAC seed replayed`）。
+    # 采集前先清场：否则 --append 会把上一轮的数据攒进来，数字虚高且不可复现。
+    $covApi      = Join-Path $repo ".coverage.api"
+    $covCli      = Join-Path $repo ".coverage.cli"
+    $covTests    = Join-Path $repo ".coverage.tests"
+    $covDataFile = Join-Path $repo ".coverage"          # combine 之后的最终报告用
+    $covStopFile = Join-Path $env:TEMP "yijian-cov-stop"
+    if (-not $NoCoverage) {
+        foreach ($f in @($covApi, $covCli, $covTests, $covDataFile)) {
+            Remove-Item -Path $f -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -Path $covStopFile -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Host "[local-verify] 重放 RBAC 种子（幂等，补 viewer 等后加角色）..."
     Push-Location (Join-Path $repo "apps\api")
     try {
-        & $pyExe -m app.cli seed-rbac
+        # CLI 跑在**它自己的进程**里 → 必须在**它自己的进程**里插桩（硬约定 L）。
+        # --append：seed-rbac 与 seed-admin 是两次进程，共用一份 .coverage.cli
+        # （实测 --append 在文件不存在时不报错，直接创建）。
+        & $pyExe -m coverage run --append --data-file $covCli --source app --rcfile (Join-Path $repo ".coveragerc") -m app.cli seed-rbac
         $rcRbac = $LASTEXITCODE
     } finally {
         Pop-Location
@@ -174,7 +198,7 @@ try {
     Write-Host "[local-verify] 初始化超级管理员 ..."
     Push-Location (Join-Path $repo "apps\api")
     try {
-        & $pyExe -m app.cli seed-admin
+        & $pyExe -m coverage run --append --data-file $covCli --source app --rcfile (Join-Path $repo ".coveragerc") -m app.cli seed-admin
         $rcSeed = $LASTEXITCODE
     } finally {
         Pop-Location
@@ -199,15 +223,9 @@ try {
     # ---------- 5. 起 API（真 PG + fakeredis，默认带覆盖率采集）----------
     $apiLog = Join-Path $env:TEMP "yijian-api.log"
 
-    # 覆盖率：**在 API 进程里采集**（用例是 HTTP 打到它的，业务代码全跑在那边；
-    # 在 pytest 进程里跑 --cov=app 只会量到测试自己，数字低到没意义）。
-    # 数据落在仓库根，被 .gitignore 排除。
-    $covDataFile = Join-Path $repo ".coverage"
-    $covStopFile = Join-Path $env:TEMP "yijian-cov-stop"
-    if (-not $NoCoverage) {
-        Remove-Item -Path $covDataFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $covStopFile -Force -ErrorAction SilentlyContinue
-    }
+    # 覆盖率数据文件已在 §4.55 定义并清场（三份分开采 + 最后 combine）。
+    # 这里只说明**为什么 API 进程是采集大头**：用例是 HTTP 打到它的，
+    # 业务代码全跑在那边；在 pytest 进程里跑 --cov=app 只会量到测试自己。
 
     Write-Host "[local-verify] 启动 API :$ApiPort ..."
     # 用 ProcessStartInfo + UseShellExecute=$true 让 API 进程「完全脱离」当前 stdio。
@@ -218,7 +236,7 @@ try {
         # ⚠️ --shutdown-file 是必须的：本脚本收尾用的是 Stop-Process -Force（硬杀），
         #    进程直接消失、atexit 不跑 → coverage 一个字都写不出来。改成"放哨兵文件 →
         #    进程自己收尾"（见 serve_fake_redis.py 的说明）。
-        $apiArgs += " --coverage --cov-data-file `"$covDataFile`" --shutdown-file `"$covStopFile`""
+        $apiArgs += " --coverage --cov-data-file `"$covApi`" --shutdown-file `"$covStopFile`""
     }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName         = $pyExe
@@ -251,7 +269,10 @@ try {
     $env:AI_BASE = "http://127.0.0.1:$ApiPort"
     Push-Location (Join-Path $repo "apps\api")
     try {
-        & $pyExe -m pytest tests -v --tb=short 2>&1 | Tee-Object -FilePath $pytestLog
+        # pytest 进程也要插桩：单元测试里有**直接调 app 代码**的用例
+        # （test_idgen / test_admin_v4::test_content_hash_and_answer_derivation），
+        # 它们在 API 进程的账上根本不会出现。
+        & $pyExe -m coverage run --data-file $covTests --source app --rcfile (Join-Path $repo ".coveragerc") -m pytest tests -v --tb=short 2>&1 | Tee-Object -FilePath $pytestLog
         $rc = $LASTEXITCODE
     } finally {
         Pop-Location
@@ -273,8 +294,41 @@ try {
         if (-not $apiProc.HasExited) {
             Fail "API 收到哨兵后 20s 仍未退出 —— 覆盖率数据可能没落盘，不要相信本次覆盖率"
         }
+        if (-not (Test-Path $covApi) -or (Get-Item $covApi).Length -eq 0) {
+            Fail "API 进程的覆盖率数据为空（$covApi）—— 采集没生效，本次数字不可信"
+        }
+
+        # 硬约定 L / 用户约束③：三份都必须存在且非空，否则**报错而不是静默合并**。
+        # 静默合并的后果是"某条路径根本没跑到，但覆盖率看着正常" —— 假数字。
+        foreach ($pair in @(
+            @(".coverage.api  （API 进程）", $covApi),
+            @(".coverage.cli  （CLI 进程）", $covCli),
+            @(".coverage.tests（pytest 进程）", $covTests))) {
+            if (-not (Test-Path $pair[1]) -or (Get-Item $pair[1]).Length -eq 0) {
+                Fail ("覆盖率数据缺失或为空：{0} —— 拒绝静默合并。三个进程都要有数据，缺一份就说明那条路径的执行不在账上。" -f $pair[0])
+            }
+        }
+
+        Write-Host "[local-verify] 合并三份覆盖率数据（api / cli / tests）..."
+        foreach ($pair in @(@("api", $covApi), @("cli", $covCli), @("tests", $covTests))) {
+            Write-Host ("  {0,-6} {1,8:N0} bytes" -f $pair[0], (Get-Item $pair[1]).Length)
+        }
+        # ⚠️ combine 会把**输入文件删掉**（已实测）；每个文件里的路径是相对路径，
+        #    所以必须从仓库根跑，与下面的 report 一致。
+        Push-Location $repo
+        try {
+            $combineOut = & $pyExe -m coverage combine --data-file $covDataFile $covApi $covCli $covTests 2>&1
+            $rcCombine = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        if ($rcCombine -ne 0) {
+            $combineOut | ForEach-Object { Write-Host "  $_" }
+            Fail "coverage combine 失败（exit=$rcCombine）—— 不继续出报告，避免把不完整的数据当成结论"
+        }
+        $combineOut | ForEach-Object { Write-Host "  $_" }
         if (-not (Test-Path $covDataFile) -or (Get-Item $covDataFile).Length -eq 0) {
-            Fail "覆盖率数据文件为空（$covDataFile）—— 采集没生效，本次数字不可信"
+            Fail "combine 之后的 $covDataFile 为空 —— 合并没生效"
         }
 
         Write-Host ""
