@@ -259,7 +259,7 @@ jobs:
         run: |
           set -euo pipefail
           coverage run --data-file "$GITHUB_WORKSPACE/.coverage.tests" \
-            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m pytest tests -q
+            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m pytest tests -q -rs
 
       # ---- 覆盖率门禁（拦截式）：优雅收尾 → 校验三份 → 合并 → 指纹 → 报告 ----
       #
