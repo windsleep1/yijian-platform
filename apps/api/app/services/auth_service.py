@@ -57,6 +57,12 @@ MAX_UA_LEN = 512
 
 
 async def get_user_by_phone(db: AsyncSession, phone: str) -> User | None:
+    """按手机号取**未注销**用户。
+
+    ⚠️ 只查 `is_deleted = false` 是**有意的**：注销即**释放手机号**
+    （2026-09-22 明确，见 `docs/04` §2.1「账号状态与注销后手机号释放」）。
+    于是已注销的手机号再次短信登录会走"未注册 → 自动建号" —— 这是**设计**，不是漏洞。
+    """
     rows = await db.execute(select(User).where(User.phone == phone, User.is_deleted.is_(False)))
     return rows.scalar_one_or_none()
 
@@ -299,7 +305,13 @@ async def login_by_sms(
 
     user = await get_user_by_phone(db, payload.phone)
     if user is None:
-        # 未注册直接建号：一建考生多是在工地扫码进来，多一步注册就多一层流失
+        # 未注册直接建号：一建考生多是在工地扫码进来，多一步注册就多一层流失。
+        #
+        # ⚠️ 这里同时是「**注销后手机号被释放**」的落点（2026-09-22 明确为有意行为）：
+        #    已注销（`is_deleted=true`）的手机号再次短信登录会**建一个新号**，
+        #    既不复用旧号也不报错。理由：还没到支付/试用阶段，防白嫖不存在；
+        #    释放符合用户预期与合规精神，代码也更简单。
+        #    见 `docs/04` §2.1（含「引入试用/权益前重新评估」的待办）。
         user = await _create_user(
             db,
             phone=payload.phone,
