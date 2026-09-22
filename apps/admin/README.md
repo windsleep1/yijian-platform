@@ -472,13 +472,13 @@ apps/admin/
 │  ├─ types.ts                        与后端契约一一对应
 │  └─ auth-store.ts / auth-context.tsx / permission.ts / format.ts
 ├─ docs/
-│  ├─ B端联调坑.md                     54 条踩过的坑
+│  ├─ B端联调坑.md                     55 条踩过的坑
 │  └─ screenshots/                    人工走查截图存档（batch3 平铺 15 张 / batch4 13 /
 │                                     batch6 18 / batch7-pass2a 14 / batch7-pass2b 13 /
 │                                     batch7-state-machine 4）
 ```
 
-配套文档：**`docs/B端联调坑.md`** —— 54 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
+配套文档：**`docs/B端联调坑.md`** —— 55 条前后端联调踩过的坑（含雪花 ID、Rotation 并发、
 disabled 不出 tooltip、时区、脱敏位置、401 分流、导入管道的含错写库/原文落盘，
 Batch 6 的回滚数字语义、模态框失败态、下载验真，
 Batch 7 的 `subjects` 无 `is_deleted`、SELECT 列与取值清单不一致、

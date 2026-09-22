@@ -1,7 +1,7 @@
 # B 端前后端联调常见坑
 
-> **54 条**实战坑，覆盖 Batch 2 ~ Batch 7（认证/RBAC → 管理后台 → 题库 CRUD
-> → 导入管道 → 导入向导 → 组卷引擎）+ 数据范围收口 + 门禁整顿。每条都按
+> **55 条**实战坑，覆盖 Batch 2 ~ Batch 7（认证/RBAC → 管理后台 → 题库 CRUD
+> → 导入管道 → 导入向导 → 组卷引擎）+ 数据范围收口 + 门禁整顿 + 补测批。每条都按
 > **现象 → 根因 → 解法 → 在本项目里落在哪个文件** 写，方便以后照方抓药。
 >
 > 读法建议：
@@ -2429,6 +2429,66 @@ FastAPI 路由（装饰器接线）、pydantic 校验器（`@model_validator` �
 > 完整分类清单（A/B/C 逐条）见 `docs/18-覆盖率缺口诊断.md`。
 
 ---
+
+## 55. 缺了 gitignored 的生成物时，`pytest.skip` 会把"这条从没跑过"伪装成一个绿对勾 ★（补测批 · 发现于口径对齐验证）
+
+**现象**：CI 全绿、本地全绿，但两边覆盖率**差 13 行**（CI 89.00% / 本地 89.25%），
+逐文件对比只有 `services/import_service.py` 不一致（CI 缺 122 / 本地缺 109）。
+
+**排除过程**（每条都有证据，不是猜）：
+
+| 假设 | 证据 | 结论 |
+|---|---|---|
+| 本地多装了包 → 走了不同分支 | `app/` 里 `importlib\|ImportError\|find_spec` **0 命中** | 排除 |
+| `.env` 差异（gitignored，CI 没有） | **`.env` 根本不存在**；`import_service` 不读 `settings` | 排除 |
+| Python 3.12(CI) / 3.13(本地) 计数口径 | **逐文件 Stmts 完全相同** | 排除 |
+
+**真根因**：
+
+```
+tests/test_admin_v5.py:48   SEED_JSON = REPO / "data" / "seed" / "questions.json"
+_seed_items()               文件不存在 → pytest.skip("缺少种子文件 …")
+seed-questions.py           写死 --format sql     ← 只产出 questions.sql + manifest
+gen_seed_questions.py       默认才是 json,sql,csv
+data/                       gitignored（data/ + !data/.gitkeep）
+```
+
+→ CI（全新环境）**没有** `data/seed/questions.json` → `test_seed_bank_mapping_matches_existing_rows`
+（验收⑤ 的「无损」证明）**静默 skip**；本地跑得起来，**只因为有一份 9-15 的遗留副本** ——
+今天 10:38 那次重写只更新了 `.sql` 与 `manifest`，`questions.json` / `questions.csv` 的
+mtime 还停在 9-15。
+
+**两条判据**：
+
+1. **"本地有"和"环境本该有"是两件事。** 遗留副本与重新生成的文件**逐字节一致**
+   （`4db36a9c…`）—— 内容没错，错的是**没人在干净环境里生成它**。
+   `data/` 被 gitignore 的那一刻起，"本地碰巧有"就不再是任何论据。
+2. **这类问题的唯一入口是覆盖率数字。** skip 不报错、不变红，日志里就是 `2 skipped`
+   混在 600 行中。**是"CI vs 本地逐文件对比"把它逼出来的** —— 这也是口径对齐这一批
+   当场就回本的地方。
+
+**修法（A + B，缺一不可）**：
+
+- **A**：`seed-questions.py` 加 `--format`（默认 `sql,json`）→ CI 也产出 `questions.json`。
+  实测增量 **+0.05s**（1.14s → 1.19s），两个环境从此走同一份逻辑。
+- **B**：`_seed_items()` 的 `pytest.skip` 改 `pytest.fail`（**硬约定 M**）→ 下次再缺**立刻红**，
+  失败消息自带"缺什么 / 它是什么 / 怎么产生"。
+
+⚠️ **顺序不能反**：先 B 后 A，CI 会当场红（那时 CI 仍然缺文件）。**A 验证通过后再改 B。**
+
+**★ 与坑 51 的关系（同一根因，两个相反方向）**：
+
+| | 缺什么 | 表现 | 看得见吗 |
+|---|---|---|---|
+| **坑 51** | 题库种子（全新库 0 题） | **32 failed** | ✅ 立刻 |
+| **坑 55** | `questions.json`（gitignored 生成物） | **静默 skip** | ❌ 只能靠覆盖率对比 |
+
+同一个 `data/` gitignore 根因。修坑 51 时加的"题库种子"这一步**只产出了 `.sql`**
+（够灌库就行），没人注意到还有一条用例要 **`.json`**。
+**教训：把某个生成物加进管道时，要连"还有谁在消费它的其他格式"一起查。**
+
+---
+
 
 ## 附：一条"新增导入管道"的检查清单
 
