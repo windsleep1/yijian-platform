@@ -118,6 +118,18 @@ jobs:
           cache: pip
           cache-dependency-path: apps/api/requirements.txt
 
+      # ---- 身份锚点：让日志**自带出处**（坑 56）----
+      #
+      # 为什么**独立成一步、且放最前面**：贴回来的日志可能来自 pytest / 覆盖率门禁 /
+      # 或将来新增的步骤 —— **只在一处 echo 不够**。把身份打在每一段关键输出的开头，
+      # "复制"这个动作就天然带上了"这是哪一次运行"。
+      #
+      # ⚠️ `GITHUB_HEAD_REF` **只在 PR 事件里有值**，push 时是空的（日志里会留下 `branch=`，
+      #    看起来像 bug）—— 所以额外打了 `name=$GITHUB_REF_NAME`（push 时是 `main`，
+      #    PR 时是分支名），两种事件都可用。
+      - name: 打身份锚点
+        run: echo "run=$GITHUB_RUN_ID sha=$GITHUB_SHA ref=$GITHUB_REF branch=$GITHUB_HEAD_REF name=$GITHUB_REF_NAME"
+
       - name: 安装依赖
         run: pip install -r apps/api/requirements.txt
 
@@ -275,6 +287,9 @@ jobs:
       - name: 覆盖率门禁（合并三份 → 报告 → 指纹）
         run: |
           set -euo pipefail
+
+          # ⚠️ 身份锚点（坑 56）：这一段输出最常被复制回来 —— 让它**自带出处**。
+          echo "==== run=$GITHUB_RUN_ID sha=$GITHUB_SHA ref=$GITHUB_REF name=$GITHUB_REF_NAME ===="
 
           # ---- 1. 让 API 优雅退出（放哨兵 → 它自己 cov.save()）----
           touch /tmp/yijian-cov-stop
