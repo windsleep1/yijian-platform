@@ -652,8 +652,25 @@ def _load_sim_bank_tool():
 
 
 def _seed_items() -> list[dict]:
+    # ⚠️ 这里**刻意是 fail 而不是 skip**（硬约定 M，2026-09-22 由 skip 改来）：
+    #    `data/` 是 gitignored，所以一个**全新环境**（CI、或刚 clone 的机器）
+    #    本来就没有这个文件 —— 用 skip 的话，「CI 从来没跑过这条用例」会表现为
+    #    一个绿色的对勾（`2 skipped` 混在 600 行日志里没人看）。
+    #    实测过：CI 上这条一直是 skip，本地只因为有一份遗留副本才跑得起来，
+    #    于是同一个用例在两个环境行为不同，而覆盖率上只表现为"少 13 行"（坑 55）。
+    #    判据：**换个干净环境跑，这条不该还是 skip** —— 那就该 fail。
     if not SEED_JSON.exists():
-        pytest.skip(f"缺少种子文件 {SEED_JSON}")
+        pytest.fail(
+            "缺少种子文件：data/seed/questions.json\n"
+            f"  期望路径：{SEED_JSON}\n"
+            "  它是什么：种子题库的 JSON 格式（6000 题完整字段）。本用例拿它当输入，\n"
+            "            验证导入管道在**真实体量**下的幂等性（验收⑤ 的「无损」证明）。\n"
+            "  怎么产生：python tools/local-verify/seed-questions.py --format sql,json\n"
+            "            （若只要文件、不想灌库：\n"
+            "             python db/seed/gen_seed_questions.py --format sql,json "
+            "--out data/seed --count 6000）",
+            pytrace=False,
+        )
     return json.loads(SEED_JSON.read_text(encoding="utf-8"))
 
 

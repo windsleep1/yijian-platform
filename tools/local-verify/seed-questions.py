@@ -86,6 +86,18 @@ def main() -> int:
     ap.add_argument("--db-user", default="yijian")
     ap.add_argument("--psql", default="psql", help="path to psql binary (default: from PATH)")
     ap.add_argument("--count", type=int, default=6000, help="target question count")
+    # ⚠️ 默认**必须**含 json，不能写成只出 sql（2026-09-22 改，坑 55）：
+    #    `apps/api/tests/test_admin_v5.py` 的「验收⑤ 无损证明」把
+    #    `data/seed/questions.json` 当输入。此前这里写死 `--format sql`，
+    #    而 `data/` 是 gitignored —— CI 全新环境**没有**该文件 → 那条用例
+    #    **静默 skip**；本地只因为有一份 9-15 的**遗留物**才跑得起来。
+    #    同一个用例在两个环境行为不同，而且失败方向是"看不见"（skip 不是 fail）。
+    ap.add_argument(
+        "--format",
+        default="sql,json",
+        help="输出格式（逗号分隔，透传给 db/seed/gen_seed_questions.py）。"
+        "默认 sql,json —— json 是导入管道幂等性用例的输入，**不能省**",
+    )
     ap.add_argument("--skip-generate", action="store_true",
                     help="reuse an existing data/seed/questions.sql (debug only, not for acceptance)")
     args = ap.parse_args()
@@ -109,7 +121,7 @@ def main() -> int:
             print(f"[seed] generator not found: {gen}", file=sys.stderr)
             return 1
         out = run(
-            [sys.executable, str(gen), "--format", "sql",
+            [sys.executable, str(gen), "--format", args.format,
              "--out", str(out_dir), "--count", str(args.count)],
             cwd=gen.parent, env=env,
         )
