@@ -272,7 +272,11 @@ try {
         # pytest 进程也要插桩：单元测试里有**直接调 app 代码**的用例
         # （test_idgen / test_admin_v4::test_content_hash_and_answer_derivation），
         # 它们在 API 进程的账上根本不会出现。
-        & $pyExe -m coverage run --data-file $covTests --source app --rcfile (Join-Path $repo ".coveragerc") -m pytest tests -v --tb=short 2>&1 | Tee-Object -FilePath $pytestLog
+        # ⚠️ `-rs`（打印每条 skip 的**文件:行号 + 原因**）不是装饰，是必需：
+        #    一个裸的 `N skipped` 会把"某条用例从没跑过"藏起来 —— 坑 55 就是这样
+        #    在 CI 上藏了几个月的（覆盖率上只表现为"少 13 行"）。硬约定 M 的同一条道理：
+        #    **把"没跑"这件事本身变成可见信息**。CI 的 pytest 步骤也带 `-rs`（保持两边一致）。
+        & $pyExe -m coverage run --data-file $covTests --source app --rcfile (Join-Path $repo ".coveragerc") -m pytest tests -v --tb=short -rs 2>&1 | Tee-Object -FilePath $pytestLog
         $rc = $LASTEXITCODE
     } finally {
         Pop-Location
