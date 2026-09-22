@@ -879,7 +879,11 @@ async def validate_batch(
         .mappings()
         .all()
     )
-    if not raw_rows:
+    if not raw_rows:  # pragma: no cover
+        # 保留不测（pragma 是**显式决定**，不是遗漏）：
+        # 唯一写 import_items 的是 create_batch → _store_raw_rows(:679)，而它在
+        # :641-644 已保证 rows 非空、未超上限 ⇒ 这个分支在正常流程下**不可达**。
+        # 保留是为了"将来有人新增别的写入路径"时仍有兜底。见 docs/19 §4。
         raise bad_request("批次没有可校验的行（可能未上传成功）", 40001)
 
     await db.execute(
@@ -1359,7 +1363,10 @@ async def _load_full_payloads(
     换来的是 `import_items` 不被原文撑爆。
     """
     content = await _read_batch_file(batch_id, batch["file_type"])
-    if content is None:
+    if content is None:  # pragma: no cover
+        # 第二道防线：execute_batch:1241 已先行抛出同一错误，正常流程到不了这个分支。
+        # 保留是**为了 1242 将来被重构掉时仍有兜底** —— 删了它，重构时容易漏。
+        # 保留不测是显式决定（见 docs/19 §5）。
         raise bad_request("批次原始文件已不可用，无法执行导入（请重新上传）", 40001)
 
     rows = parse_file(content, batch["file_type"])
@@ -1981,7 +1988,10 @@ async def rollback_batch(
                 .mappings()
                 .first()
             )
-            if snap is None:
+            if snap is None:  # pragma: no cover
+                # 保留不测（显式决定，见 docs/19 §4）：要触发它得先把 question_versions
+                # 里该题的版本行**手工删掉**才能构造 —— 成本明显高于价值。
+                # 但它在语义上意味着"回滚静默跳过一行"，有真实告警价值，所以**不删代码**。
                 continue
             s = snap["snapshot"] or {}
             await db.execute(
