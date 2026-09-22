@@ -5,10 +5,27 @@
 #     ruff check                   后端静态检查
 #     ruff format --check          后端格式（ruff.toml 的 line-length = 100）
 #     pytest                       后端全量用例（真 PostgreSQL）
-#     coverage report              后端覆盖率（门槛 = `.coveragerc` 的 fail_under）
+#     coverage combine             三份进程数据合并（api / cli / tests）
+#     coverage report              后端覆盖率（门槛 = `.coveragerc` 的 fail_under = 85）
+#     sha256sum .coverage          合并结果指纹（两次 run 对比 → 验合并确定性）
 #     npm run lint                 前端 eslint（规则全 error）
 #     npm run format:check         前端格式（prettier，配置见 prettier.config.mjs）
 #     tsc --noEmit                 前端类型
+#
+# ## 覆盖率为什么要采**三份**数据（2026-09-22 对齐，硬约定 L）
+#
+# 业务代码在**哪个进程**里跑，覆盖率就得在**哪个进程**里插桩 —— 一份都省不掉：
+#
+#     .coverage.api     API 进程      serve_fake_redis.py --coverage --cov-data-file
+#     .coverage.cli     CLI 进程      seed-rbac / seed-admin（两个进程共用一份，用 --append）
+#     .coverage.tests   pytest 进程   单元测试里直接调用 app 代码的那部分
+#     .coverage         combine 三份之后的**报告用**文件
+#
+# ⚠️ 之前只采 `.coverage.api` 一份，结果是**本地 89.25% / CI 86.7%** —— 两个环境报两个数，
+#    正是硬约定 J 要防的东西（两个测量值 = 两个不同的测量）。
+#    当时的注释写「在 pytest 进程里跑 `--cov=app` 只会量到测试自己导入的几个纯函数模块」——
+#    这句本身没错，**错在据此把那一份整份丢掉**：正确做法是**单独采一份再合并**，不是不采。
+#    `cli.py` 整文件曾报 0%（190/190），就是这条口径丢出来的假账。
 #
 # ## 拦截式 vs 上报式（演进的痕迹，留着有用）
 #
@@ -19,6 +36,7 @@
 # | `ruff check` | 上报（`continue-on-error`） | **拦截**（存量 19 条清零后转的） |
 # | `npm run lint` | 不在 CI（本地全 warn，退出码 0） | **拦截**（存量 14 条清零 + 提级后上来的） |
 # | `coverage report` | 无 | **拦截**（门槛依据见 `.coveragerc`） |
+# | `coverage combine` | 无（只采 API 进程一份） | **拦截**（2026-09-22：三份各进程插桩 + combine） |
 # | `ruff format --check` | 无 | **拦截**（Commit B：先全仓格式化，再挂 check） |
 # | `npm run format:check` | 无 | **拦截**（同上） |
 #
@@ -32,11 +50,14 @@
 #
 # ## 每一步都在复刻 `run-smoke.ps1` 的链路
 #
-# 起 PG → 建表 → 迁移 → 种子(RBAC/超管) → **题库种子** → 起 API → pytest → 覆盖率。
+# 起 PG → 建表 → 迁移 → 种子(RBAC/超管) → **题库种子** → 起 API → pytest → 合并覆盖率 → 门禁。
 # 「题库种子」这一步**调的是 `tools/local-verify/seed-questions.py`** ——
-# 与 `run-smoke.ps1` 同一个脚本；`--coverage/--shutdown-file` 也是同一套参数。
+# 与 `run-smoke.ps1` 同一个脚本；`--coverage/--shutdown-file/--cov-data-file` 也是同一套参数。
 # **修坑 51 时最容易犯的错是 CI 与本地各写一套**，那两套迟早漂，
 # 于是又回到"本地绿、CI 红"的口径分歧。
+#
+# ⚠️ 覆盖率的**门槛数字不在本文件里**（不在命令行写 `--fail-under`）：
+#    唯一来源是仓库根 `.coveragerc` 的 `[report] fail_under`，本地与 CI 共用同一份。
 
 name: CI
 
@@ -53,7 +74,7 @@ concurrency:
 jobs:
   # ================================================================ 后端
   backend:
-    name: 后端（ruff + pytest）
+    name: 后端（ruff + pytest + coverage）
     runs-on: ubuntu-latest
 
     services:
@@ -100,6 +121,22 @@ jobs:
       - name: 安装依赖
         run: pip install -r apps/api/requirements.txt
 
+      # ---- 清场：删掉上一轮的覆盖率数据（**必须在第一次采集之前**）----
+      #
+      # ⚠️ 位置有讲究，**不能挪回「起 API」那一步**（原来就在那里）：
+      #    CLI 插桩（下面的「种子（RBAC + 超管）」）**排在起 API 之前**，
+      #    那时 `.coverage.cli` 已经产出了 —— 清场若放在起 API 那一步，
+      #    会把**刚采到的 CLI 数据删掉**。症状是 combine 报「.coverage.cli 缺失」，
+      #    而根因是清场顺序错了：**错的症状指向错的地方**（硬约定 J 的同类风险）。
+      #
+      # 逐份列名，**不写 `.coverage*`** —— 那个通配符会匹配到 `.coveragerc`（配置文件）。
+      - name: 清场（删除历史覆盖率数据）
+        run: |
+          set -euo pipefail
+          rm -f .coverage .coverage.api .coverage.cli .coverage.tests
+          echo "清场完成，剩余 .coverage* ："
+          ls -la .coverage* 2>/dev/null || echo "  （无，符合预期）"
+
       # ---- 三件事之一：ruff（**拦截式**）----
       # 2026-09-20 转拦截：存量 19 条已清零（10 条 --fix + 8 条 E741 手动改名 +
       # 1 条 F821 补 import），`ruff check apps/api` 现在是 "All checks passed!" 退出码 0。
@@ -127,12 +164,26 @@ jobs:
             psql -h 127.0.0.1 -U yijian -d yijian -v ON_ERROR_STOP=1 -q -f "$m"
           done
 
+      # ---- 种子（RBAC + 超管）：**CLI 进程插桩**（2026-09-22 起）----
+      #
+      # `seed-rbac` / `seed-admin` 是**两个独立进程**，业务代码跑在它们里面，
+      # 而覆盖率采集在 API 进程 —— 不插桩就永远看不见（`cli.py` 曾整文件报 0%）。
+      # 判据（硬约定 L）：**代码在哪个进程跑，就在哪个进程插桩**，不要 omit。
+      #
+      # ⚠️ 数据文件与 rcfile 都用**绝对路径 `$GITHUB_WORKSPACE/...`**：
+      #    本步的 `working-directory` 是 `apps/api`，写相对路径会把数据落在子目录里，
+      #    之后在仓库根 combine 会找不到（症状同样是"缺文件"，根因却是路径）。
+      # ⚠️ 两次进程**共用**一份 → 第二次必须 `--append`。
+      #    实测过：`--append` 在文件不存在时**不报错**（exit 0，文件被创建），
+      #    所以两条命令写法统一，不需要先 touch。
       - name: 种子（RBAC + 超管）
         working-directory: apps/api
         run: |
           set -euo pipefail
-          python -m app.cli seed-rbac
-          python -m app.cli seed-admin
+          coverage run --append --data-file "$GITHUB_WORKSPACE/.coverage.cli" \
+            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m app.cli seed-rbac
+          coverage run --append --data-file "$GITHUB_WORKSPACE/.coverage.cli" \
+            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m app.cli seed-admin
 
       # ---- 题库种子：生成 + 灌库 ----
       #
@@ -154,6 +205,9 @@ jobs:
       # `run-smoke.ps1` 调的是同一个脚本。
       # 修坑 51 时最容易犯的错就是"CI 与本地各写一套"，那两套迟早漂，
       # 于是又回到"本地绿、CI 红"的口径分歧（正是坑 51 的形态）。
+      #
+      # 注：本步**不插桩**——它跑的是 `tools/` 下的脚本，不是 `app/` 的业务代码，
+      #     不产生 `.coverage.*` 的第四份数据。
       - name: 题库种子（生成 + 灌库）
         run: python tools/local-verify/seed-questions.py --pg-port 5432
 
@@ -162,18 +216,23 @@ jobs:
       # Actions 会等这个管道 EOF 才认为 step 结束 —— 表现为**卡住直到超时**。
       #
       # 为什么覆盖率在**这个进程**里采：用例是 HTTP 打到它的，业务代码全跑在那边；
-      # 在 pytest 进程里跑 `--cov=app` 只会量到测试自己导入的几个纯函数模块。
+      # 在 pytest 进程里跑 `--cov=app` 只会量到测试自己导入的几个纯函数模块
+      # （**所以那一部分要单独采一份 `.coverage.tests` 再合并，而不是不采** —— 见 pytest 那一步）。
       #
       # ⚠️ `--shutdown-file`：收尾不能靠 kill（进程直接消失、atexit 不跑 →
       #    覆盖率数据一个字都写不出来）。改成"放哨兵文件 → 进程自己收尾写盘"。
+      #
+      # ⚠️ 数据文件名是 `.coverage.api`（不再是 `.coverage`）—— 三份数据各归各的名字，
+      #    合并后的文件才叫 `.coverage`。本步**不再负责清场**（已挪到最前面的独立步骤，
+      #    因为那个位置会把刚采到的 `.coverage.cli` 删掉）。
       - name: 起 API 并等待就绪（带覆盖率采集）
         working-directory: tools/local-verify
         run: |
           set -euo pipefail
-          rm -f "$GITHUB_WORKSPACE/.coverage" /tmp/yijian-cov-stop
+          rm -f /tmp/yijian-cov-stop
           nohup python serve_fake_redis.py --pg-port 5432 --api-port 8123 \
             --log-file /tmp/yijian-api.log \
-            --coverage --cov-data-file "$GITHUB_WORKSPACE/.coverage" \
+            --coverage --cov-data-file "$GITHUB_WORKSPACE/.coverage.api" \
             --shutdown-file /tmp/yijian-cov-stop > /tmp/yijian-api.out 2>&1 &
           for i in $(seq 1 40); do
             if curl -sf http://127.0.0.1:8123/api/v1/health > /dev/null; then
@@ -187,18 +246,37 @@ jobs:
           echo "---- API 日志尾部 ----"; tail -40 /tmp/yijian-api.log || true
           exit 1
 
-      # ---- 三件事之二：pytest（拦截式）----
+      # ---- 三件事之二：pytest（拦截式）+ **pytest 进程插桩**（2026-09-22 起）----
+      #
+      # 用例绝大多数走 HTTP 打到 API 进程，但**有一小部分是直接调用 app 代码**的
+      # （如 `tests/test_idgen.py`、`test_admin_v4.py::test_content_hash_and_answer_derivation`）——
+      # 它们跑在 pytest 进程里，API 进程采不到（硬约定 L：跨进程执行 = 跨进程测量）。
+      #
+      # ⚠️ `coverage run` 会把 pytest 的退出码**原样带出来**，所以用例失败仍然是硬失败，
+      #    不会因为套了一层 coverage 就变成"看起来过了"。
       - name: pytest
         working-directory: apps/api
-        run: pytest tests -q
-
-      # ---- 覆盖率门禁（拦截式）----
-      # 先让 API 优雅退出（放哨兵 → 它自己 cov.save()），再出报告。
-      # ⚠️ 顺序反了就拿到一个 0% 的假数字而不是报错 —— 那是最难发现的一种假绿。
-      # 门槛（fail_under）在仓库根 `.coveragerc`，与本地 `run-smoke.ps1` **同一个来源**。
-      - name: 覆盖率门禁
         run: |
           set -euo pipefail
+          coverage run --data-file "$GITHUB_WORKSPACE/.coverage.tests" \
+            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m pytest tests -q
+
+      # ---- 覆盖率门禁（拦截式）：优雅收尾 → 校验三份 → 合并 → 指纹 → 报告 ----
+      #
+      # 门槛（`fail_under = 85`）写在仓库根 `.coveragerc`，与本地 `run-smoke.ps1`
+      # **同一个来源**；本文件**不在命令行再写一遍数字**。
+      #
+      # ⚠️ 顺序反了就拿到一个 0% 的假数字而不是报错 —— 那是最难发现的一种假绿。
+      # ⚠️ 三份数据**缺一份就硬失败**，不静默合并：静默合并的表现是
+      #    "某个进程没产出、而报告看起来正常（数字偏低但没有任何报错）"，
+      #    与坑 44/51/54 同族 —— **没有任何东西会报错**的那一类。
+      # ⚠️ 本步不设 `working-directory`：默认就是 `$GITHUB_WORKSPACE`，
+      #    三份数据在那里、合并也在那里、报告也从那里出（三者必须同目录）。
+      - name: 覆盖率门禁（合并三份 → 报告 → 指纹）
+        run: |
+          set -euo pipefail
+
+          # ---- 1. 让 API 优雅退出（放哨兵 → 它自己 cov.save()）----
           touch /tmp/yijian-cov-stop
           for i in $(seq 1 60); do
             if ! curl -sf http://127.0.0.1:8123/api/v1/health > /dev/null; then
@@ -207,15 +285,34 @@ jobs:
             fi
             sleep 1
           done
+
+          # ---- 2. 失败态显式：三份逐份检查「存在且非空」，缺一份就退出 ----
+          for f in .coverage.api .coverage.cli .coverage.tests; do
+            if [ ! -s "$f" ]; then
+              echo "::error::覆盖率数据缺失或为空：$f —— 拒绝静默合并"
+              echo "---- 现有 .coverage* ----"; ls -la .coverage* || true
+              echo "---- API 日志尾部 ----"; tail -20 /tmp/yijian-api.log || true
+              exit 1
+            fi
+            echo "  ✅ $f  $(stat -c%s "$f") bytes"
+          done
+
+          # ---- 3. 合并三份（在仓库根跑；combine 会**删除输入文件**）----
+          echo "---- combine ----"
+          coverage combine --data-file .coverage .coverage.api .coverage.cli .coverage.tests
           if [ ! -s .coverage ]; then
-            echo "::error::覆盖率数据文件为空 —— 采集没生效，本次数字不可信"
-            tail -20 /tmp/yijian-api.log || true
+            echo "::error::combine 未产出 .coverage（或为空）"
             exit 1
           fi
+
+          # ---- 4. 指纹：两次 run 的 sha256 应当一致 → 这就是合并确定性的 dry run ----
+          echo "---- .coverage 指纹（与另一次 run 对比）----"
+          sha256sum .coverage
+
+          # ---- 5. 门禁本体 ----
           coverage report --data-file .coverage --skip-covered
-          # 门禁本体就是上面这一句：`fail_under` 写在 `.coveragerc` 的 [report] 里，
-          # `coverage report` 会自动读它，低于门槛就以非 0 退出。
-          # **不在命令行再写一遍数字** —— 门槛只有一个来源（与本地 run-smoke.ps1 共用）。
+          # `fail_under` 在 `.coveragerc` 的 [report] 里（现为 85）：
+          # `coverage report` 自动读它，低于门槛就以非 0 退出。
 
   # ================================================================ 前端
   frontend:
