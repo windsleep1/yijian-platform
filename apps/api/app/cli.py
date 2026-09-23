@@ -337,7 +337,9 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_seed_admin())
     if args.command == "seed-questions":
         return asyncio.run(_seed_questions())
-    return 2
+    # argparse 的 `choices` 已枚举全部取值，非法命令在 parse_args 阶段就以 2 退出 ——
+    # 这一行**不可达**，留着是"以后加子命令忘了接分派"时的兜底（那时它会变成 2 而不是 None）。
+    return 2  # pragma: no cover
 
 
 if __name__ == "__main__":
