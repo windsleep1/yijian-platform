@@ -1530,8 +1530,11 @@ async def _write_rows(
                 )
             p["parent_id"] = parent
             p["root_id"] = parent
+        # ⚠️ 顺序**必须**是"先回写 payload，再 stage" —— stage() 内部读的是 `o.payload`，
+        # 只要回写在它之后，上面刚算出的 parent_id / root_id 就进不了 INSERT 参数，
+        # 案例小问会静默变成没有父题的孤儿（被 ⑤c-3 的端到端用例抓到）。
+        o.payload = p
         stage(o, qid, o.row_no)
-        o.payload = p  # 供 _snapshot_from_payload 使用
     inserted = len(case_rows) + len(other_rows)
 
     for start in range(0, len(question_rows), WRITE_CHUNK):
