@@ -2747,6 +2747,36 @@ mtime 还停在 9-15。
 
 **🔧 取证步骤的决定（2026-09-23 用户裁定）：暂不加。**
 
+#### 🎯 归因完成（2026-09-23 18:2x）—— **OPEN 关闭**
+
+**真凶：`test_admin_v7.py` 里某条用例的 teardown**（**不是**本轮新增的 `test_cli_commands.py`）。
+
+- **定位**：用户贴回的日志尾部 = `..............................................s......................... [ 28%]`
+  → **72 个圆点**。`-q` 的圆点是**每条用例跑完才写**的（本地实测：跑到一半能读到"半行"，
+  说明每条都刷盘），按「圆点 ↔ 用例顺序」（253 条，一行 80 个）⇒ **第 73 条**：
+  `test_admin_v7.py::test_exam_restore_roundtrip_and_idempotent`。
+  ⭐ **第 72 条的点已经打出来了** ⇒ 卡的是**第 72 条的 teardown**，不是第 73 条的 body。
+- ⚠️ **我原先的预测（#113 `test_wait_redis_returns_0_when_it_answers`）被这条日志否证**。
+  如实记下，免得下次又把"最可疑的那个"当成"就是那个"：
+  **"名单里只有一个候选"不等于"原因只有一个"**。
+- **机制（结构性，不是猜）**：`created` fixture 的清理（`test_admin_v7.py:93–102`）走
+  `conftest.sql_exec` 做 `DELETE`；而 `sql_exec` 是 `asyncpg.connect(dsn)` ——
+  **既无 `timeout` 也无 `command_timeout`**。asyncpg 的 `timeout=` 只管**建连**，
+  **单条命令**要 `command_timeout=`，默认 `None` = **无限等**。
+  ⇒ 只要撞上别人（API 进程）**未提交的行锁**，`DELETE` 就**永远等下去** —— 不是报错，是沉默。
+  **间歇性**也对上了：取决于那一瞬 API 手里有没有未提交的事务。
+- **实测（本机，构造未提交的行锁 + 子进程持锁）**：
+  · 老形态（无 `command_timeout`）：外层 8s 兜底**都等不到** → **会一直等** ✅ 根因成立
+  · 修好后 `conftest.sql_exec`：**30.4s 抛 `TimeoutError`** → **有界失败** ✅ 修复成立
+- **审计（用户要求：不止修一条）**：`tests/` 全部 + `tools/local-verify/`，40 个文件，
+  判据「**这条如果对端永远不响应，它会一直等吗？**」→ 扫出并修掉 **9 处**同类无界等待：
+  `conftest.sql_exec` / `sql_fetch`（**共享，影响面最大**）、`test_admin_v4.py` / `test_admin_v5.py`
+  各自的本地直连 helper、`test_cli_commands.py` 的 3 个临时库连接、
+  `tools/local-verify/import-sim-bank.py`、`restore-e2e-softdeleted.py`、`test_idgen.py` 的
+  `t.join()`（无超时 → `join(timeout=60)` + 断言线程已结束）。
+  **其余调用点本已有界**（httpx `timeout=15`、`cdp_browser.wait_for`），未动。
+
+
 理由：**省一次 CI 运行** —— 当前走「**人贴日志尾部**」这条路（见上表，圆点 ↔ 用例一一对应，
 贴最后 1~3 行即可定位）。**如果将来"贴日志"变成常态**（排查不再是偶发），
 再加那个 `if: always()` 的取证步骤（pytest 每起一条用例写一行到文件 →
