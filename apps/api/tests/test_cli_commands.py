@@ -58,7 +58,9 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import asyncpg
 import pytest
+import redis.asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -256,18 +258,75 @@ def test_wait_db_returns_0_when_postgres_is_up(capsys: pytest.CaptureFixture[str
     assert "PostgreSQL ready" in _out(capsys)
 
 
+def _refusing_connect() -> tuple[Any, list[str]]:
+    """返回 (`asyncpg.connect` 的替身, **调用记录**)。
+
+    为什么要记录：**只靠耗时上界抓不住"mock 被删掉"**。实测本机真连
+    `127.0.0.1:1`（RST）只要 3.5s，仍在 5s 之内 —— 用例会照过，而"依赖网络"的
+    毛病已经回来了。有了调用记录，"连接函数压根没被调用"就成**确定性失败**。
+    """
+    calls: list[str] = []
+
+    async def _connect(*_a: Any, **_k: Any) -> Any:
+        calls.append("asyncpg.connect")
+        raise ConnectionRefusedError(111, "Connection refused (stub)")
+
+    return _connect, calls
+
+
+def _dead_redis_factory() -> tuple[Any, list[str]]:
+    """返回 (`redis.asyncio.from_url` 的替身, **调用记录**)。`ping()` 立刻抛错。"""
+    calls: list[str] = []
+
+    class _DeadRedis:
+        async def ping(self) -> None:
+            calls.append("ping")
+            raise ConnectionRefusedError(111, "Connection refused (stub)")
+
+        async def aclose(self) -> None:
+            return None
+
+    def _from_url(*_a: Any, **_k: Any) -> Any:
+        calls.append("from_url")
+        return _DeadRedis()
+
+    return _from_url, calls
+
+
+# ⚠️ 下面两条"不可达"用例**刻意不连任何地址**（2026-09-23 改，坑 57）。
+#
+# 原写法是删掉 host 只留端口（`127.0.0.1:1`）去**真连**，理由是"ECONNREFUSED 是瞬时的"。
+# 那个理由只在**包被拒绝（RST）**时成立；一旦包被**丢弃（DROP）**，代价由**操作系统的
+# SYN 重试预算**决定，与代码无关。实测（2026-09-23，本机）：
+#
+#     _wait_db    到不可路由地址    6.5s   ← asyncpg 自带 `timeout=5`，有界
+#     _wait_redis 到不可路由地址   22.6s   ← **没有任何应用层超时**，本地 SYN 重试 21s
+#                                          （Linux `tcp_syn_retries=6` ≈ 128s）
+#
+# 于是"这条用例跑多久"成了**宿主机 TCP 栈的属性**，而不是被测代码的属性 ——
+# 那正是"把网络超时当单元测试"。CI 上偏巧卡在这个形状上（run 35838184843 的 pytest
+# 步骤跑了 1689s 没结束），所以把连接函数换掉。
+#
+# 两条守卫各管一头：`calls` 断言"**连接真的被换掉了**"（确定性）；
+# `elapsed < 5` 断言"**没人在等网络超时**"（抓 DROP 那种几十秒的量级）。
+
+
 def test_wait_db_times_out_with_1_when_unreachable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """库不可达 → **超时后返回 1**，不能永远挂着（否则容器启动流程会静默卡死）。"""
+    connect, calls = _refusing_connect()
+    monkeypatch.setattr(asyncpg, "connect", connect)
     monkeypatch.setattr(cli, "settings", _cfg(dsn="postgresql://yijian@127.0.0.1:1/yijian"))
     t0 = time.monotonic()
     assert cli.main(["wait-db", "--timeout", "1"]) == 1
     elapsed = time.monotonic() - t0
     assert "timed out waiting for PostgreSQL" in _out(capsys)
+    assert calls == ["asyncpg.connect"], f"连接函数没被换掉/没被调用：{calls}"
     # 正向对照的替代判据：**确实重试过**（一次失败后至少 sleep 1.5s 才判超时）。
     # 少了它，"返回 1"可能只是"函数一进来就 return 1"。
     assert elapsed >= 1.3, f"没等过就返回了（{elapsed:.2f}s）—— 重试循环可能没跑"
+    assert elapsed < 5, f"耗时 {elapsed:.2f}s 远超重试间隔 —— 用例又依赖网络超时了"
 
 
 def test_wait_redis_returns_0_when_it_answers(
@@ -286,13 +345,22 @@ def test_wait_redis_returns_0_when_it_answers(
 def test_wait_redis_times_out_with_1_when_unreachable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Redis 不可达 → 超时后返回 1。"""
+    """Redis 不可达 → 超时后返回 1。
+
+    ⚠️ 连接函数被换掉（见上面那段说明）：这条是**全文件最会被宿主机拖慢**的用例 ——
+    `_wait_redis` 的 `from_url` 不带 `socket_connect_timeout`，丢包时只能等 OS
+    SYN 重试（本机实测 22.6s，Linux 约 128s）。
+    """
+    from_url, calls = _dead_redis_factory()
+    monkeypatch.setattr(redis.asyncio, "from_url", from_url)
     monkeypatch.setattr(cli, "settings", _cfg(redis_url="redis://127.0.0.1:1/0"))
     t0 = time.monotonic()
     assert cli.main(["wait-redis", "--timeout", "1"]) == 1
     elapsed = time.monotonic() - t0
     assert "timed out waiting for Redis" in _out(capsys)
+    assert calls == ["from_url", "ping"], f"连接函数没被换掉/没被调用：{calls}"
     assert elapsed >= 1.3, f"没等过就返回了（{elapsed:.2f}s）—— 重试循环可能没跑"
+    assert elapsed < 5, f"耗时 {elapsed:.2f}s 远超重试间隔 —— 用例又依赖网络超时了"
 
 
 # ---------------------------------------------------------------- init-db
@@ -338,9 +406,18 @@ def _scratch_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], 
     admin_dsn = settings.dsn
     scratch = f"{admin_dsn.rsplit('/', 1)[0]}/{name}"
 
+    # ⚠️ 集群级 DDL 必须**自带超时**（2026-09-23 加，坑 57）。
+    #
+    # `CREATE/DROP DATABASE` 不是普通的写：它要等**整个集群**（检查点、旁观事务）。
+    # 等不到就是**无限期**阻塞 —— 而 pytest 没有超时机制，表现是"CI 卡在 pytest"。
+    # 本机实测：单次 DROP 约 7s（磁盘 fsync），有 idle-in-transaction 旁观者时
+    # **并不阻塞**（CREATE 0.9s / DROP 6.7s）—— 但"不阻塞"是**当前实现的行为**，
+    # 不是契约。设上下限之后，最坏情况是**快速失败**，而不是挂死。
     async def _admin(sql: str) -> None:
         conn = await asyncpg.connect(admin_dsn)
         try:
+            await conn.execute("SET lock_timeout = '5s'")
+            await conn.execute("SET statement_timeout = '30s'")
             await conn.execute(sql)
         finally:
             await conn.close()
