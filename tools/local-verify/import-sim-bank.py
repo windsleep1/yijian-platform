@@ -142,7 +142,7 @@ async def load_code_maps(dsn: str) -> tuple[dict[int, str], dict[int, str]]:
     """
     import asyncpg
 
-    conn = await asyncpg.connect(dsn)
+    conn = await asyncpg.connect(dsn, timeout=10, command_timeout=120)
     try:
         rows = await conn.fetch("SELECT id, code FROM chapters WHERE is_deleted = false")
         chapter = {int(r["id"]): r["code"] for r in rows}

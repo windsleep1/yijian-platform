@@ -85,7 +85,8 @@ def db_fetch(query: str, *params):
     async def _run():
         import asyncpg
 
-        conn = await asyncpg.connect(dsn)
+        # 同 conftest.sql_fetch：command_timeout 必须给（硬约定 N），否则查询可无限等
+        conn = await asyncpg.connect(dsn, timeout=10, command_timeout=30)
         try:
             return await conn.fetch(query, *params)
         finally:

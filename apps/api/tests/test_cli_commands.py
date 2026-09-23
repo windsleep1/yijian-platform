@@ -414,7 +414,7 @@ def _scratch_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], 
     # **并不阻塞**（CREATE 0.9s / DROP 6.7s）—— 但"不阻塞"是**当前实现的行为**，
     # 不是契约。设上下限之后，最坏情况是**快速失败**，而不是挂死。
     async def _admin(sql: str) -> None:
-        conn = await asyncpg.connect(admin_dsn)
+        conn = await asyncpg.connect(admin_dsn, timeout=10, command_timeout=60)
         try:
             await conn.execute("SET lock_timeout = '5s'")
             await conn.execute("SET statement_timeout = '30s'")
@@ -423,10 +423,10 @@ def _scratch_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], 
             await conn.close()
 
     async def _connect() -> Any:
-        return await asyncpg.connect(scratch)
+        return await asyncpg.connect(scratch, timeout=10, command_timeout=60)
 
     async def _table_count() -> int:
-        conn = await asyncpg.connect(scratch)
+        conn = await asyncpg.connect(scratch, timeout=10, command_timeout=60)
         try:
             return await conn.fetchval(
                 "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"

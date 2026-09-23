@@ -135,7 +135,10 @@ def sql_exec(statement: str, *args):
     import asyncpg
 
     async def _run():
-        conn = await asyncpg.connect(dsn)
+        # ⚠️ 两个超时都必须给（硬约定 N）：`timeout` 只管**建连**，单条命令要
+        # `command_timeout`，默认 `None` = **无限等** —— 撞上别人未提交的行锁时不是报错，
+        # 而是**沉默地卡住**（2026-09-23 的 CI 事故就是这个形状：pytest 卡 12 分钟）。
+        conn = await asyncpg.connect(dsn, timeout=10, command_timeout=30)
         try:
             return await conn.execute(statement, *args)
         finally:
@@ -153,7 +156,10 @@ def sql_fetch(statement: str, *args):
     import asyncpg
 
     async def _run():
-        conn = await asyncpg.connect(dsn)
+        # ⚠️ 两个超时都必须给（硬约定 N）：`timeout` 只管**建连**，单条命令要
+        # `command_timeout`，默认 `None` = **无限等** —— 撞上别人未提交的行锁时不是报错，
+        # 而是**沉默地卡住**（2026-09-23 的 CI 事故就是这个形状：pytest 卡 12 分钟）。
+        conn = await asyncpg.connect(dsn, timeout=10, command_timeout=30)
         try:
             rows = await conn.fetch(statement, *args)
             return [dict(r) for r in rows]

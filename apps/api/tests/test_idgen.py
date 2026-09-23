@@ -128,7 +128,8 @@ class TestUniqueness:
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=60)  # 硬约定 N：join 必须带超时，否则线程不结束就永远等
+            assert not t.is_alive(), "ID 生成线程 60s 未结束"
         assert len(out) == 4000
         assert len(set(out)) == 4000
 

@@ -22,7 +22,7 @@ DSN = f"postgresql://yijian@127.0.0.1:{PORT}/yijian"
 
 
 async def main(restore: bool) -> int:
-    conn = await asyncpg.connect(DSN)
+    conn = await asyncpg.connect(DSN, timeout=10, command_timeout=60)
     try:
         rows = await conn.fetch(
             """
