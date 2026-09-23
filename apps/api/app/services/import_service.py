@@ -1565,7 +1565,13 @@ async def _write_rows(
         upd_params: list[dict[str, Any]] = []
         for o in updates:
             cur = cur_map.get(o.question_id)
-            if cur is None:
+            # 保留不测（显式决定，理由见 docs/19 §10）：**并发窗口不可达** ——
+            # `execute_batch` 以**重算结果**为准，篡改 `import_items.question_id`
+            # 不会影响最终写入；变异验证「存活」（M10）是直接证据。
+            # ⚠️ pragma 落在 `if` 行而不是分支体：那条 raise 长 105 字符，
+            # `ruff format` 会折行，而覆盖只认**语句起始行** → 折行后 pragma 会失效。
+            # 代价：整个守卫（条件 + 体）一起被排除；条件行本已覆盖，属轻微过度排除。
+            if cur is None:  # pragma: no cover
                 raise not_found(f"第 {o.row_no} 行：要更新的题目 {o.question_id} 已不存在", 40401)
             p = o.payload or {}
             new_version = cur["version"] + 1
