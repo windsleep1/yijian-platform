@@ -266,7 +266,17 @@ jobs:
       #
       # ⚠️ `coverage run` 会把 pytest 的退出码**原样带出来**，所以用例失败仍然是硬失败，
       #    不会因为套了一层 coverage 就变成"看起来过了"。
+      #
+      # ---- `timeout-minutes`（2026-09-23 加，坑 57）----
+      # 起因：run 35838184843 的这一步**跑了 1689s 还没结束**（前面 13 步一共 52s），
+      # 人只能手动取消 —— 而取消掉的那一步**没有汇总行、也不报是哪条用例**，
+      # 排障等于从"沉默"里猜。绿的时候这一步约 3~4 分钟，12 分钟留了 3 倍余量。
+      #
+      # 它**不修根因**，只把"无限期挂住"变成"有界的、自己会说话的失败"
+      # （Actions 会标 `exceeded the maximum execution time`）——
+      # 与硬约定 H「恒红的门禁等于没有门禁」同一条思路：**不说话的失败等于没有失败**。
       - name: pytest
+        timeout-minutes: 12
         working-directory: apps/api
         run: |
           set -euo pipefail
