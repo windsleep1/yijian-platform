@@ -111,7 +111,7 @@ async def _run(db: AsyncSession, name: str, params: dict[str, Any]) -> list[dict
     后者**不接受绑定参数**，只能拼字符串。前者是函数调用，值是绑定的（硬约束 ①）。
     """
     await db.execute(
-        text("SELECT set_config('statement_timeout', :timeout, true)"),
+        text("SELECT set_config('statement_timeout', CAST(:timeout AS text), true)"),
         {"timeout": f"{STATS_TIMEOUT_MS}ms"},
     )
     try:

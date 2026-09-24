@@ -2869,6 +2869,13 @@ git grep -nE "[0-9]+ passed|v0\.1（Batch [0-9]）|当前版本（Batch [0-9]）
 - [ ] 抽查内容（曾出现截图目录混进**登录页**截图、文件名却写着目标页的情况）
 - [ ] `git status` 的 `??` 列表逐个确认（曾出现 agent-browser 路径含空格被截断，
       在仓库根目录留下一个 `ProtectWorkBuddyONE` 垃圾 PNG，**差点被提交**）
+- [ ] ★ **未跟踪的"目录"要单独盯** —— `git status`（含 `--porcelain`）默认把未跟踪目录
+      **折叠成一行**（`?? some/dir/`），**不列出里面的文件**；扫"文件列表"时极易跳过它。
+      查法：`git status --porcelain -uall` 展开，或**专门看 `??` 里以 `/` 结尾的项**。
+      ⚠️ 2026-09-24 实测：`apps/api/%SystemDrive%/`（4 个 Windows 组件缓存 DB / 940K）
+      就是这样冒出来的，一个 `git add -A` 就会提交进去。
+      **已加 `.gitignore` 规则挡住这一类**（`%VAR%/` 与 `$env:*/`）——
+      路径不展开是**稳定行为不是偶发**，挡住比每次靠人看见靠得住。
 
 ### 3. push 后核对远端 HEAD ⚠️
 

@@ -48,6 +48,26 @@ build/
 .turbo/
 *.tsbuildinfo
 
+# Windows 环境变量写法误落成**路径**（2026-09-24）
+#
+# 来源：%VAR% 只有 cmd 会展开；**PowerShell 的单引号里它是字面量**，bash 更完全不认。
+# 于是一条本该指向系统目录的路径，会在**当前工作目录**下建出一棵树
+# （实测在 apps/api/ 下生成过 4 个 Windows 组件缓存 DB / 940K）。
+#
+# ⚠️ 写进 .gitignore 而不是"收尾时看一眼"的理由：
+# 这类错误**不会只出现一次**（路径不展开是稳定行为，不是偶发），
+# 而且它**不会让任何门禁失败** —— 唯一会说话的只有 git status，
+# 偏偏收尾时一个 git add -A 就会把它一起提交。
+#
+# 判据：**挡住它，比每次靠 git status 发现更靠得住。**
+%SystemDrive%/
+%SystemRoot%/
+%TEMP%/
+%USERPROFILE%/
+%APPDATA%/
+%LOCALAPPDATA%/
+$env:*/
+
 # 日志与临时文件
 *.log
 logs/

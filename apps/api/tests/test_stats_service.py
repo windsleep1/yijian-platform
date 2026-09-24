@@ -845,6 +845,29 @@ def test_non_timeout_db_error_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> 
     run(body())
 
 
+def test_every_param_is_explicitly_cast() -> None:
+    """SQL 约定（`app/sql/stats/README.md`）：每个 `:param` 用法都要**显式 CAST**。
+
+    **为什么做成测试而不是只写文档**：约定的价值在于"能被自动检查"。
+    只写在 README 里的约定靠的是"下次还记得" —— 而这一批我自己就**把同一个类型错犯了两次**
+    （`:c` 同时当 smallint 与 numeric）。文档是给人看的，测试是给门禁看的。
+    """
+
+    offenders: list[str] = []
+    for path in sorted(stats_service.SQL_DIR.glob("*.sql")):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not re.search(r"(?<![:\w]):[a-z_]+", line):
+                continue  # 这行没有绑定参数
+            if line.lstrip().startswith("--"):
+                offenders.append(f"{path.name}:{i} 注释里出现参数名 —— {line.strip()[:70]}")
+            elif "CAST(" not in line:
+                offenders.append(f"{path.name}:{i} 有参数但没有 CAST —— {line.strip()[:70]}")
+    assert not offenders, (
+        "有参数没有显式 CAST（类型会靠 Postgres 猜，见 app/sql/stats/README.md）：\n"
+        + "\n".join(offenders)
+    )
+
+
 def test_unreachable_db_surfaces_as_error_not_hang(monkeypatch: pytest.MonkeyPatch) -> None:
     """硬约定 N 的体检：连接层坏掉时应当**报错**，而不是安静地一直等。
 
