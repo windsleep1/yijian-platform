@@ -11,6 +11,7 @@ from app.api.v1 import (
     admin_imports,
     admin_questions,
     admin_rbac,
+    admin_stats,
     admin_users,
     auth,
     health,
@@ -31,6 +32,10 @@ api_router.include_router(
 # Batch 6：+ /admin/imports/{id}/changes 批次变更日志
 api_router.include_router(admin_exams.router)  # Batch 7：/admin/paper-rules 组卷规则 + /admin/exams
 #   试卷 CRUD / auto-compose / validate / publish（11 接口）
+
+# Batch 8：/admin/stats 统计看板（5 接口：overview / trends /
+#   distributions / funnel / weak-points）
+api_router.include_router(admin_stats.router)
 
 # 后续批次在此追加：
 #   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点
