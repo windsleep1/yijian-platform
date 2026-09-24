@@ -9,7 +9,7 @@
     40401+   资源不存在
     40901+   业务冲突
     42901+   限流
-    50001+   服务端错误（50003 = 依赖服务不可用，HTTP 503）
+    50001+   服务端错误（50003 = 依赖服务不可用 / 50004 = 查询超时，两者都是 HTTP 503）
 """
 
 from __future__ import annotations
@@ -65,6 +65,20 @@ def too_many(message: str = "请求过于频繁，请稍后再试", code: int = 
 
 def unavailable(message: str = "依赖服务暂时不可用，请稍后重试", code: int = 50003) -> BizError:
     """依赖（Redis/数据库/三方）不可用。返回 503，便于编排/网关做重试与熔断。"""
+    return BizError(code, message, 503)
+
+
+def query_timeout(
+    message: str = "统计查询超时，请缩小时间范围或增加筛选条件", code: int = 50004
+) -> BizError:
+    """聚合查询超过 `statement_timeout`。
+
+    ★ 与 `bad_request`（参数错）区分开：**参数没问题，是这次的数据量太大** ——
+    用户缩小范围后**重试就能成功**。所以是 503（可重试），不是 400。
+
+    ★ 它存在的意义是**把无界等待变成有界失败**（硬约定 N）：没有它，一个大时间范围的
+    聚合查询会一直占着连接，直到把连接池吸干 —— 而且**不会报错**，只会"越来越慢"。
+    """
     return BizError(code, message, 503)
 
 
