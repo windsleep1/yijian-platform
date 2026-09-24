@@ -2838,6 +2838,49 @@ mtime 还停在 9-15。
 **同族**：坑 50（并行 Edit 互相覆盖）、坑 54（采集边界）、坑 55（skip 伪装绿）、坑 56（日志出处）、
 坑 57（无界等待）—— 全是**"没有任何东西会报错"**那一类。
 
+## 59. S1-b：一族「环境问题伪装成缺陷 / 报错指向别处」（2026-09-24）
+
+给统计看板接 HTTP 层（缓存 + 权限 + 端到端）时踩到的 6 处。共同点：
+**症状与原因相隔很远**，而且**没有一处是"业务代码写错"** —— 全在"环境 / 判据 / 工具"这一层。
+
+| # | 现象 | 真因 | 下次一眼认出 |
+|---|---|---|---|
+| 1 | `GET /admin/stats/trends` → **500** | `response_model` 校验失败：我把 `optional_series` 声明成 `list[dict]`，它实际是 **dict**（`{"avg_duration_ms_median": [...]}`） | **500 且日志里是 `ResponseValidationError`** = 契约写错，不是逻辑错。日志直接给出 `loc=('response','data','optional_series')` |
+| 2 | 3 条 `test_smoke` 失败：`42902 今日验证码发送次数已达上限` | **不是缺陷**：`register()` 走 `127.0.0.1` 的**共享限流桶**，当天已跑了好几轮全量 → 桶耗尽（fakeredis 在 API 进程内存里） | 见 `42902` 先问"**今天跑了几轮**"；**重启 API 即复位**（内存态）。`fresh_user` 用假 IP 就是为了避开它 |
+| 3 | `test_logout_without_session_id_returns_40001` 报 `40102 登录凭证无效` | **不是缺陷、也不是 flaky**：该用例**手搓 JWT**（`_access_token_without_sid`），用**测试进程**的 `JWT_SECRET` 签名，API 进程用自己的验签 ⇒ **两进程 env 不同源** | `40102` + 用例里有"手搓 token" ⇒ 查 **`JWT_SECRET` 是否同源**。`run-smoke.ps1` 给两个进程同一套 env，所以 CI 是绿的 |
+| 4 | `httpx.ASGITransport` 报 `AttributeError: '__enter__'` | httpx 新版 **`ASGITransport` 是 async-only**，必须配 `AsyncClient`（同步 `Client` 直接炸） | 看到 `'__enter__'` 就想到"这个 transport / client 是不是 async-only" |
+| 5 | 我写的结构断言**每条路由都报缺权限**（**假红**） | `require_permission(...)` 返回**闭包** `_checker`，`repr` 里既没有参数也没有函数名 ⇒ `"stats:read" in repr(dep)` **永远是 False**。权限码只在 `__closure__` 的自由变量里 | 断言"有依赖"不够，**在 `repr` 里找字符串更不够** —— 得读闭包（代码见下） |
+| 6 | 变异验证 14 个里 **1 个存活** | 测试只在"第一次（未命中）**之后**"读缓存 ⇒ 验的是**性质**（"写进去了"）而不是**值**（"任何时点都不含 `cached=True`"） | 同「变异存活 ① 的典型症状」：**修法是把断言补到另一个时点**，不是加更多性质断言 |
+
+### 5 的代码：「从闭包读权限码」
+
+```python
+def _declared_permissions(route) -> set[str]:
+    found: set[str] = set()
+    for dep in getattr(route, "dependencies", None) or []:
+        fn = getattr(dep, "dependency", None)
+        for cell in getattr(fn, "__closure__", None) or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:      # 尚未绑定的 cell
+                continue
+            if isinstance(value, tuple):
+                found |= {v for v in value if isinstance(v, str)}
+    return found
+```
+
+⇒ 有了它，"**把 `stats:read` 写成 `stat:read`**"这种变异才被捕获
+（否则那条用例只是个**永远绿的摆设** —— 它连"权限码写错了"都发现不了）。
+
+### ★ 一条正面记录：`response_model` 真的在把关
+
+第 1 条虽是我的错，但它同时证明**契约声明是有效的**：
+类型写错不会"静默返回一个结构不对的 JSON"，而是**当场 500 + 明确指出哪个字段**。
+这正是"**断言契约本身，而不是它当下的长相**"在**运行时**的对应物 ——
+文档里的那句判据，在这里被 FastAPI 替我执行了一次。
+
+**同族**：坑 50/54/55/56/57/58 —— 全是"**没有任何东西会报错**"或"**报错指向的地方不是失败点**"。
+
 ## 附：一批交付收尾的固定动作
 
 每批做完，**在提交前**按这个清单过一遍（都是上面坑的"可执行版"）：
