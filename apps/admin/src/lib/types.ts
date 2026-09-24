@@ -1050,3 +1050,147 @@ export type ExamRemoveQuestionOut = {
   sections: ExamSectionOut[];
   message: string;
 };
+
+// ---------------------------------------------------------------- 统计看板（Batch 8）
+
+/**
+ * `data_origin`：`real` = 真实数据（题库结构，取自 `questions` / `subjects`）；
+ * `demo` = 演示数据（C 端未落地，`practice_items` / `exam_attempts` 全是造数）。
+ *
+ * ★ 它**由后端给**，前端只按它渲染标记 —— **绝不自己判断"这张图是真的还是假的"**。
+ * S2 的页面上真数据与造数据**同屏出现**（题库结构 vs 作答分布），
+ * 分不清就会把造出来的数当成真的读（docs/20 §7 判据 13）。
+ */
+export type StatsDataOrigin = "real" | "demo";
+
+/** 所有 stats 端点共有的 meta。`cached` / `ttl_sec` **只能**由后端缓存层注入。 */
+export type StatsMeta = {
+  /** `true` = 本次响应来自缓存（后端**没有查库**）。 */
+  cached: boolean;
+  /** 该端点的缓存 TTL（秒）。 */
+  ttl_sec: number;
+  /** 日界时区，全站统一（`Asia/Shanghai`）。 */
+  timezone: string;
+  data_origin: StatsDataOrigin;
+  /** 后端给的展示文案（"真实" / "演示数据"）——前端**不自己映射**。 */
+  origin_label?: string;
+  /** 口径告警（如「答了没判分」非 0）；空数组 = 无。 */
+  warnings: string[];
+  [k: string]: unknown;
+};
+
+/** 指标卡的数值 + 环比。`accuracy` 例外：它给 `delta_pp`（百分点）而不是 `delta_ratio`。 */
+export type MetricCardValue = {
+  value: number | null;
+  prev: number | null;
+  delta_abs: number | null;
+  delta_ratio: number | null;
+  /** 仅 `accuracy`：环比用**百分点 pp**（`62%→65%` 是 **+3pp**，不是 +4.8%）。 */
+  delta_pp?: number | null;
+  /** 仅 `answers`：人均 = ③ ÷ ①（原「人均答题」并入的副行）。 */
+  per_capita?: number | null;
+  /** 仅 `new_users`：近 7 日均值。 */
+  prev7_avg?: number | null;
+  unit?: string;
+};
+
+/** 5 张卡固定这五个键（`docs/20` §2.1 定稿）。 */
+export type MetricCardKey = "dau" | "new_users" | "answers" | "accuracy" | "exam_submits";
+
+export type StatsOverview = {
+  day: string;
+  cards: Record<MetricCardKey, MetricCardValue>;
+  meta: StatsMeta;
+};
+
+export type StatsTrendSeries = { name: string; points: (number | null)[] };
+
+export type StatsTrends = {
+  metric: string;
+  granularity: string;
+  from: string;
+  to: string;
+  subject_id: number | null;
+  axis: string[];
+  series: StatsTrendSeries[];
+  /** 可选曲线：**按曲线名索引**（`{"avg_duration_ms_median": [...]}`），不是数组。 */
+  optional_series: Record<string, (number | null)[]>;
+  meta: StatsMeta & {
+    /** 补了几个空桶；`0` 才说明数据是连续的。 */
+    filled_buckets?: number;
+    total_buckets?: number;
+    data_source?: string;
+  };
+};
+
+export type StatsDistItem = {
+  key: string;
+  label: string;
+  value: number;
+  /** 只有 `view=practice` 能算正确率：`bank` 视图数的是**题**，没有"答没答对"。 */
+  accuracy: number | null;
+};
+
+export type StatsDistributions = {
+  dim: string;
+  view: string;
+  subject_id: number | null;
+  items: StatsDistItem[];
+  meta: StatsMeta & { data_source?: string };
+};
+
+export type StatsFunnelStage = { key: string; label: string; count: number };
+
+export type StatsFunnel = {
+  cohort: string;
+  stages: StatsFunnelStage[];
+  /** `step` 相对上一段；`cumulative` 相对第一段。 */
+  rates: { step: (number | null)[]; cumulative: (number | null)[] };
+  meta: StatsMeta & { cohort_from?: string | null; cohort_to?: string };
+};
+
+export type StatsWeakPoint = {
+  kp_id: Id;
+  name: string;
+  subject: string;
+  sample: number;
+  accuracy: number | null;
+};
+
+export type StatsWeakPoints = {
+  min_sample: number;
+  limit: number;
+  items: StatsWeakPoint[];
+  meta: StatsMeta;
+};
+
+// ---- 入参（与后端 Query 参数一一对应；`request` 会自动跳过 undefined / 空串）----
+
+export type StatsTrendMetric =
+  | "answers"
+  | "new_users"
+  | "active_users"
+  | "accuracy"
+  | "exam_submits";
+export type StatsGranularity = "day" | "week" | "month";
+export type StatsDistDim = "subject" | "professional" | "difficulty" | "type" | "knowledge_point";
+/** `bank` = 题库结构（**真实数据**）｜`practice` = 作答分布（**演示数据**）。 */
+export type StatsDistView = "bank" | "practice";
+
+export type StatsOverviewQuery = { day?: string };
+
+export type StatsTrendsQuery = {
+  metric: StatsTrendMetric;
+  granularity?: StatsGranularity;
+  date_from?: string;
+  date_to?: string;
+  subject_id?: number;
+};
+
+export type StatsDistributionsQuery = {
+  dim: StatsDistDim;
+  view: StatsDistView;
+  date_from?: string;
+  date_to?: string;
+  subject_id?: number;
+};
