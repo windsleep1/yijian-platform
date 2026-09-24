@@ -251,6 +251,10 @@ async def overview(db: AsyncSession, *, day: date | None = None) -> dict[str, An
             "window_end": str(row["window_end"]),
             "data_source": "practice_items + exam_attempts + users",
             "data_origin": "demo",
+            # 与 distributions 保持一致：**文案也由后端给**。
+            # 前端只渲染 origin_label，**不按 data_origin 自己映射** ——
+            # 一旦前端开始映射，"真假是接口属性"这条就只落实了一半（docs/20 §7 判据 13）。
+            "origin_label": "演示数据",
             "warnings": warnings,
         },
     }
@@ -331,6 +335,7 @@ async def trends(
                 else "practice_items"
             ),
             "data_origin": "demo",
+            "origin_label": "演示数据",
             "warnings": (
                 ["subject_id 对 new_users 无效（用户表没有科目属性），已忽略"]
                 if metric == "new_users" and subject_id is not None
@@ -467,6 +472,7 @@ async def funnel(
             "cohort_from": start.isoformat() if start else None,
             "cohort_to": end.isoformat(),
             "data_origin": "demo",
+            "origin_label": "演示数据",
             "warnings": warnings,
         },
     }
@@ -520,6 +526,7 @@ async def weak_points(
         "meta": {
             "timezone": "Asia/Shanghai",
             "data_origin": "demo",
+            "origin_label": "演示数据",
             "warnings": [],
         },
     }

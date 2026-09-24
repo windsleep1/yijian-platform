@@ -893,3 +893,51 @@ def test_unreachable_db_surfaces_as_error_not_hang(monkeypatch: pytest.MonkeyPat
 
     elapsed = run(body())
     assert elapsed < 5, f"不可达地址花了 {elapsed:.2f}s 才失败 —— 有东西在无界等待"
+
+
+def test_every_endpoint_meta_carries_origin_label() -> None:
+    """★ 每个业务端点的 `meta` 都要有 `origin_label`，且与 `data_origin` **一致**。
+
+    为什么要有这条：前端的"真 / 造"标记**只渲染后端给的文案**，不自己映射
+    （`docs/20` §7 判据 13：真假是**接口属性**，不是渲染者的判断）。
+    只要有一个端点漏了 `origin_label`，前端就得为它写一条兜底分支 ——
+    而那条分支一旦写下来，就等于"前端开始判断真假"，判据 13 当场只落实了一半。
+
+    ⚠️ 这条是 **S1-c（前端）顺手改后端**时一起补的：前端要渲染什么，后端就得给全。
+       "顺手改后端"**必须带测试** —— 否则新增的行没人覆盖，覆盖率会往下走
+       （`.coveragerc` 里那段"k=2 还能容多少条未测代码"的算式说的就是这件事）。
+    """
+    expected = {"real": "真实", "demo": "演示数据"}
+
+    async def body() -> None:
+        async with _session() as db:
+            results = {
+                "overview": await stats_service.overview(db),
+                "trends": await stats_service.trends(db, metric="answers"),
+                "distributions(bank)": await stats_service.distributions(
+                    db, dim="subject", view="bank"
+                ),
+                "distributions(practice)": await stats_service.distributions(
+                    db, dim="subject", view="practice"
+                ),
+                "funnel": await stats_service.funnel(db, cohort="all"),
+                "weak_points": await stats_service.weak_points(db, limit=1),
+            }
+
+            problems: list[str] = []
+            for name, payload in results.items():
+                meta = payload.get("meta") or {}
+                origin = meta.get("data_origin")
+                label = meta.get("origin_label")
+                if origin not in expected:
+                    problems.append(f"{name}: data_origin={origin!r} 不在 {sorted(expected)}")
+                elif label != expected[origin]:
+                    problems.append(f"{name}: data_origin={origin} 但 origin_label={label!r}")
+            assert not problems, "端点 meta 的 origin_label 不齐 / 不一致：\n" + "\n".join(problems)
+
+            # 顺带把 bank / practice 的真假钉死：防止有人"顺手"改掉 view 的作用
+            # （那会让整屏的真假标注一起反过来，而界面上看不出来）。
+            assert results["distributions(bank)"]["meta"]["data_origin"] == "real"
+            assert results["distributions(practice)"]["meta"]["data_origin"] == "demo"
+
+    run(body())
