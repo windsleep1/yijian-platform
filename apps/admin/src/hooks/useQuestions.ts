@@ -15,6 +15,9 @@ import type {
   QuestionDeleteOut,
   QuestionDetail,
   QuestionListItem,
+  QuestionReviewIn,
+  QuestionReviewOut,
+  QuestionSubmitIn,
   QuestionUpdateIn,
 } from "@/lib/types";
 
@@ -121,6 +124,41 @@ export function useUpdateQuestion(id: string) {
     mutationFn: (payload: QuestionUpdateIn) =>
       request<QuestionDetail>(`/admin/questions/${id}`, { method: "PUT", body: payload }),
     onSuccess: (updated) => invalidateAfterWrite(qc, updated.id),
+  });
+}
+
+/**
+ * 送审：`draft` / `rejected` → `reviewing`。
+ *
+ * ⚠️ 与 `useUpdateQuestion` **不是**同一件事：这是**状态动作**，不是内容编辑。
+ * 它走 `/submit` 而不是 `PUT`，所以库里会留下 `action='submit'` 的变更日志与 `question.submit` 审计。
+ * 一旦混进编辑路径，"谁送审的"就永远查不到了。
+ */
+export function useSubmitQuestion(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: QuestionSubmitIn) =>
+      request<QuestionDetail>(`/admin/questions/${id}/submit`, { method: "POST", body: payload }),
+    onSuccess: (updated) => invalidateAfterWrite(qc, updated.id),
+  });
+}
+
+/**
+ * 审核：`approve` → `published` / `reject` → `rejected`。
+ *
+ * 返回 `QuestionReviewOut`（不是裸 `QuestionDetail`）—— 因为要能区分
+ * **`already=true`（幂等命中，库里一个字节没动）** 与真的审了一次。
+ * 不区分的话，对已发布的题再点"通过"会弹一个"审核成功"的假反馈。
+ */
+export function useReviewQuestion(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: QuestionReviewIn) =>
+      request<QuestionReviewOut>(`/admin/questions/${id}/review`, {
+        method: "POST",
+        body: payload,
+      }),
+    onSuccess: (res) => invalidateAfterWrite(qc, res.question.id),
   });
 }
 

@@ -20,12 +20,12 @@ import {
   MAX_OPTIONS,
   MIN_MULTIPLE_CORRECT,
   MIN_OPTIONS,
-  Q_STATUS_LABELS,
   SOURCE_TYPE_LABELS,
   diffDraft,
   draftToCreate,
   isEditableType,
   nextOptionKey,
+  qStatusLabel,
   relabel,
   sourceTypeLabel,
   toggleCorrect,
@@ -38,7 +38,6 @@ import type {
   EditableQType,
   QuestionCreateIn,
   QuestionDetail,
-  QStatus,
   SourceType,
   SubjectChapterGroup,
 } from "@/lib/types";
@@ -269,19 +268,22 @@ export function QuestionForm({
             </Select>
           </Field>
 
-          <Field label="状态" required>
-            <Select value={draft.status} onValueChange={(v) => patch({ status: v as QStatus })}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(Object.keys(Q_STATUS_LABELS) as QStatus[]).map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {Q_STATUS_LABELS[s]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          {/*
+            ⚠️ 这里是**只读**的（2026-09-25，BL-09）—— 原先是一个列出全部 5 个状态的 Select。
+
+            改掉它的理由不是"样式"，而是**它在库里留了一条不该存在的路径**：
+            「发布 / 驳回 / 送审」这三件事各自有独立入口、独立权限、独立留痕
+            （`/submit` 与 `/review`），而通过这个下拉框改状态**既不校验权限、
+                也不记审核人** —— 于是同一件业务动作，一半查得到是谁做的，一半查不到。
+
+            `QuestionUpdateIn` 已经用 `Omit<..., "status">` 把这条路堵在编译期，
+            这里把界面同步过来，免得用户对着一个"能点但没用"的下拉框发懵。
+          */}
+          <Field label="状态" hint="由「提交审核 / 审核」两个动作推进，不在这里改">
+            <div className="flex h-9 items-center gap-2 rounded-md border border-input bg-muted/40 px-3 text-sm">
+              <span className="font-medium">{qStatusLabel(draft.status)}</span>
+              <span className="text-xs text-muted-foreground">（只读）</span>
+            </div>
           </Field>
         </div>
       </SectionCard>

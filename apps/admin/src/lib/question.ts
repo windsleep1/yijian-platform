@@ -299,7 +299,11 @@ export function draftToCreate(d: QuestionDraft): QuestionCreateIn {
     analysis: d.analysis.trim() || null,
     difficulty: d.difficulty,
     score_default: Number(d.score_default),
-    status: d.status,
+    // ⚠️ **恒为 `"draft"`，不再是 `d.status`**（2026-09-25，BL-09 的前端一半）。
+    // 新建时让用户挑状态 = 可以**一步创建出 `published`**，把审核整个绕过去
+    // （`reviewed_by` 永远是 NULL，而这正是审计链补不上的根因）。
+    // 新题一律先进草稿，要上线走「提交审核 → 审核通过」。
+    status: "draft",
     exam_year: d.exam_year.trim() ? Number(d.exam_year) : null,
     keywords: d.keywords.trim() || null,
     tags: splitTags(d.tags),
@@ -374,7 +378,12 @@ export function diffDraft(
   if (Number(before.score_default) !== Number(d.score_default))
     patch.score_default = Number(d.score_default);
   if (before.difficulty !== d.difficulty) patch.difficulty = d.difficulty;
-  if (before.status !== d.status) patch.status = d.status;
+  // ⚠️ **刻意不比较 `status`**（2026-09-25，BL-09）：状态变更不再走「编辑」这条路径。
+  // 曾在这里写过 `if (before.status !== d.status) patch.status = d.status;`，
+  // 后果是"发布/驳回"有**两条入口**，而其中这条**不写 reviewed_by / reviewed_at** ——
+  // 于是同一件业务动作，一半在库里查得到是谁做的，一半查不到。
+  // 现在：送审走 `/submit`，审核走 `/review`，两条都留痕；类型上 `QuestionUpdateIn` 也
+  // 用 `Omit<..., "status">` 把它挡在编译期。
   if (norm(before.keywords) !== norm(d.keywords)) patch.keywords = normOrNull(d.keywords);
   if (norm(before.exam_year) !== norm(d.exam_year)) {
     patch.exam_year = d.exam_year.trim() ? Number(d.exam_year) : null;

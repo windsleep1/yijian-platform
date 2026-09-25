@@ -303,8 +303,26 @@ export type QuestionCreateIn = {
  * **只回传变了的字段**（`patch` 语义）—— 后端对 `None/undefined` 一律解释为"沿用库里现值"。
  * 好处有二：一是不会把没动过的字段写进 `content_change_logs` 的 diff 里（diff 保持可读），
  * 二是两个教研同时改同一道题、改的是不同字段时，不会互相覆盖对方的改动。
+ *
+ * ## ⚠️ 为什么是 `Omit<..., "status">`（BL-09）
+ *
+ * `status` 是**唯一一个不该由「编辑」入口改的字段**：改它意味着"发布 / 驳回 / 送审"，
+ * 而那三件事各自有**独立入口**、独立权限、独立留痕：
+ *
+ *     PUT  /admin/questions/{id}            改内容            question:update
+ *     POST /admin/questions/{id}/submit     draft → reviewing question:update
+ *     POST /admin/questions/{id}/review     审核（发布/驳回）  question:publish
+ *
+ * 在这之前 `PUT` 也能带 `status`，于是"审核"这件事**有两条路径**，而
+ * **其中一条不记审核人**（`reviewed_by` 永远是 NULL）—— 这正是审计链补不上的根因。
+ *
+ * 这里用 `Omit` 而不是"约定别传"：**让传 `status` 变成编译错误**，
+ * 而不是靠注释提醒（同硬约定 D：把约束落到结构上，不是写在 `onClick` 里）。
+ *
+ * ⚠️ 后端 `PUT` 目前**仍然接受** `status`（本批只改前端，先断掉调用方，
+ * 再移除服务端入参 —— 反过来会让老旧前端 400）。剩余部分见 BL-09。
  */
-export type QuestionUpdateIn = Partial<QuestionCreateIn> & { version: number };
+export type QuestionUpdateIn = Partial<Omit<QuestionCreateIn, "status">> & { version: number };
 
 /**
  * 批量删除入参。
@@ -419,16 +437,61 @@ export type QuestionDetail = {
   updated_by: Id | null;
   updated_by_name: string | null;
   published_at: string | null;
+
+  // ---- 审核链（2026-09-25 起真的有值）----
+  /** 审核人。**只在 `/review` 里写**；送审（`/submit`）不写 —— 那是发起审核，不是审核 */
+  reviewed_by: Id | null;
+  reviewed_by_name: string | null;
+  /** 审核时刻（库时间 now()） */
+  reviewed_at: string | null;
+
   created_at: string | null;
   updated_at: string | null;
   /** 调用者是否有 question:update */
   can_edit: boolean;
   /** 调用者是否有 question:delete */
   can_delete: boolean;
+  /**
+   * 调用者是否有 `question:publish`（= **审核权**）。
+   *
+   * 与 `can_submit` **刻意分开**：能送审的人不一定是能审的人。
+   * 前端据此决定「审核通过 / 驳回」按钮的可用性（无权限时**置灰 + 说明**，不是隐藏）。
+   */
+  can_review: boolean;
+  /** 调用者是否有 `question:update`（= **送审权**，`draft`/`rejected` → `reviewing`） */
+  can_submit: boolean;
   /** 该题型本批是否可编辑（案例题/主观题为 false） */
   editable: boolean;
   /** 历史版本，最新在前，最多 10 条，**只读**（本批不做回滚） */
   versions: QuestionVersionItem[];
+};
+
+// ---------------------------------------------------------------- 审核链（BL-01a）
+
+/**
+ * 审核入参。
+ *
+ * ⚠️ **没有 `status`** —— 结论由 `decision` 推导。能直接指定 status 的话，
+ * 这个接口就退化成"又一个改字段的 PUT"，独立入口的意义就没了。
+ */
+export type QuestionReviewIn = {
+  decision: "approve" | "reject";
+  /** 审核意见。**`reject` 时必填**（驳回不给理由，出题人只能自己猜）；`approve` 可选。 */
+  comment?: string | null;
+  version: number;
+};
+
+export type QuestionSubmitIn = { version: number };
+
+export type QuestionReviewOut = {
+  question: QuestionDetail;
+  /**
+   * **幂等命中**：库里已是目标状态，本次**未产生任何写入**（未动 version、未写留痕）。
+   *
+   * 之所以要这个字段：对一道已发布的题再点"通过"，接口返回 200 且详情看起来正常，
+   * 前端**无法区分**"刚审完"和"本来就已经是这样" —— 于是会弹出"审核成功"的假反馈。
+   */
+  already: boolean;
 };
 
 export type QuestionDeleteOut = { id: Id; is_deleted: boolean; version: number };

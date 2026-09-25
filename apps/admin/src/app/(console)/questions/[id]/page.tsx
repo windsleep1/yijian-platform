@@ -1,6 +1,16 @@
 "use client";
 
-import { AlertTriangle, ArrowLeft, FileX, History, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  FileX,
+  History,
+  Loader2,
+  RefreshCw,
+  Send,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -12,6 +22,7 @@ import { MarkdownPreview } from "@/components/MarkdownPreview";
 import { PageHeader } from "@/components/PageHeader";
 import { PermissionGate } from "@/components/PermissionGate";
 import { QuestionForm, type QuestionFormOutput } from "@/components/QuestionForm";
+import { QuestionReviewDialog } from "@/components/QuestionReviewDialog";
 import { QuestionVersionDrawer } from "@/components/QuestionVersionDrawer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +31,8 @@ import {
   useChapterTree,
   useDeleteQuestion,
   useQuestion,
+  useReviewQuestion,
+  useSubmitQuestion,
   useUpdateQuestion,
 } from "@/hooks/useQuestions";
 import { ApiError } from "@/lib/api";
@@ -37,7 +50,21 @@ import {
   sourceTypeLabel,
   type QuestionDraft,
 } from "@/lib/question";
-import type { QuestionDetail } from "@/lib/types";
+import type { QStatus, QuestionDetail } from "@/lib/types";
+
+/**
+ * 可以**送审**的当前状态 —— 与后端 `question_service.SUBMITTABLE_FROM` **必须一致**。
+ * 两边不一致会出现"接口能过但按钮不显示"或反过来，用户只能靠猜。
+ */
+const SUBMITTABLE_FROM: readonly QStatus[] = ["draft", "rejected"];
+
+/**
+ * 可以**审核**的当前状态 —— 与后端 `question_service.REVIEWABLE_FROM` 一致。
+ *
+ * ⚠️ `draft` 也在里面：后端允许**直接审一道草稿**（不必先送审），
+ * 前端**不能比后端更严** —— 否则那道题在界面上永远没有审核入口。
+ */
+const REVIEWABLE_FROM: readonly QStatus[] = ["draft", "reviewing", "rejected"];
 
 /**
  * 题目详情 + 编辑。
@@ -67,11 +94,14 @@ export default function QuestionDetailPage() {
   const tree = useChapterTree();
   const update = useUpdateQuestion(id ?? "");
   const remove = useDeleteQuestion();
+  const submitForReview = useSubmitQuestion(id ?? "");
+  const review = useReviewQuestion(id ?? "");
 
   const [draft, setDraft] = useState<QuestionDraft | null>(null);
   const [conflict, setConflict] = useState(false);
   const [versionOpen, setVersionOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const dataId = query.data?.id;
   const dataVersion = query.data?.version;
@@ -167,6 +197,56 @@ export default function QuestionDetailPage() {
     }
   };
 
+  // ---------------------------------------------------------------- 审核链（BL-01a）
+  //
+  // 两个动作**各自独立**，不走编辑表单：状态变更要有自己的入口、自己的权限、自己的留痕
+  // （`/submit` → `action='submit'`；`/review` → `action='review'` + `question.review` 审计）。
+  //
+  // ⚠️ 界面的可用状态**必须与后端一致**（硬约定 A 的反面：UI 不能比接口更严），
+  //    所以两个常量就是后端 `SUBMITTABLE_FROM` / `REVIEWABLE_FROM` 的镜像。
+  const canSubmitNow = !q.is_deleted && SUBMITTABLE_FROM.includes(q.status);
+  const canReviewNow = !q.is_deleted && REVIEWABLE_FROM.includes(q.status);
+
+  const handleSubmitForReview = () => {
+    if (!id) return;
+    submitForReview.mutate(
+      { version: q.version },
+      {
+        onSuccess: (updated) => {
+          // `/submit` 返回的是裸详情，没有 `already` 旗标 —— 用"版本号有没有前进"判断：
+          // 写入了必然 `version + 1`（审核链的每次写都推版本），没变就是幂等命中。
+          if (updated.version === q.version) {
+            toast.info("该题已在待审核状态", { description: "本次未产生任何变更。" });
+          } else {
+            toast.success("已提交审核", {
+              description: "状态：待审核。有 question:publish 的同事可以审核了。",
+            });
+          }
+        },
+      },
+    );
+  };
+
+  const handleReview = async (decision: "approve" | "reject", comment?: string) => {
+    if (!id) return;
+    try {
+      const res = await review.mutateAsync({ decision, comment, version: q.version });
+      setReviewOpen(false);
+      if (res.already) {
+        // 幂等命中：库里一个字节都没动 → **不能报"审核成功"**（那是假反馈）
+        toast.info("该题已是目标状态", {
+          description: "本次未重复审核，库里没有产生任何写入。",
+        });
+      } else {
+        toast.success(decision === "approve" ? "已审核通过并发布" : "已驳回", {
+          description: `当前版本 v${res.question.version}。审核人已记入变更日志与审计日志。`,
+        });
+      }
+    } catch {
+      // 统一错误 toast 已由 MutationCache 处理；弹窗保持打开便于就地重试
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -210,6 +290,35 @@ export default function QuestionDetailPage() {
               </Badge>
             </Button>
 
+            {canSubmitNow ? (
+              <PermissionGate
+                code={P.questionUpdate}
+                reason="提交审核需要 question:update 权限（先把题目改好，再送审）。"
+              >
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSubmitForReview}
+                  disabled={submitForReview.isPending}
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  {submitForReview.isPending ? "提交中…" : "提交审核"}
+                </Button>
+              </PermissionGate>
+            ) : null}
+
+            {canReviewNow ? (
+              <PermissionGate
+                code={P.questionPublish}
+                reason="审核需要 question:publish 权限 —— 审核权与编辑权是两件事：能改题的人不一定是能拍板发布的人。"
+              >
+                <Button size="sm" onClick={() => setReviewOpen(true)}>
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  审核
+                </Button>
+              </PermissionGate>
+            ) : null}
+
             <PermissionGate
               code={P.questionDelete}
               reason="删除会把题目从所有试卷与练习中下线，属于高权限动作。"
@@ -227,6 +336,25 @@ export default function QuestionDetailPage() {
           </>
         }
       />
+
+      {/* ---------------- 审核信息（只在真被审过时出现）---------------- */}
+      {q.reviewed_at ? (
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            审核结论
+            <Badge variant={qStatusVariant(q.status)} className="text-[10px]">
+              {qStatusLabel(q.status)}
+            </Badge>
+          </span>
+          <span>
+            审核人{" "}
+            <strong className="text-foreground">{q.reviewed_by_name ?? `#${q.reviewed_by}`}</strong>
+          </span>
+          <span>审核于 {formatDateTime(q.reviewed_at)}</span>
+          {q.published_at ? <span>发布于 {formatDateTime(q.published_at)}</span> : null}
+        </div>
+      ) : null}
 
       {/* ---------------- 版本冲突（40901）常驻提示 ---------------- */}
       {conflict ? (
@@ -350,6 +478,15 @@ export default function QuestionDetailPage() {
           </span>
         }
         onConfirm={handleDelete}
+      />
+
+      <QuestionReviewDialog
+        open={reviewOpen}
+        onOpenChange={setReviewOpen}
+        question={{ id: q.id, status: q.status, version: q.version }}
+        loading={review.isPending}
+        error={review.error}
+        onConfirm={handleReview}
       />
     </>
   );
