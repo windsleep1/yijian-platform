@@ -12,7 +12,6 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import bad_request, conflict, not_found
-from app.core.idgen import next_id, to_inet
 from app.db.models import User, UserProfile
 from app.schemas.admin import (
     AdminUserDetail,
@@ -23,7 +22,7 @@ from app.schemas.admin import (
     UserStatusOut,
 )
 from app.schemas.auth import ProfileOut
-from app.services import rbac_service
+from app.services import content_log_service, rbac_service
 from app.services.audit_service import recent_audits_for_user, write_audit
 
 
@@ -302,25 +301,17 @@ async def update_user_status(
         change_log += f"：{reason}"
 
     # ---- 留痕 1：content_change_logs（用户明确要求，reason 记在这里）----
-    await db.execute(
-        text(
-            "INSERT INTO content_change_logs "
-            "  (id, entity_type, entity_id, action, diff, change_log, operator_id, operator_ip) "
-            "VALUES (:id, 'user', :uid, 'update', CAST(:diff AS jsonb), :log, :op, :ip)"
-        ),
-        {
-            "id": next_id(),
-            "uid": target_user_id,
-            "diff": _json(
-                {
-                    "before": {"status": before_status},
-                    "after": {"status": status, "reason": reason},
-                }
-            ),
-            "log": change_log[:500],
-            "op": actor_id,
-            "ip": to_inet(ip),
-        },
+    # 2026-09-25 收口：原先这里是内联 SQL，与题库 / 试卷那两份是同一段逐字复制。
+    await content_log_service.record_change(
+        db,
+        entity_type="user",
+        entity_id=target_user_id,
+        action="update",
+        before={"status": before_status},
+        after={"status": status, "reason": reason},
+        change_log=change_log,
+        operator_id=actor_id,
+        ip=ip,
     )
 
     # ---- 留痕 2：audit_logs（与 assign_roles 一致，审计页能看到）----

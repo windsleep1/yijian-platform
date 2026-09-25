@@ -70,7 +70,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import errors
-from app.core.idgen import next_id, to_inet
+from app.core.idgen import next_id
 from app.schemas.admin_exam import (
     OBJECTIVE_TYPES,
     ExamAddQuestionsIn,
@@ -112,6 +112,7 @@ logger = logging.getLogger("app.exam")
 
 #: 数据范围的判定复用题库那一份唯一事实源（避免两处各写一套过滤规则慢慢漂移）。
 from app.services import config_service  # noqa: E402
+from app.services import content_log_service  # noqa: E402
 from app.services.question_service import (  # noqa: E402
     ScopeViewer,
     ensure_subject_visible,
@@ -2487,27 +2488,22 @@ async def _write_change_log(
     before: Any = None,
     after: Any = None,
 ) -> None:
-    """写 `content_change_logs`。diff 固定 `{before, after}` 形状（与题库一致）。
+    """写 `content_change_logs`。`diff` 固定 `{before, after}` 形状（与题库一致）。
 
-    注意 `operator_ip` 是 INET 列：必须经 `to_inet()` 转成 `ipaddress` 对象，
-    直接塞字符串 asyncpg 会报类型不匹配（坑 6 / 坑 13）。
+    **2026-09-25 已收口**：SQL 与参数形状的唯一来源是 `content_log_service`
+    （原先本函数与 `question_service._record_change` 是两份逐字复制的 INSERT）。
+    保留本函数的签名是为了不动本文件 10 处调用点；它现在只是薄封装。
     """
-    await db.execute(
-        text(
-            "INSERT INTO content_change_logs "
-            "(id, entity_type, entity_id, action, batch_id, diff, change_log, operator_id, operator_ip) "
-            "VALUES (:id, :etype, :eid, :action, NULL, CAST(:diff AS jsonb), :cl, :op, :ip)"
-        ),
-        {
-            "id": next_id(),
-            "etype": entity_type,
-            "eid": entity_id,
-            "action": action,
-            "diff": _json({"before": before, "after": after}),
-            "cl": (change_log or "")[:500],
-            "op": actor_id,
-            "ip": to_inet(ip),
-        },
+    await content_log_service.record_change(
+        db,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        action=action,
+        operator_id=actor_id,
+        before=before,
+        after=after,
+        change_log=change_log,
+        ip=ip,
     )
 
 

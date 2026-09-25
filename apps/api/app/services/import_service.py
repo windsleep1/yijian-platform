@@ -57,7 +57,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import bad_request, conflict, not_found
-from app.core.idgen import next_id, next_ids, to_inet
+from app.core.idgen import next_id, next_ids
 from app.schemas.admin_import import (
     OPTION_COLUMNS,
     ErrorReport,
@@ -71,6 +71,7 @@ from app.schemas.admin_import import (
     ImportUploadOut,
     RowError,
 )
+from app.services import content_log_service
 from app.services.audit_service import write_audit
 from app.services.question_service import ScopeViewer, content_hash, scope_subject_ids
 
@@ -1702,12 +1703,11 @@ INSERT INTO question_versions (id, question_id, version, snapshot, change_log, o
 VALUES (:id, :qid, :version, CAST(:snapshot AS jsonb), :change_log, :operator_id)
 """
 
-_INSERT_CHANGE_SQL = """
-INSERT INTO content_change_logs
-  (id, entity_type, entity_id, action, batch_id, diff, change_log, operator_id, operator_ip)
-VALUES (:id, 'question', :entity_id, :action, :batch_id, CAST(:diff AS jsonb),
-        :change_log, :operator_id, :operator_ip)
-"""
+# 2026-09-25 收口：SQL 的唯一来源是 `content_log_service`。
+# 本文件是**批量**调用方（`db.execute(text(SQL), chunk)` 一次一批），
+# 所以直接复用它的 SQL 常量与参数构造，而**不是**逐行 await `record_change()`
+# —— 那会让一次导入多出上千次往返。理由写在 `content_log_service` 的模块注释里。
+_INSERT_CHANGE_SQL = content_log_service.CHANGE_LOG_INSERT_SQL
 
 
 def _question_insert_params(
@@ -1768,16 +1768,22 @@ def _change_params(
     operator_id: int,
     ip: str | None = None,
 ) -> dict[str, Any]:
-    return {
-        "id": next_id(),
-        "entity_id": entity_id,
-        "action": action,
-        "batch_id": batch_id,
-        "diff": json.dumps({"before": before, "after": after}, ensure_ascii=False, default=str),
-        "change_log": change_log[:500],
-        "operator_id": operator_id,
-        "operator_ip": to_inet(ip),
-    }
+    """2026-09-25 收口：参数形状的唯一来源是 `content_log_service.change_log_params`。
+
+    本函数只比它多一件事：**把 `entity_type` 绑定成 `'question'`**（导入只写题目）。
+    保留签名是为了不动本文件里的调用点。
+    """
+    return content_log_service.change_log_params(
+        entity_type="question",
+        entity_id=entity_id,
+        action=action,
+        operator_id=operator_id,
+        before=before,
+        after=after,
+        change_log=change_log,
+        ip=ip,
+        batch_id=batch_id,
+    )
 
 
 def _snapshot_from_payload(p: dict[str, Any], options: list[dict[str, Any]]) -> dict[str, Any]:

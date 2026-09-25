@@ -4,6 +4,8 @@
     GET    /admin/questions/{id}             题目详情（选项/答案/解析/版本）  —— question:read
     POST   /admin/questions                  新建题目                        —— question:create
     PUT    /admin/questions/{id}             编辑题目（乐观锁 version+1）     —— question:update
+    POST   /admin/questions/{id}/submit       送审（draft/rejected → reviewing）—— question:update
+    POST   /admin/questions/{id}/review       审核（approve → published / reject → rejected）—— question:publish
     DELETE /admin/questions/{id}             软删除单题                      —— question:delete
     POST   /admin/questions/batch-delete      批量软删除                      —— question:delete
 
@@ -42,6 +44,9 @@ from app.schemas.admin_question import (
     QuestionDetail,
     QuestionListItem,
     QuestionRestoreOut,
+    QuestionReviewIn,
+    QuestionReviewOut,
+    QuestionSubmitIn,
     QuestionUpdateIn,
 )
 from app.services import question_service
@@ -227,6 +232,94 @@ async def update_question(
         user_agent=request.headers.get("User-Agent"),
     )
     return ok(detail.model_dump(), message="已保存")
+
+
+@router.post(
+    "/{question_id}/submit",
+    response_model=Envelope[QuestionDetail],
+    summary="提交审核",
+    description=(
+        "需要权限 `question:update`。`draft` / `rejected` → `reviewing`，写 `content_change_logs`"
+        "（action=submit）与审计日志（`question.submit`）。**乐观锁**：必须回传 `version`。\n\n"
+        "- **为什么要有这个入口**：`reviewing` 原先只能靠前端下拉框**裸改字段**送进去，"
+        "而那条路径不记任何人、不写任何留痕 —— 「审核动作不记审核人」的来源正是这里。\n"
+        "- 送审**不写** `reviewed_by` / `reviewed_at` —— 那是**审核**，不是**发起审核**。\n"
+        "- 已在 `reviewing` 的题再送审 → **幂等命中**，返回 `already` 语义（本接口返回详情，"
+        "`version` 不变即未写入）。\n"
+        "- `published` / `archived` 的题不能送审 → `40901`。"
+    ),
+    dependencies=[Depends(require_permission("question:update"))],
+)
+async def submit_question(
+    question_id: int,
+    payload: QuestionSubmitIn,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    detail, already = await question_service.submit_question(
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        question_id=question_id,
+        payload=payload,
+        ip=client_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
+    return ok(
+        detail.model_dump(), message="该题已在待审核状态，未重复送审" if already else "已提交审核"
+    )
+
+
+@router.post(
+    "/{question_id}/review",
+    response_model=Envelope[QuestionReviewOut],
+    summary="审核题目",
+    description=(
+        "需要权限 `question:publish`（**审核权 = 发布权**：`question:publish` 的定义就是"
+        "「把草稿推向线上题库」，审核通过正是这件事）。\n\n"
+        "**一次审核 = 状态 + 人 + 时间 + 理由**（四件套，`docs/15` §2.1）：\n"
+        "- `approve` → `published`，写 `reviewed_by` / `reviewed_at` / **`published_at`**；\n"
+        "- `reject` → `rejected`，写 `reviewed_by` / `reviewed_at`，**不写 `published_at`**"
+        "（驳回 ≠ 发布）；`comment` **必填**；\n"
+        "- 理由进 `content_change_logs.diff.after.comment`（**不新增列**，`docs/15` §8.1 方案 A），"
+        "同时写审计日志 `question.review`。\n\n"
+        "**状态机**：只允许从 `draft` / `reviewing` / `rejected` 进入，其余 → `40901`。\n"
+        "- `published` + `approve` → **幂等命中**：返回 `already=true`，"
+        "**不写 `reviewed_at`、不写留痕、不动 `version`**。\n"
+        "- `published` + `reject` → `40901`：把**已经在线**的题直接审成驳回，语义上是「悄悄撤题」，"
+        "不是审核。要下线请走归档。\n"
+        "- ⚠️ **`rejected` 的题再 `reject` 也走幂等分支**，因此**新理由不会覆盖旧理由**"
+        "（幂等分支零写入）。要补理由请先编辑。\n\n"
+        "**乐观锁**：必须回传 `version`，不一致 → `40901`（两人同时审同一道题，后来者不静默覆盖）。\n\n"
+        "⚠️ **一个尚未收口的旁路**（`docs/15` §12.1）：`PUT /admin/questions/{id}` "
+        "目前**仍然接受 `status`**，且改到 `published` 时**不写 `published_at`**。"
+        "该字段的移除依赖前端表单改造（前端会传 `status`），已在待办里。"
+        "**本接口不会**因此写错数据 —— 它只保证自己这一条路径是对的。"
+    ),
+    dependencies=[Depends(require_permission("question:publish"))],
+)
+async def review_question(
+    question_id: int,
+    payload: QuestionReviewIn,
+    request: Request,
+    db: DbSession,
+    me: CurrentUserDep,
+) -> dict:
+    detail, already = await question_service.review_question(
+        db,
+        actor=me,
+        actor_name=me.display_name,
+        question_id=question_id,
+        payload=payload,
+        ip=client_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
+    out = QuestionReviewOut(question=detail, already=already)
+    return ok(
+        out.model_dump(),
+        message="该题已是目标状态，本次未重复审核（未产生任何写入）" if already else "审核完成",
+    )
 
 
 @router.delete(

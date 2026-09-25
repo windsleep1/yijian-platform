@@ -632,7 +632,7 @@ CREATE TABLE content_change_logs (
   id           BIGINT PRIMARY KEY,
   entity_type  VARCHAR(24) NOT NULL,       -- question / chapter / exam / course / product
   entity_id    BIGINT      NOT NULL,
-  action       VARCHAR(24) NOT NULL,       -- create / update / publish / archive / rollback / delete
+  action       VARCHAR(24) NOT NULL,       -- create / update / publish / archive / rollback / delete / review / submit
   batch_id     BIGINT,                     -- 若来自批量导入
   diff         JSONB,                      -- {"before":{...},"after":{...}}
   change_log   VARCHAR(500),

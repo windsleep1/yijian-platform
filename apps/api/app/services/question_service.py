@@ -48,12 +48,15 @@ from app.schemas.admin_question import (
     QuestionOptionIn,
     QuestionOptionOut,
     QuestionRestoreOut,
+    QuestionReviewIn,
+    QuestionSubmitIn,
     QuestionUpdateIn,
     QuestionVersionItem,
     SubjectBrief,
     SubjectChapterGroup,
     _validate_options,
 )
+from app.services import content_log_service
 from app.services.audit_service import write_audit
 
 # 列表里题干截断长度。教研要能认出是哪道题，不需要看全文。
@@ -596,6 +599,19 @@ async def get_question_detail(
         raise not_found("题目不存在", 40401)
     ensure_subject_visible(viewer, int(row["subject_id"]), "题目所属科目")
 
+    return await _build_detail(db, row=row, viewer=viewer)
+
+
+async def _build_detail(
+    db: AsyncSession, *, row: dict[str, Any], viewer: ScopeViewer
+) -> QuestionDetail:
+    """由一行 `questions`（`SELECT *` 的结果）组装 `QuestionDetail`。
+
+    ⚠️ **抽出来的理由**：审核 / 送审这两个写接口**也要返回最新详情**（B 端就地更新），
+    若各自复制一份组装逻辑，以后加一个字段就要改三处 —— 而**漏改的那一处不会报错**，
+    只会让某个接口少一个字段（与坑 44 / 53 同族）。
+    """
+    question_id = int(row["id"])
     options = await _load_options(db, question_id)
     subject_name = await db.scalar(
         text("SELECT name FROM subjects WHERE id = :sid"), {"sid": row["subject_id"]}
@@ -652,10 +668,15 @@ async def get_question_detail(
         updated_by=row["updated_by"],
         updated_by_name=await _user_label(db, row["updated_by"]),
         published_at=row["published_at"],
+        reviewed_by=row["reviewed_by"],
+        reviewed_by_name=await _user_label(db, row["reviewed_by"]),
+        reviewed_at=row["reviewed_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         can_edit="question:update" in viewer.permissions,
         can_delete="question:delete" in viewer.permissions,
+        can_review="question:publish" in viewer.permissions,
+        can_submit="question:update" in viewer.permissions,
         editable=row["type"] in EDITABLE_TYPES,
         versions=await _load_versions(db, question_id, row["version"]),
     )
@@ -1059,6 +1080,263 @@ async def update_question(
     )
     await db.commit()
     return await get_question_detail(db, question_id=question_id, viewer=actor)
+
+
+# ============================================================ 审核 / 送审（2026-09-25）
+
+#: 允许进入**审核**的当前状态。其余一律拒绝（硬约定 C：说清是哪一条 + 给可执行下一步）。
+REVIEWABLE_FROM: tuple[str, ...] = ("draft", "reviewing", "rejected")
+
+#: 允许**送审**的当前状态：草稿首送；被驳回后改完再送。
+SUBMITTABLE_FROM: tuple[str, ...] = ("draft", "rejected")
+
+
+def _status_hint(status: str) -> str:
+    """给拒绝文案用的「下一步怎么办」—— 只说**能做什么**，不回显题目内容。"""
+    if status == "published":
+        return "这道题已经对外发布。审核入口不负责下架（那等于「悄悄撤题」）—— 要下线请走归档。"
+    if status == "archived":
+        return "这道题处于业务归档态，请先改回草稿再送审 / 审核。"
+    return "只有 " + " / ".join(REVIEWABLE_FROM) + " 三种状态可以进入审核。"
+
+
+async def review_question(
+    db: AsyncSession,
+    *,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    question_id: int,
+    payload: QuestionReviewIn,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> tuple[QuestionDetail, bool]:
+    """审核一道题：`approve` → `published`，`reject` → `rejected`。
+
+    返回 `(详情, already)`。`already=True` = **幂等命中**（库中已是目标状态，本次**零写入**）。
+
+    ## 一次审核 = 状态 + 人 + 时间 + 理由（四件套，`docs/15` §2.1）
+
+    | 列 | approve | reject |
+    |---|---|---|
+    | `status` | `published` | `rejected` |
+    | `reviewed_by` / `reviewed_at` | ✅ | ✅ |
+    | `published_at` | ✅ `now()` | ❌ **不写**（驳回 ≠ 发布） |
+    | 理由 | 可选（备注） | **必填** |
+
+    理由**不新增列**（`docs/15` §8.1 裁定方案 A）：它是**变更属性**，不是查询主维度，
+    进 `content_change_logs.diff.after.comment`（**不截断**；`change_log` 摘要截 500）。
+
+    ## 幂等（硬约定 C）
+
+    对一道**已经是 `published`** 的题再 `approve`：返回当前详情 + `already=True`，
+    **不写 `reviewed_at`、不写留痕、不动 `version`**。
+    判据是「**目标状态是否已达成**」，不是「输入的 `decision` 是不是同一个」。
+
+    ⚠️ **由此推出的一个已知行为**：`rejected` 的题再 `reject` 也走幂等分支 →
+    **新的理由不会覆盖旧理由**。这符合「幂等分支零写入」，但调用方若想补理由，
+    应当先走编辑。已写进路由说明，避免被当成 bug。
+    """
+
+    row = await _load_question_row(db, question_id, for_update=True)
+    if row is None:
+        raise not_found("题目不存在", 40401)
+    # 数据范围排在 is_deleted / version **之前**：越权者不该从报错里读出题目的状态
+    # （与 update_question 同一条理由）。
+    ensure_subject_visible(actor, int(row["subject_id"]), "题目所属科目")
+    if row["is_deleted"]:
+        raise bad_request("题目已归档（软删除），请先恢复后再审核", 40001)
+    if row["version"] != payload.version:
+        raise conflict(
+            f"版本冲突：你手上是 v{payload.version}，库里已经是 v{row['version']}。"
+            "说明有人先改过这道题，请刷新后重试。",
+            40901,
+        )
+
+    old_status = row["status"]
+    target = "published" if payload.decision == "approve" else "rejected"
+
+    # ---- 幂等分支：目标状态已达成 → 零写入（不动 version、不写留痕 / 审计）----
+    if old_status == target:
+        return await _build_detail(db, row=row, viewer=actor), True
+
+    if old_status not in REVIEWABLE_FROM:
+        raise conflict(f"当前状态是 {old_status}，不能审核。{_status_hint(old_status)}", 40901)
+
+    comment = (payload.comment or "").strip()
+    if payload.decision == "reject" and not comment:
+        raise bad_request("驳回必须填写理由 —— 没有理由的驳回，等于让出题人自己去猜", 40001)
+
+    # ---- 写入（状态 + 人 + 时间 [+ 发布时间]）----
+    new_version = row["version"] + 1
+    sets = [
+        "status = :status",
+        "reviewed_by = :actor",
+        "reviewed_at = now()",
+        "updated_by = :actor",
+        "version = :ver",
+    ]
+    if payload.decision == "approve":
+        # 只有 approve 才写 published_at。顺带补上一个**原有**的洞：
+        # `PUT /admin/questions/{id}` 把 status 改成 published 时**从不写这一列**，
+        # 于是库里可能存在「状态已发布、published_at 为 NULL」的题（`docs/15` §12.1）。
+        sets.append("published_at = now()")
+    await db.execute(
+        text(f"UPDATE questions SET {', '.join(sets)} WHERE id = :qid"),
+        {"qid": question_id, "status": target, "actor": actor.id, "ver": new_version},
+    )
+
+    new_row = {**row, "status": target, "reviewed_by": actor.id, "version": new_version}
+    verdict = "审核通过" if payload.decision == "approve" else "审核驳回"
+    change_log = f"{verdict}：{comment}" if comment else verdict
+
+    # 为什么审核也 `version + 1` 并落一条版本快照：
+    # 审核改的是 `status`，而 `status` 本来就在编辑接口的可改字段里（改它同样 `+1`）。
+    # 若这里只改 `status` 不动 `version`，`questions.version` 会和 `question_versions`
+    # 的最大版本号**对不上** —— 而详情页的历史版本正是按后者渲染的，
+    # 会出现「题目 v5，历史里只到 v4」这种查不出原因的缺号。
+    await _insert_version(
+        db,
+        question_id,
+        new_version,
+        _snapshot(new_row, await _load_options(db, question_id), row["answer"] or {}),
+        change_log,
+        actor.id,
+    )
+    await _record_change(
+        db,
+        entity_id=question_id,
+        action="review",
+        before={"status": old_status},
+        after={
+            "status": target,
+            "decision": payload.decision,
+            "comment": comment or None,
+            "reviewed_by": actor.id,
+        },
+        change_log=change_log,
+        operator_id=actor.id,
+        ip=ip,
+    )
+    await write_audit(
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.review",
+        module="question",
+        entity_type="question",
+        entity_id=question_id,
+        before={"status": old_status},
+        after={"status": target, "decision": payload.decision, "comment": comment or None},
+        method="POST",
+        path=f"/api/v1/admin/questions/{question_id}/review",
+        ip=ip,
+        user_agent=user_agent,
+    )
+    await db.commit()
+
+    fresh = await _load_question_row(db, question_id)
+    if fresh is None:  # pragma: no cover - 同一事务内刚写完，不可能不存在
+        raise not_found("题目不存在", 40401)
+    return await _build_detail(db, row=fresh, viewer=actor), False
+
+
+async def submit_question(
+    db: AsyncSession,
+    *,
+    actor: ScopeViewer,
+    actor_name: str | None,
+    question_id: int,
+    payload: QuestionSubmitIn,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> tuple[QuestionDetail, bool]:
+    """送审：`draft` / `rejected` → `reviewing`。
+
+    ## 为什么必须补这个入口（`docs/15` §12.2）
+
+    `reviewing` 原先**只能靠前端下拉框裸改字段**送进去（同一个 `PUT`），
+    而那条路径**不记任何人、不写任何留痕** —— 「审核动作不记审核人」的来源正是这里。
+    **状态机能被裸改，就是没封闭**（与 Batch 7 的 `unpublish` 同族）。
+
+    ⚠️ 送审**不写 `reviewed_by` / `reviewed_at`** —— 那不是审核，是**发起**审核。
+    真正填这两列的是 `review_question`。
+    """
+    row = await _load_question_row(db, question_id, for_update=True)
+    if row is None:
+        raise not_found("题目不存在", 40401)
+    ensure_subject_visible(actor, int(row["subject_id"]), "题目所属科目")
+    if row["is_deleted"]:
+        raise bad_request("题目已归档（软删除），请先恢复后再送审", 40001)
+    if row["version"] != payload.version:
+        raise conflict(
+            f"版本冲突：你手上是 v{payload.version}，库里已经是 v{row['version']}。"
+            "说明有人先改过这道题，请刷新后重试。",
+            40901,
+        )
+
+    old_status = row["status"]
+    # 幂等：已在待审核态 → 零写入（与 review 同一条判据：「目标状态是否已达成」）
+    if old_status == "reviewing":
+        return await _build_detail(db, row=row, viewer=actor), True
+    if old_status not in SUBMITTABLE_FROM:
+        raise conflict(
+            f"当前状态是 {old_status}，不能送审。"
+            + (
+                "这道题已经在审核队列里走在前面了（已发布 / 已驳回的题见各自的处理方式）。"
+                if old_status == "published"
+                else "只有 " + " / ".join(SUBMITTABLE_FROM) + " 两种状态可以送审。"
+            ),
+            40901,
+        )
+
+    new_version = row["version"] + 1
+    await db.execute(
+        text(
+            "UPDATE questions SET status = 'reviewing', updated_by = :actor, version = :ver "
+            "WHERE id = :qid"
+        ),
+        {"qid": question_id, "actor": actor.id, "ver": new_version},
+    )
+    new_row = {**row, "status": "reviewing", "version": new_version}
+    await _insert_version(
+        db,
+        question_id,
+        new_version,
+        _snapshot(new_row, await _load_options(db, question_id), row["answer"] or {}),
+        "提交审核",
+        actor.id,
+    )
+    await _record_change(
+        db,
+        entity_id=question_id,
+        action="submit",
+        before={"status": old_status},
+        after={"status": "reviewing"},
+        change_log="提交审核",
+        operator_id=actor.id,
+        ip=ip,
+    )
+    await write_audit(
+        db,
+        actor_id=actor.id,
+        actor_name=actor_name,
+        action="question.submit",
+        module="question",
+        entity_type="question",
+        entity_id=question_id,
+        before={"status": old_status},
+        after={"status": "reviewing"},
+        method="POST",
+        path=f"/api/v1/admin/questions/{question_id}/submit",
+        ip=ip,
+        user_agent=user_agent,
+    )
+    await db.commit()
+
+    fresh = await _load_question_row(db, question_id)
+    if fresh is None:  # pragma: no cover
+        raise not_found("题目不存在", 40401)
+    return await _build_detail(db, row=fresh, viewer=actor), False
 
 
 # ============================================================ 删除
@@ -1644,26 +1922,24 @@ async def _record_change(
     ip: str | None = None,
     batch_id: int | None = None,
 ) -> None:
-    """写 `content_change_logs`。diff 固定是 `{before, after}` 形状 ——
-    前端审计抽屉的 `diffJson` 就是按这个结构渲染字段级差异的。"""
-    from app.core.idgen import to_inet
+    """写 `content_change_logs`（`entity_type='question'`）。
 
-    await db.execute(
-        text(
-            "INSERT INTO content_change_logs "
-            "(id, entity_type, entity_id, action, batch_id, diff, change_log, operator_id, operator_ip) "
-            "VALUES (:id, 'question', :eid, :action, :batch_id, CAST(:diff AS jsonb), :cl, :op, :ip)"
-        ),
-        {
-            "id": next_id(),
-            "eid": entity_id,
-            "action": action,
-            "batch_id": batch_id,
-            "diff": _json({"before": before, "after": after}),
-            "cl": change_log[:500],
-            "op": operator_id,
-            "ip": to_inet(ip),
-        },
+    **2026-09-25 已收口**：SQL 与参数形状的唯一来源是 `content_log_service`
+    （原先这里的 INSERT 是从 `import_service` 逐字复制来的，两处会各自漂移）。
+    本函数现在只是**把 `entity_type` 绑定成 `'question'`** 的薄封装 ——
+    保留它是为了不动本文件里 5 个调用点，而不是还留着第二份实现。
+    """
+    await content_log_service.record_change(
+        db,
+        entity_type="question",
+        entity_id=entity_id,
+        action=action,
+        before=before,
+        after=after,
+        change_log=change_log,
+        operator_id=operator_id,
+        ip=ip,
+        batch_id=batch_id,
     )
 
 
@@ -1694,6 +1970,10 @@ __all__ = [
     "get_question_detail",
     "create_question",
     "update_question",
+    "review_question",
+    "submit_question",
+    "REVIEWABLE_FROM",
+    "SUBMITTABLE_FROM",
     "soft_delete_question",
     "batch_soft_delete",
     "list_chapter_tree",

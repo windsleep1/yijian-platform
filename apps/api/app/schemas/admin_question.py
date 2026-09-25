@@ -284,6 +284,12 @@ class QuestionDetail(BaseModel):
     updated_by_name: str | None = None
     published_at: datetime | None = None
 
+    # ---- 审核链（2026-09-25 起真的有值；此前 `reviewed_by` / `reviewed_at` 是 0 引用的空列）----
+    # 为什么要暴露 `*_name`：审计页要显示"**谁**审的"，只给雪花 ID 前端还得再查一次用户。
+    reviewed_by: BigIntStrOpt = None
+    reviewed_by_name: str | None = None
+    reviewed_at: datetime | None = None
+
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -291,12 +297,64 @@ class QuestionDetail(BaseModel):
         False, description="调用者是否拥有 question:update。前端据此决定「编辑」按钮可用性"
     )
     can_delete: bool = Field(False, description="调用者是否拥有 question:delete")
+    can_review: bool = Field(
+        False,
+        description=(
+            "调用者是否拥有 `question:publish`（= 审核权）。前端据此决定「审核通过 / 驳回」"
+            "按钮可用性。**与 `can_submit` 分开**：能送审的人不一定是能审的人。"
+        ),
+    )
+    can_submit: bool = Field(
+        False,
+        description="调用者是否拥有 `question:update`（= 送审权，draft/rejected → reviewing）",
+    )
     editable: bool = Field(
         True,
         description="该题型本批是否可编辑。案例题/主观题为 false，前端应禁用编辑入口",
     )
     versions: list[QuestionVersionItem] = Field(
         default_factory=list, description="历史版本，最新在前，最多 10 条，只读"
+    )
+
+
+class QuestionReviewIn(BaseModel):
+    """审核动作入参。
+
+    ⚠️ **`status` 不在入参里** —— 结论由 `decision` 推导。
+    这是刻意的：如果调用方能直接指定 status，这个接口就退化成「又一个改字段的 PUT」，
+    `docs/15` §2.2 那条原则（**独立业务含义 → 独立入口**）就白立了。
+    """
+
+    decision: Literal["approve", "reject"]
+    comment: str | None = Field(
+        None,
+        max_length=500,
+        description=(
+            "审核意见。**`reject` 时必填** —— `rejected` 原本是个「没有理由落点」的空转状态，"
+            "允许「驳回但不说为什么」等于只补了一半。`approve` 时可选（当备注用）。"
+        ),
+    )
+    version: int = Field(..., description="乐观锁：与库中不一致 → 40901")
+
+
+class QuestionSubmitIn(BaseModel):
+    """送审入参（`draft` / `rejected` → `reviewing`）。"""
+
+    version: int = Field(..., description="乐观锁：与库中不一致 → 40901")
+
+
+class QuestionReviewOut(BaseModel):
+    """审核结果。
+
+    刻意**不是**裸 `QuestionDetail`：调用方需要知道「这次到底写没写」——
+    对一道已经是 `published` 的题再 approve 是**幂等命中**，库里一个字节都没动。
+    把这个事实放进 `already`，而不是让前端从「版本号好像没变」去**猜**。
+    """
+
+    question: QuestionDetail
+    already: bool = Field(
+        False,
+        description="幂等命中：库中已是目标状态，本次**未产生任何写入**（未动 version、未写留痕）",
     )
 
 
