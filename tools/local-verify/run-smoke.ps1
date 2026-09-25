@@ -170,17 +170,52 @@ try {
     # 这正是硬约定 J / L 要防的假数字（实测：cli.py 曾报 190/190 全未覆盖，
     # 而冒烟日志里它明明打印过 `[cli] RBAC seed replayed`）。
     # 采集前先清场：否则 --append 会把上一轮的数据攒进来，数字虚高且不可复现。
+    #
+    # ---- ⚠️ 2026-09-25 改：按「**整族**」清，不再只删"本脚本会产生的那几个名字" ----
+    # 起因（实测）：仓库根残留了一个 **9-24 的 `.coverage`**（**不是当次产生的**）。
+    # 它给出 4567/**218** → 95.23%，而权威值是 4567/**210** → 95.40%（差 8 行，全在
+    # `stats_service.py`）。把它当"本地数字"去和 CI 比 → 得到**假红**，
+    # 然后去查一个根本不存在的问题（硬约定 J 的反面）。
+    # ⇒ **只删"自己产生的名字"，就永远清不掉"上一次改了命名方案后留下的"那种文件。**
+    # 口径直接对齐 `.gitignore`：`.coverage` / `.coverage.*` / `coverage.xml` / `htmlcov/`。
+    #
+    # 🔴 **绝对不要写成 `Remove-Item .coverage*`** —— 那个通配符**会匹配 `.coveragerc`**，
+    # 把门禁配置本身删掉（已实测：`Get-ChildItem .coverage*` → `.coverage | .coveragerc`）。
+    # 带点的 `.coverage.*` 才安全（`.coveragerc` 里 `.coverage` 后面跟的是 `r`，不是 `.`）。
+    # 下面还有一道"配置还在吗"的断言兜底 —— 清场最坏的结果就是静默毁掉门禁。
+    # <<< COV-CLEAN:START >>>  （标记供 `tools/local-verify/test-cov-clean.ps1` 提取本段做**单元验证**：
+    #   清场本身是个"删文件"的动作，删错比不删危险 —— 所以它必须有测试，见硬约定 H）
+    #
+    # ⚠️ **标记必须包住变量定义**：这一段对外的输入只有 `$repo` 与 `$NoCoverage`。
+    #    第一版把标记写在 `$covStopFile` **之后**，于是别的 `foreach` 拿到 `$null`
+    #    —— 是 harness 报的"提取段不自包含"，不是脚本本身的错（跑起来时变量在）。
+    #    但"能被独立提取"正是它能被测的前提，所以标记上移到这里。
     $covApi      = Join-Path $repo ".coverage.api"
     $covCli      = Join-Path $repo ".coverage.cli"
     $covTests    = Join-Path $repo ".coverage.tests"
     $covDataFile = Join-Path $repo ".coverage"          # combine 之后的最终报告用
     $covStopFile = Join-Path $env:TEMP "yijian-cov-stop"
     if (-not $NoCoverage) {
-        foreach ($f in @($covApi, $covCli, $covTests, $covDataFile)) {
+        # 1) 整族：`.coverage.*`（含未来新增的第 4 份采集文件，无需再改这里）
+        $staleCov = Get-ChildItem -Path (Join-Path $repo ".coverage.*") -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -ne ".coveragerc" }
+        foreach ($f in $staleCov) {
+            Write-Host ("[local-verify] 清场：删除历史覆盖率文件 {0}" -f $f.Name)
+            Remove-Item -Path $f.FullName -Force -ErrorAction SilentlyContinue
+        }
+        # 2) 单个名字 + 派生物（`.gitignore` 里同族的另外两类）
+        foreach ($f in @($covDataFile, (Join-Path $repo "coverage.xml"), $covStopFile)) {
             Remove-Item -Path $f -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -Path $covStopFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $repo "htmlcov") -Recurse -Force -ErrorAction SilentlyContinue
+
+        # 3) 兜底断言：清场最坏的结果是"把 .coveragerc 也删了"，而那样门禁会**静默失效**
+        #    （覆盖率照跑，只是没了门槛）。宁可当场报错，也不要跑出一个"通过"的假象。
+        if (-not (Test-Path (Join-Path $repo ".coveragerc"))) {
+            Fail "清场把 .coveragerc 删掉了 —— 检查 Remove-Item 的通配符（`.coverage*` 会匹配 `.coveragerc`，要用 `.coverage.*`）"
+        }
     }
+    # <<< COV-CLEAN:END >>>
 
     Write-Host "[local-verify] 重放 RBAC 种子（幂等，补 viewer 等后加角色）..."
     Push-Location (Join-Path $repo "apps\api")
