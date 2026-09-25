@@ -787,7 +787,11 @@ class Generator:
         self.seen_hashes.add(digest)
 
         qid = self._next_qid()
-        chapter = CH_ID[chapter_id]
+        # 存在性校验（原先写成 `chapter = CH_ID[chapter_id]` 但结果没人用，ruff F841）。
+        # ⚠️ 不能直接删成"什么都不做"—— 那样章节缺失时不会当场炸，
+        # 而是生成出**悬空引用**（题目指向一个不存在的章节）。保留 fail-fast。
+        if chapter_id not in CH_ID:
+            raise KeyError(f"章节 {chapter_id} 不在种子章节表 CH_ID 里")
         subject = SUBJECTS[subject_code]
 
         self.questions.append({
@@ -864,7 +868,8 @@ class Generator:
     def gen_single_def_to_term(self, item: dict[str, Any], variant: int) -> None:
         """单选：给释义，选出对应术语。"""
         kp = next(k for k in self.kb.kps if k["id"] == item["kp_id"])
-        chapter = CH_ID[item["chapter_id"]]
+        if item["chapter_id"] not in CH_ID:  # 同 790：存在性校验（原先是一次无人使用的查表）
+            raise KeyError(f"章节 {item['chapter_id']} 不在种子章节表 CH_ID 里")
         pool = self.kb.distractor_pool(item, 3)
         if len(pool) < 3:
             return
@@ -1068,7 +1073,6 @@ class Generator:
 
         while len(self.questions) < target and attempts < max_attempts:
             attempts += 1
-            progress = len(self.questions) / max(target, 1)
 
             # 按比例插入案例题
             if (

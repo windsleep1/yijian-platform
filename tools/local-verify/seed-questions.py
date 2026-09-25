@@ -120,7 +120,10 @@ def main() -> int:
         if not gen.exists():
             print(f"[seed] generator not found: {gen}", file=sys.stderr)
             return 1
-        out = run(
+        # ⚠️ 只调用、不接返回值：`run()` 是**有副作用**的（真的去跑生成器），
+        # 而且非 0 退出它自己会 raise。原先写成 `out = run(...)` 而 `out` 没人用（ruff F841）——
+        # **直接删掉整行会连生成这一步一起删掉**，那是把"废代码"和"副作用"看成一回事。
+        run(
             [sys.executable, str(gen), "--format", args.format,
              "--out", str(out_dir), "--count", str(args.count)],
             cwd=gen.parent, env=env,

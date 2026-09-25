@@ -2,11 +2,11 @@
 #
 # ## 跑什么（全部**拦截式**）
 #
-#     ruff check                   后端静态检查
-#     ruff format --check          后端格式（ruff.toml 的 line-length = 100）
+#     ruff check                   **全仓**静态检查（apps/api + tools/ + db/）
+#     ruff format --check          格式（**范围仍是 apps/api** —— 全仓有 29 文件存量，见 BL-10）
 #     pytest                       后端全量用例（真 PostgreSQL）
 #     coverage combine             三份进程数据合并（api / cli / tests）
-#     coverage report              后端覆盖率（门槛 = `.coveragerc` 的 fail_under = 85）
+#     coverage report              后端覆盖率（门槛 = `.coveragerc` 的 fail_under，**当前 94.40**）
 #     sha256sum .coverage          合并结果指纹（两次 run 对比 → 验合并确定性）
 #     npm run lint                 前端 eslint（规则全 error）
 #     npm run format:check         前端格式（prettier，配置见 prettier.config.mjs）
@@ -33,7 +33,7 @@
 # |---|---|---|
 # | `tsc --noEmit` | **拦截** | 不变 |
 # | `pytest` | **拦截** | 不变 |
-# | `ruff check` | 上报（`continue-on-error`） | **拦截**（存量 19 条清零后转的） |
+# | `ruff check` | 上报（`continue-on-error`） | **拦截**（存量 19 条清零后转的；2026-09-25 **范围扩到全仓**） |
 # | `npm run lint` | 不在 CI（本地全 warn，退出码 0） | **拦截**（存量 14 条清零 + 提级后上来的） |
 # | `coverage report` | 无 | **拦截**（门槛依据见 `.coveragerc`） |
 # | `coverage combine` | 无（只采 API 进程一份） | **拦截**（2026-09-22：三份各进程插桩 + combine） |
@@ -154,12 +154,26 @@ jobs:
       # 1 条 F821 补 import），`ruff check apps/api` 现在是 "All checks passed!" 退出码 0。
       # 在此之前它是 `continue-on-error`（只上报）—— 因为存量在身时设拦截会让 CI 恒红，
       # 而**恒红的门禁等于没有门禁**（硬约定 H 的同一逻辑）。
-      - name: ruff check（拦截式）
-        run: ruff check apps/api
+      #
+      # 2026-09-25 扩范围：`apps/api` → **`.`（全仓）**。
+      # 起因：`tools/local-verify/` 与 `db/seed/` 一直**不在任何 ruff 范围里** ——
+      # 那里躺着 4 条 F841 / 2 条 F401（工具脚本与种子生成器），从来没人看见。
+      # 清零后按同一条判据（存量 ≤ 20 条 → 顺手清掉并纳入）扩到全仓。
+      # 判断依据与"为什么不连 format 一起扩"见下一条注释。
+      - name: ruff check（拦截式，全仓）
+        run: ruff check .
 
       # ---- 格式检查（拦截式，Commit B 起）----
       # 行宽取 100 而不是 ruff 默认的 88 —— 依据是实测（Python p95=83 / p99=97），
       # 贴着现有代码选能把格式化 diff 压到最小。配置在仓库根 ruff.toml。
+      #
+      # ⚠️ **范围仍是 `apps/api`，刻意没有跟着扩到 `.`**（2026-09-25 实测权衡）：
+      #     `ruff format --check .` 会报 **29 个文件待格式化**（89 个已合规）——
+      #     超过"可顺手清掉"的量级，扩了就是**恒红**（硬约定 H）。
+      #     而且要清干净必须动 29 个文件的**纯格式** diff，那正是 `ruff.toml` 里写的
+      #     「风格统一第二步」——**必须独立一个 commit**，否则会把业务改动淹掉。
+      #     ⇒ 已记为待办 **BL-10**（`docs/21-待办清单.md`）。
+      #     **"能覆盖"与"能过"是两件事：范围扩了但恒红，等于没有门禁。**
       - name: ruff format --check（拦截式）
         run: ruff format --check apps/api
 
