@@ -187,7 +187,10 @@ def run_pytest() -> tuple[int, str]:
     所以这里把摘要行也返回出去，由 `assert_ran()` 再判一次"到底跑了没有"。
     """
     r = subprocess.run(
-        [PY, "-m", "pytest", PYTEST_TARGET, "-q", "-rs", "-p", "no:cacheprovider"],
+        # ⚠️ `-rfEXs`：`-r` 是**替换**默认值 —— 只写 `-rs` 会把默认的 `-rfE` 顶掉，
+        #    短汇总里**就不会有 `FAILED` 行**（本机实测）⇒ 变红时只说"有失败"、
+        #    不说"哪条失败"。三处（本文件 / run-smoke.ps1 / CI 的 pytest 步骤）同口径。
+        [PY, "-m", "pytest", PYTEST_TARGET, "-q", "-rfEXs", "-p", "no:cacheprovider"],
         cwd=str(API_DIR),
         env=ENV,
         capture_output=True,

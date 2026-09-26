@@ -307,11 +307,15 @@ try {
         # pytest 进程也要插桩：单元测试里有**直接调 app 代码**的用例
         # （test_idgen / test_admin_v4::test_content_hash_and_answer_derivation），
         # 它们在 API 进程的账上根本不会出现。
-        # ⚠️ `-rs`（打印每条 skip 的**文件:行号 + 原因**）不是装饰，是必需：
-        #    一个裸的 `N skipped` 会把"某条用例从没跑过"藏起来 —— 坑 55 就是这样
-        #    在 CI 上藏了几个月的（覆盖率上只表现为"少 13 行"）。硬约定 M 的同一条道理：
-        #    **把"没跑"这件事本身变成可见信息**。CI 的 pytest 步骤也带 `-rs`（保持两边一致）。
-        & $pyExe -m coverage run --data-file $covTests --source app --rcfile (Join-Path $repo ".coveragerc") -m pytest tests -v --tb=short -rs 2>&1 | Tee-Object -FilePath $pytestLog
+        # ⚠️ `-rfEXs`（**不是** `-rs`）—— 两个理由，缺一个都会让"没跑 / 挂了"变得不可见：
+        #   ① `-rs` 打印每条 skip 的**文件:行号 + 原因**，这本身是必需的：裸的 `N skipped`
+        #      会把"某条用例从没跑过"藏起来 —— 坑 55 就这样在 CI 上藏了几个月
+        #      （覆盖率上只表现为"少 13 行"）。硬约定 M 的同一条道理。
+        #   ② ★ 但 `-r` 是**替换**默认值：只写 `-rs` 会把默认的 `-rfE` 一起顶掉，
+        #      ⇒ **短汇总里根本没有 `FAILED` 行**（2026-09-26 本机实测）。
+        #      而那一行正是"哪条用例挂了"的第一手信息 ⇒ 必须写成 `-rfEXs`。
+        #      ⚠️ 本文件与 CI 的 pytest 步骤**必须同口径**（CI 那边同样是 `-rfEXs`）。
+        & $pyExe -m coverage run --data-file $covTests --source app --rcfile (Join-Path $repo ".coveragerc") -m pytest tests -v --tb=short -rfEXs 2>&1 | Tee-Object -FilePath $pytestLog
         $rc = $LASTEXITCODE
     } finally {
         Pop-Location
