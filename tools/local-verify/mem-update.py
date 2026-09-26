@@ -195,6 +195,11 @@ def main() -> int:
     ap.add_argument("--budget", type=int, default=0, help="批内允许的净增字节（默认 0）")
     ap.add_argument("--end", action="store_true", help="收口本批：断言 + 清理")
     ap.add_argument("--status", action="store_true", help="只报数")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="预演：一次报出**每个**锚点匹配几次（不写文件）—— 锚点写错时不必一轮一轮试",
+    )
     ap.add_argument("--self-test", action="store_true", help="证明判据自己会响（不碰 MEMORY.md）")
     ap.add_argument("--force-end", action="store_true", help="放弃本批（保留当前内容，删状态）")
     args = ap.parse_args()
@@ -253,6 +258,33 @@ def main() -> int:
     if args.add and not args.sink:
         say("✗ 有 --add 但一个 --sink 都没有 —— 拒绝「只加不减」（硬约定 Q 的机械形式）")
         return 1
+
+    # ---------- 预演（只校验、不写） ----------
+    # ⚠️ 为什么需要它：锚点写错时脚本**只报第一个**就整批回滚，于是"到底哪几个锚点不对"
+    #    要一轮一轮试（2026-09-26 实测浪费了 5 轮往返）。⇒ 预演**一次把全部锚点的匹配数报出来**，
+    #    并且把"新块里有重复行"这类问题也一并列出。
+    if args.dry_run:
+        probe = MEM.read_bytes().decode("utf-8")
+        bad = 0
+        for spec in args.sink:
+            old, new = parse_pair(spec, "--sink")
+            n = probe.count(old)
+            say(f"  [{'ok' if n == 1 else 'BAD'}] --sink 匹配 {n} 次：{old[:52]!r}")
+            bad += 0 if n == 1 else 1
+            if n == 1:
+                probe = probe.replace(old, new, 1)
+        for spec in args.add:
+            anchor, block = parse_pair(spec, "--add")
+            n = probe.count(anchor)
+            dup = block_conflicts(block, existing_lines(probe))
+            say(f"  [{'ok' if (n == 1 and not dup) else 'BAD'}] --add 锚点 {n} 次"
+                f"{'，且新块有重复行' if dup else ''}：{anchor[:44]!r}")
+            bad += 0 if (n == 1 and not dup) else 1
+            if n == 1 and not dup:
+                probe = probe.replace(anchor, f"{anchor}\n{block}", 1)
+        print(f"[mem] 预演结束：{bad} 条 BAD（**文件未改**）；全部 ok 时正文将变为 "
+              f"{len(probe.encode('utf-8'))} 字节", flush=True)
+        return 1 if bad else 0
 
     st = load_state() or open_batch()
     original = MEM.read_bytes()
