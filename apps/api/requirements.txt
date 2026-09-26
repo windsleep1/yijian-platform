@@ -16,6 +16,13 @@ python-multipart>=0.0.9,<0.1
 httpx>=0.27,<0.29
 pytest>=8.0,<9.0
 pytest-asyncio>=0.23,<0.25
+#   pytest-timeout —— **BL-16（2026-09-26）**：CI 的 pytest 从 68s（09-23 绿）
+#   变成 >12 分钟（09-24 起 8 连红，每次都撞 `timeout-minutes: 12` 被 kill），
+#   而**本地复现不出来**（318 passed / 152s，最慢的单条只有 1.51s）。
+#   ⇒ 把"整步沉默 12 分钟"降成"**哪条用例 + 线程堆栈**"：光有 `timeout-minutes`
+#     只知道"这一步超时了"，不知道挂在哪 —— 不说话的失败等于没有失败（坑 57 的同一条推论）。
+#   取值与理由写在 `apps/api/pytest.ini`（**本地与 CI 共用那一个来源**）。
+pytest-timeout>=2.3,<3.0
 
 # 门禁与本地验收（`run-smoke.ps1` 与 CI 都装这三个）
 #   ruff      —— 静态检查（配置在仓库根 `ruff.toml`）。之前只在本地临时装过，

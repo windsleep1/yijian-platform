@@ -1,5 +1,32 @@
 # CI 门禁 —— 门禁整顿（2026-09-20 起）
 #
+# ## ⚠️ 从 2026-09-24 起这一跳长期变红（BL-16，2026-09-26 定位中）
+#
+# `pytest` **从 68 秒变成 >12 分钟**（每次都撞 `timeout-minutes: 12` 被 kill），
+# 紧随其后的「覆盖率门禁」**恒为 `skipped`** ⇒ **覆盖率门槛这些天一次都没生效**。
+# 实测对照（`actions/runs/{id}/jobs`，匿名可读）：
+#
+#     e593486（09-23 23:32Z，最后一次绿）  pytest = 68s  覆盖率门禁 2s ✅
+#     d033461 起 8 连红                    pytest = 12m12s（被 kill）
+#
+# ⚠️ **不是"某个提交改坏的"**：第一个变红的 `d033461` 只删了 README 3 行；
+#    同一份代码在前一次 run 里是绿的 ⇒ **间歇性挂起**。
+# ⚠️ **也不是"CI 机器慢"**：本地同口径跑 318 条要 **152.6s**，而 CI 绿的时候只要 **68s**
+#    ——**CI 比本地快**，所以 68s → 12min 是异常，不是"慢"。
+#
+# 处置：`apps/api/pytest.ini`（`timeout = 90` / `timeout_method = thread`）把粒度从
+# "整步"降到"单条用例 + 线程堆栈"；本文件的 pytest 步骤把关键行回显成 `::error::`
+# annotation —— **因为 job 日志匿名读不到（403），而 annotation 匿名读得到**。
+#
+# ## 两个"看 CI 状态"的坑（踩过）
+#
+# 1. **每次 push 有两条 run**：`CI`（门禁）与 `pages build and deployment`（GitHub Pages 自动，
+#    40~60 秒、通常 success）。**只看"最近一条 success"会误判成"CI 是绿的"**（坑 65）。
+#    正解：按 workflow 过滤（`/actions/workflows/362493984/runs`）。
+# 2. **日志正文匿名读不到（403）**，但下面两个通道可以：
+#      · `GET /actions/runs/{id}/jobs` → **每一步**的 conclusion + 起止时间
+#      · `GET /check-runs/{job_id}/annotations` → 步骤里 `::error::` 发出的内容
+#
 # ## 跑什么（全部**拦截式**）
 #
 #     ruff check                   **全仓**静态检查（apps/api + tools/ + db/）
@@ -324,13 +351,53 @@ jobs:
       # 它**不修根因**，只把"无限期挂住"变成"有界的、自己会说话的失败"
       # （Actions 会标 `exceeded the maximum execution time`）——
       # 与硬约定 H「恒红的门禁等于没有门禁」同一条思路：**不说话的失败等于没有失败**。
+      # ---- BL-16（2026-09-26）：从"整步沉默 12 分钟"改成"单条用例 + 堆栈" ----
+      #
+      # 背景：这一跳**从 68 秒变成了 >12 分钟**（e593486 绿时 pytest=68s；
+      # d033461 起 8 连红，每次都是 12m12s 撞 `timeout-minutes: 12` 被 kill，
+      # 紧随的「覆盖率门禁」**恒为 skipped** —— 也就是**门槛这些天一次都没生效**）。
+      # 而**本地复现不出来**（同口径 318 passed / 152.6s，最慢单条 1.51s）⇒ 间歇性挂起。
+      #
+      # ⚠️ `timeout-minutes` 只能证明"**整步**超时"，它**不说挂在哪条** —— 不说话的失败
+      #    等于没有失败（坑 57 的同一条推论）。粒度降到单条用例的配置在
+      #    **`apps/api/pytest.ini`**（`timeout = 90` / `timeout_method = thread`），
+      #    本地与 CI **共用那一个来源**（同 `.coveragerc` 的做法）。
+      #
+      # ⚠️ 下面这段 shell 不是装饰：**job 日志匿名读不到（403）**，而
+      #    **check-run annotation 匿名可读**。所以把关键行回显成 `::error::`，
+      #    让"挂在哪条、卡在哪一行"从一条**可读的通道**出来。
+      #    （查询：`GET /repos/{owner}/{repo}/check-runs/{job_id}/annotations`）
+      #
+      # ⚠️ `set -e` 故意不加：加了会在管道那一步直接退出，下面的诊断就永远不执行。
+      #    退出码一律以 `PIPESTATUS[0]`（pytest 自己的）为准，**不许被 `tee` 吞掉**。
       - name: pytest
         timeout-minutes: 12
         working-directory: apps/api
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          LOG=/tmp/pytest.log
           coverage run --data-file "$GITHUB_WORKSPACE/.coverage.tests" \
-            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m pytest tests -q -rs
+            --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m pytest tests -q -rs 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "==== pytest 失败（exit=$rc）—— 关键行回显成 annotation，便于匿名读取 ===="
+            # 1. 用例名（挂起时由 pytest-timeout 的堆栈给出，形如 `tests/x.py", line 12, in test_y`）
+            grep -ohE 'tests[\\/][A-Za-z0-9_]+\.py", line [0-9]+, in [A-Za-z0-9_]+' "$LOG" | tail -3 | while IFS= read -r l; do
+              echo "::error title=挂起位置::$l"
+            done
+            # 2. 超时横幅与判定行
+            grep -nE 'Timeout \(|^\+{10,} Timeout' "$LOG" | head -3 | while IFS= read -r l; do
+              echo "::error title=pytest-timeout::$l"
+            done
+            # 3. 失败/错误汇总行
+            grep -E '^(FAILED|ERROR) ' "$LOG" | head -10 | while IFS= read -r l; do
+              echo "::error title=失败用例::$l"
+            done
+            # 4. 日志尾部（日志正文匿名读不到，这一步是唯一出口）
+            echo "---- pytest 日志尾部（最后 15 行）----"
+            tail -15 "$LOG"
+          fi
+          exit "$rc"
 
       # ---- 覆盖率门禁（拦截式）：优雅收尾 → 校验三份 → 合并 → 指纹 → 报告 ----
       #
