@@ -396,6 +396,20 @@ jobs:
           #    于是诊断看到的不是"错误内容"而是"日志是空的"。
           PYTHONUNBUFFERED: "1"
         run: |
+          # ⚠️⚠️ **`set +e` 必须在第一行**：GitHub Actions 的 `run:` 默认是 `bash -e {0}`
+          #     —— **`-e` 本来就开着**，它不是靠 `set -e` 才打开的。
+          #     ⇒ 上面那条"pytest 会失败"的管道一旦非零，`-e` 就**立刻结束整个脚本**，
+          #       下面的诊断**根本没机会跑**（连 `rc=${PIPESTATUS[0]}` 都到不了）。
+          #     本机实测（同一段脚本，只换 shell 选项）：
+          #       bash -eo pipefail → **输出为空**（诊断 0 行）   ← 与 CI 现象完全一致
+          #       bash             → 诊断正常输出（verdict= / ::error）
+          #     ★ 这就是"annotation 一条都没发出来"的**真因**。⚠️ 它在**两轮**里骗过了我 ——
+          #       我先去改 `-rs`、又去加 `PYTHONUNBUFFERED`（那两条该修，但都不是这个）。
+          #     ⚠️ 旧注释还写着"`set -e` 故意不加"⇒ 说明我对自己的工具链有**错误的信念**。
+          #     ⚠️ 提取式的 harness 也抓不到它：它用**普通 bash**（无 `-e`）跑那段 —— 又一个"两个口径"；
+          #       所以 `tools/local-verify/test-pytest-diag.sh` 现在会把**整段步骤脚本**拿
+          #       `bash -eo pipefail` 跑一遍（`[6]` 那组自检），并断言"去掉 `set +e` 就会变成哑巴"。
+          set +e
           set -uo pipefail
           LOG=/tmp/pytest.log
           # ⚠️ `-rfEXs` 而**不是** `-rs`。`-r` 是**替换**默认值：`-rs` 会把默认的 `-rfE` 顶掉，
@@ -425,29 +439,34 @@ jobs:
               vcode=plain
               verdict='失败（pytest 正常跑完，未触发单条超时）'
             fi
+            # ⚠️ 显式带 `file=` / `line=`：GitHub 自己的失败 annotation 都带 `path` + 行号，
+            #    而**不带 file 的 job 级 annotation 在 `/check-runs/{id}/annotations` 里读不到**
+            #    （这是上一轮"读不到输出"的另一个可疑点，一并排除掉 —— 两个原因都要消掉，
+            #     否则下次仍分不清"没跑"和"跑了但看不见"）。
             # 头部**一定**要发：它自己就能分辨"日志是空的"和"grep 没匹配上"（看 log_bytes）。
-            printf '::error title=pytest诊断头::exit=%s log_bytes=%s log_lines=%s verdict=%s 判定=%s\n' \
-              "$rc" "$logbytes" "$loglines" "$vcode" "$verdict"
+            ANN='file=.github/workflows/ci.yml,line=1'
+            printf '::error %s,title=pytest诊断头::exit=%s log_bytes=%s log_lines=%s verdict=%s 判定=%s\n' \
+              "$ANN" "$rc" "$logbytes" "$loglines" "$vcode" "$verdict"
 
             # 贴出去之前先脱敏（仓库公开、annotation 也公开）。
             redact() { sed -E 's/eyJ[A-Za-z0-9_-]{8}[A-Za-z0-9._-]*/eyJ_REDACTED/g'; }
 
             # 1) 失败用例（**只有 `-rfEXs` 才保证有这一行**）
             grep -E '^(FAILED|ERROR) ' "$LOG" | redact | head -20 | while IFS= read -r l; do
-              printf '::error title=失败用例::%s\n' "$l"
+              printf '::error %s,title=失败用例::%s\n' "$ANN" "$l"
             done
             # 2) 挂起位置（pytest-timeout 的线程堆栈；实测格式 `File "…/tests/x.py", line N, in test_y`）
             grep -oE 'tests[/\\][A-Za-z0-9_.-]+\.py", line [0-9]+, in [A-Za-z0-9_]+' "$LOG" \
               | tail -5 | while IFS= read -r l; do
-              printf '::error title=挂起位置::%s\n' "$l"
+              printf '::error %s,title=挂起位置::%s\n' "$ANN" "$l"
             done
             # 3) FAILURES 段落标题（1) 兜不住的场景，例如 collection error）
             grep -nE '^_{5,} .+ _{5,}$' "$LOG" | redact | head -10 | while IFS= read -r l; do
-              printf '::error title=失败段落::%s\n' "$l"
+              printf '::error %s,title=失败段落::%s\n' "$ANN" "$l"
             done
             # 4) ★ 原始尾部兜底 —— **必须走 annotation**（stdout 读不到，写在那里等于没写）
             grep -vE '^[[:space:]]*$' "$LOG" | tail -25 | redact | while IFS= read -r l; do
-              printf '::error title=日志尾部::%s\n' "$l"
+              printf '::error %s,title=日志尾部::%s\n' "$ANN" "$l"
             done
             # 5) 第二通道：step summary（长文本比逐行 annotation 更合适；两条通道互为备份）
             {

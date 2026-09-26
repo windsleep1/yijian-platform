@@ -170,6 +170,61 @@ check "mutated block NO LONGER reaches the tail marker (so [4] can really fail)"
 check "and the header is still emitted (header does not depend on the tail)" \
   "$(has_flag "$OUT5" 'verdict=plain')"
 
+# ---------------------------------------------------------------------------
+# 4. ★★ 最重要的一组：把**整段步骤脚本**按 **GitHub 真正的方式**跑一遍。
+#
+#    GitHub 的 `run:` 默认是 `bash -e {0}` —— **`-e` 本来就开着**，它不是靠 `set -e` 才打开的。
+#    ⇒ 那条"pytest 会失败"的管道一旦非零，`-e` 立刻结束整个脚本，**下面的诊断根本没机会跑**。
+#    2026-09-26 实测（同一段脚本、只换 shell 选项）：`bash -eo pipefail` → **输出为空**；
+#    `bash` → 诊断正常。这正是"annotation 一条都没发出来"的真因，骗过了两轮。
+#    ⚠️ 上面 [1]~[5] 用 `bash -c` 跑的是**诊断段**、且**没有 -e** —— 所以它们**永远抓不到这个坑**。
+#       本组存在的唯一理由就是把那个"两个口径"补上。
+# ---------------------------------------------------------------------------
+echo "[6] the real step script, run the way GitHub runs it (bash -e)"
+STEP=$(awk '/^      - name: pytest$/{s=1;next} s&&/^      - name:/{exit} s&&/^        run: \|$/{r=1;next} r{print}' "$CI" \
+  | sed 's/^ \{10\}//')
+check "pytest step script extracted (non-empty)" "$([ -n "$STEP" ] && echo 1 || echo 0)"
+check "script explicitly disables -e (a 'set +e' line BEFORE the pipeline)" \
+  "$(printf '%s\n' "$STEP" | awk '/^set \+e$/{e=NR} /^coverage run/{c=NR} END{print (e && c && e < c) ? 1 : 0}')"
+
+mkdir -p "$TMP/ws"
+FAILSTEP=$(printf '%s\n' "$STEP" | sed 's/^coverage run/false/')
+check "mutation applied (coverage run -> false, i.e. a failing pipeline)" \
+  "$(has_flag "$FAILSTEP" 'false --data-file')"
+printf '%s\n' "$FAILSTEP" >"$TMP/step_fail.sh"
+GITHUB_WORKSPACE="$TMP/ws" GITHUB_STEP_SUMMARY="$TMP/s6.md" \
+  bash -eo pipefail "$TMP/step_fail.sh" >"$TMP/s6.out" 2>&1
+check "with -e ON (GitHub's default) the diagnostics DO run" \
+  "$(has_flag "$(cat "$TMP/s6.out")" 'verdict=')"
+
+# ★ 证伪：把 `set +e` 拿掉，同一个场景必须**变哑**。
+#    （不能构造出"它应该报相反结果"的场景，这条检查就不是检查 —— 硬约定 J）
+printf '%s\n' "$FAILSTEP" | grep -v '^set +e$' >"$TMP/step_noe.sh"
+check "falsification: the 'set +e' line is really gone in the control script" \
+  "$([ "$(grep -c '^set +e$' "$TMP/step_noe.sh")" = "0" ] && echo 1 || echo 0)"
+GITHUB_WORKSPACE="$TMP/ws" GITHUB_STEP_SUMMARY="$TMP/s6b.md" \
+  bash -eo pipefail "$TMP/step_noe.sh" >"$TMP/s6b.out" 2>&1
+# ⚠️ 这里**不能**写成 `$(has_flag … && echo 0 || echo 1)` —— `has_flag` 的退出码恒为 0
+#    （它最后一条命令是 `echo`），于是 `&&` 总成立、替换结果是**两行**，判据永远不成立。
+#    我在这份文件里**已经犯过两次**，所以下面 [0c] 组把它变成了自检。
+NO_E_SPOKE=0
+has "$(cat "$TMP/s6b.out")" 'verdict=' && NO_E_SPOKE=1
+check "falsification: WITHOUT set +e it goes silent (so the check above can really fail)" \
+  "$([ "$NO_E_SPOKE" = "0" ] && echo 1 || echo 0)"
+
+echo "[0c] harness self-guard (a judgement must return ONE value)"
+BADPAT='\$\(has(_flag)? [^)]*&& echo'
+# 只扫**代码行**：注释里会出现这个模式的名字（就是来解释它的），扫进去会变成"检测器抓自己的说明"。
+BAD_HITS=$(grep -nE "$BADPAT" "$0" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+check "no has-flag-then-echo anti-pattern in code lines" \
+  "$([ -z "$BAD_HITS" ] && echo 1 || echo 0)"
+if [ -n "$BAD_HITS" ]; then
+  echo "        offender(s): $BAD_HITS"
+fi
+# ★ 这条守卫**能不能响**不需要再造对照：它 2026-09-26 就**真的响过一次**
+#   （当时 [6] 组里就是这么写的，被判 FAIL，我才发现判据永远拿不到 0/1）。
+#   —— 这正是硬约定 J 要的"它应该报相反结果的场景"已经发生过。
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "[pytest-diag-test] ALL PASSED"
