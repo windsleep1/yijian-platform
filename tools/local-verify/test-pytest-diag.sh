@@ -225,6 +225,97 @@ fi
 #   （当时 [6] 组里就是这么写的，被判 FAIL，我才发现判据永远拿不到 0/1）。
 #   —— 这正是硬约定 J 要的"它应该报相反结果的场景"已经发生过。
 
+# ---------------------------------------------------------------------------
+# [7] 覆盖率数字必须走「匿名读得到」的通道
+#
+#   背景：覆盖率门禁自 09-24 起**一次都没跑到**（前一步被 12 分钟整步超时杀掉）；
+#   2026-09-26 修好后它跑起来了（2 秒 success）—— 但数字写在 **stdout**，
+#   而 job 日志正文匿名 **403**，于是「CI 的覆盖率到底是多少」依旧读不到。
+#   与 pytest 诊断段**同一个坑**（坑 66）：**写在 stdout 等于没写**。
+#
+#   本组把提取出来的那一段**原样跑一遍**（桩 `coverage` 喂夹具），断言：
+#     ① 数字真的进了 annotation；② `%` 已转义；③ 退出码**原样传出去**（门禁还拦得住）；
+#     ④ 删掉 emit 那行就**必须**变红（否则这条检查是装饰）。
+#   ⚠️ 用 `bash -eo pipefail`（= GitHub `run:` 的真实形态），不是无 `-e` 的 bash。
+# ---------------------------------------------------------------------------
+COV_S='<<< COV-ECHO:START >>>'
+COV_E='<<< COV-ECHO:END >>>'
+echo "[7] coverage echo (the numbers must reach a readable channel)"
+check "the COV-ECHO START marker appears exactly once in ci.yml" \
+  "$([ "$(grep -cF "$COV_S" "$CI")" = "1" ] && echo 1 || echo 0)"
+CB=$(awk -v s="$COV_S" -v e="$COV_E" 'index($0,s){f=1;next} index($0,e){f=0} f' "$CI" \
+  | sed 's/^ \{10\}//')
+check "block extracted (non-empty)" "$([ -n "$CB" ] && echo 1 || echo 0)"
+check "block is small (extraction did not run away)" \
+  "$([ "$(printf '%s' "$CB" | wc -l)" -lt 45 ] && echo 1 || echo 0)"
+# ★ 自包含判据：它必须**自己**算出 FPRINT / REPORT / cov_rc。
+#   （2026-09-26 有过一次教训：标记没包住变量定义 ⇒ 抽出去拿到 `$null`，
+#     而脚本本身跑起来没问题 —— **这个错只会在"想测它"的时候暴露**。）
+check "block is self-contained (defines FPRINT / REPORT / cov_rc itself)" \
+  "$([ "$(printf '%s' "$CB" | grep -cE '^(FPRINT|REPORT|cov_rc)=')" = "3" ] && echo 1 || echo 0)"
+
+mkdir -p "$TMP/covws"
+printf 'not-a-real-coverage-file\n' >"$TMP/covws/.coverage"
+cat >"$TMP/covws/report_ok.txt" <<'COVEOF'
+Name                                              Stmts   Miss  Cover
+---------------------------------------------------------------------
+apps\api\app\services\stats_service.py              133      0   100%
+apps\api\app\services\user_service.py                90      8    91%
+---------------------------------------------------------------------
+TOTAL                                              4672    214    95%
+COVEOF
+check "fixture really ends with a TOTAL line (the thing we grep for)" \
+  "$(grep -qE '^TOTAL' "$TMP/covws/report_ok.txt" && echo 1 || echo 0)"
+
+# 桩：把夹具当 `coverage report` 的输出、按指定退出码退出。
+# 用**函数 + export -f** 而不是往 PATH 里放脚本 —— 本机（Windows/Git Bash）
+# 执行一个无扩展名的脚本文件不可靠，会导致"本地假红、CI 却绿"（又一种两个口径）。
+coverage() { cat "$COV_FIXTURE"; return "$COV_EXIT"; }
+export -f coverage
+
+run_cov() { # run_cov <block> <fixture> <exit> <summary-file>
+  : >"$4"
+  ( cd "$TMP/covws" || exit 2
+    COV_FIXTURE="$2" COV_EXIT="$3" GITHUB_STEP_SUMMARY="$4" \
+      bash -eo pipefail -c "$1" 2>&1 )
+}
+
+echo "[7a] rc=0（门禁通过）"
+OUT7=$(run_cov "$CB" "$TMP/covws/report_ok.txt" 0 "$TMP/s7.md")
+RC7=$?
+check "rc=0 is passed through (the gate stays green when it should)" \
+  "$([ "$RC7" = "0" ] && echo 1 || echo 0)"
+check "TOTAL reaches an annotation (★ this is the fix)" \
+  "$(has_flag "$OUT7" '::notice title=覆盖率::')"
+check "…and it carries the real numbers" "$(has_flag "$OUT7" '4672')"
+check "…and the '%' is escaped for the workflow-command payload" \
+  "$(has_flag "$OUT7" '95%25')"
+check "the fingerprint reaches an annotation too" \
+  "$(has_flag "$OUT7" '::notice title=覆盖率指纹::')"
+check "second channel: the step summary got the numbers" \
+  "$(has_flag "$(cat "$TMP/s7.md")" '4672')"
+
+echo "[7b] rc=1（门禁拦下来）—— 拦截式必须还在"
+OUT7B=$(run_cov "$CB" "$TMP/covws/report_ok.txt" 1 "$TMP/s7b.md")
+RC7B=$?
+check "a non-zero coverage rc is passed through (the gate still BLOCKS)" \
+  "$([ "$RC7B" = "1" ] && echo 1 || echo 0)"
+check "…and a failing gate still SAYS so (not silent)" \
+  "$(has_flag "$OUT7B" '::notice title=覆盖率::rc=1')"
+
+echo "[7c] mutation: 删掉 TOTAL 那条 notice —— [7a] 的检查必须能红"
+CMUT=$(printf '%s\n' "$CB" | grep -v 'title=覆盖率::' || true)
+check "mutation actually removed the TOTAL notice line" \
+  "$([ "$(printf '%s\n' "$CMUT" | grep -c 'title=覆盖率::')" = "0" ] && echo 1 || echo 0)"
+OUT7C=$(run_cov "$CMUT" "$TMP/covws/report_ok.txt" 0 "$TMP/s7c.md")
+# ⚠️ 这里**不能**图省事写成 `$(has_flag … && echo 0 || echo 1)` —— 见 [0c]。
+#    我在写这一行的当下又犯了一次（第三次），是 [0c] 当场把它拦下来的。
+NOTICE_GONE=0
+has "$OUT7C" '::notice title=覆盖率::' || NOTICE_GONE=1
+check "mutated block NO LONGER emits the TOTAL notice (so [7a] can really fail)" "$NOTICE_GONE"
+check "…but it still emits the fingerprint notice (proves the block RAN, i.e. not 假存活)" \
+  "$(has_flag "$OUT7C" '::notice title=覆盖率指纹::')"
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "[pytest-diag-test] ALL PASSED"

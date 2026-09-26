@@ -529,14 +529,41 @@ jobs:
             exit 1
           fi
 
-          # ---- 4. 指纹：两次 run 的 sha256 应当一致 → 这就是合并确定性的 dry run ----
+          # ---- 4+5+6+7. 指纹 → 门禁本体 → 把数字推到能读的通道 → 把退出码还回去 ----
+          # <<< COV-ECHO:START >>>（本段**自包含**；标记供 tools/local-verify/test-pytest-diag.sh
+          #   **原地提取**做单元验证 —— 标记必须包住**变量定义**，否则抽出去拿到的是 $null）
+          # `fail_under` 在 `.coveragerc` 的 [report] 里（**现为 94.40**，不是 85 —— 那个数字早改了）：
+          # `coverage report` 会自动读它，低于门槛就以非 0 退出。
+          # 这一段有两个刻意的动作：
+          #   ① 用 `set +e` 包住 `coverage report`：**开着 -e 时它一旦非零，会在这一行
+          #      结束整个脚本**，下面「把数字推出去」就没机会跑 —— 与 `pytest` 那一步
+          #      **同一个坑**（坑 66）。退出码在末尾**原样**还回去。
+          #   ② **把数字写进 annotation**：写在 stdout 等于没写 —— job 日志正文匿名 403，
+          #      而 `annotations` 匿名 200（坑 66）。
+          FPRINT=$(sha256sum .coverage | cut -d' ' -f1)
           echo "---- .coverage 指纹（与另一次 run 对比）----"
-          sha256sum .coverage
-
-          # ---- 5. 门禁本体 ----
-          coverage report --data-file .coverage --skip-covered
-          # `fail_under` 在 `.coveragerc` 的 [report] 里（现为 85）：
-          # `coverage report` 自动读它，低于门槛就以非 0 退出。
+          echo "$FPRINT"
+          set +e
+          REPORT=$(coverage report --data-file .coverage --skip-covered 2>&1)
+          cov_rc=$?
+          set -e
+          printf '%s\n' "$REPORT"
+          TOTAL=$(printf '%s\n' "$REPORT" | grep -E '^TOTAL' | tail -1 || true)
+          TOTAL=${TOTAL:-（没抓到 TOTAL 行）}
+          # `%` 在 workflow command 的消息体里有特殊含义（`%0A`/`%25`/`%3A`/`%2C`）⇒ 先转义。
+          TOTAL_ESC=$(printf '%s' "$TOTAL" | sed 's/%/%25/g')
+          sumfile=${GITHUB_STEP_SUMMARY:-/dev/null}
+          {
+            echo "### 覆盖率门禁"
+            echo ""
+            echo "- 退出码 \`$cov_rc\`（0 = 过 \`fail_under\`）"
+            echo "- 指纹 \`sha256(.coverage)\` = \`$FPRINT\`"
+            echo "- 结果 \`$TOTAL\`"
+          } >> "$sumfile"
+          printf '::notice title=覆盖率::rc=%s %s\n' "$cov_rc" "$TOTAL_ESC"
+          printf '::notice title=覆盖率指纹::sha256(.coverage)=%s\n' "$FPRINT"
+          exit "$cov_rc"
+          # <<< COV-ECHO:END >>>
 
   # ================================================================ 前端
   frontend:

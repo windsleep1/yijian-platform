@@ -19,7 +19,11 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 
     python tools/local-verify/mem-update.py --status       # 只报数（当前字节 / 余量 / 批状态）
 
-## 四条硬约束（前三条都会**回滚**）
+也可以**一次做完** —— **有 `--sink` / `--add` 时，脚本会先应用、再收口**：
+
+    python tools/local-verify/mem-update.py --sink "…"=>"…" --add "…"=>"…" --end --budget 0
+
+## 五条硬约束（前四条都会**回滚**）
 
 1. **`--sink` 必须真的匹配上**：锚点找不到 → 整次操作回滚并非 0 退出
    （否则"我以为减了"会变成一个安静的假账）。
@@ -32,6 +36,11 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
    > 为什么加这条：我实际踩过 —— `--add` 是**追加**，而我把**锚点原文也写进了新块**，
    > 于是同一行在文件里出现了两次。**脚本当时没说话**，是我事后肉眼发现的。
    > 判据：**"加完之后有没有重复项"是脚本能机械回答的问题，就不该由人来看。**
+5. **`--end` 必须在变更之后执行**（2026-09-26 修）：这段原先排在变更**之前** ⇒
+   `--sink X --end` 这样的**一次调用**里，`--end` 先跑、报一句"没有进行中的批"就 `return 2`，
+   **`--sink` 从来没有执行** —— 而文件**一个字都没改**（实测：13 处下沉 + 4 条新增全被吞掉）。
+   > 教训：**一个"看起来像失败"的报错，可能掩盖"命令根本没做那件事"**。
+   > 拿它当判据之前，先看**文件字节数有没有变**（坑 64 的同族：看字节，不看叙事）。
 
 ## 能力边界（写在 `--help` 里，不靠用的人记住）
 
@@ -70,7 +79,9 @@ MEM = Path(__file__).resolve().parents[2].parent / ".workbuddy" / "memory" / "ME
 STATE = MEM.parent / ".mem-batch.json"
 BACKUP = MEM.parent / ".mem-batch.bak"
 TRUNCATE_AT = 15396  # 实测的注入截断点（超过它 = 内容会被吃掉）
-DUP_MIN_LEN = 12  # 判重只看"整行 strip 后相同、且长度 ≥ 12"的行（`---` / `> ` / `|` 这类短行不参与）
+DUP_MIN_LEN = (
+    12  # 判重只看"整行 strip 后相同、且长度 ≥ 12"的行（`---` / `> ` / `|` 这类短行不参与）
+)
 
 
 def line_dups(text: str) -> dict[str, int]:
@@ -110,15 +121,27 @@ def self_test() -> int:
         "| a | b |\n"
     )
     cases: list[tuple[str, int, int]] = [
-        ("1) 干净的新块 → 不该报", len(block_conflicts("CCC 一条全新的长行，文件里没有", existing_lines(base))), 0),
+        (
+            "1) 干净的新块 → 不该报",
+            len(block_conflicts("CCC 一条全新的长行，文件里没有", existing_lines(base))),
+            0,
+        ),
         (
             "2) 新块里含锚点原文 → 必须报（我犯过的那个错）",
-            len(block_conflicts("AAA 这是一条足够长的已有行，长度超过判重阈值", existing_lines(base))),
+            len(
+                block_conflicts(
+                    "AAA 这是一条足够长的已有行，长度超过判重阈值", existing_lines(base)
+                )
+            ),
             1,
         ),
         (
             "3) 新块里含别处的已有行 → 必须报",
-            len(block_conflicts("BBB 这是另一条足够长的已有行，也超过判重阈值", existing_lines(base))),
+            len(
+                block_conflicts(
+                    "BBB 这是另一条足够长的已有行，也超过判重阈值", existing_lines(base)
+                )
+            ),
             1,
         ),
         ("4) 边界：重复的**短行**不参与判重", len(line_dups("---\n---\n| a |\n| a |\n")), 0),
@@ -185,6 +208,36 @@ def parse_pair(s: str, flag: str) -> tuple[str, str]:
     return unescape(old), unescape(new)
 
 
+def do_end(budget: int) -> int:
+    """收口本批：断言净增 ≤ 预算，越线时从备份恢复。
+
+    ⚠️ 只能在**变更之后**调用 —— 见 `main()` 里那段注释（`--sink X --end` 曾经静默不生效）。
+    """
+    st = load_state()
+    if not st:
+        say("✗ 没有进行中的批（先做一次 --sink/--add）")
+        return 2
+    end = size_of(MEM)
+    growth = end - st["start_bytes"]
+    allowed = budget if budget != 0 else 0
+    ok = growth <= allowed and end <= TRUNCATE_AT
+    say(f"批收口：start={st['start_bytes']} end={end} 净增={growth} 允许={allowed}")
+    say(f"  下沉 {st['sunk']} / 新增 {st['added']} 字节（{st['calls']} 次调用）")
+    if end > TRUNCATE_AT:
+        say(f"✗ 越过注入截断点 {TRUNCATE_AT}！—— 立即从 {BACKUP.name} 恢复")
+        if BACKUP.exists():
+            shutil.copy2(BACKUP, MEM)
+        STATE.unlink(missing_ok=True)
+        return 1
+    if not ok:
+        say("✗ 净增超过预算 —— 减法没做到位。**本批不通过**（内容保留，便于你重做减法）")
+        return 1
+    STATE.unlink(missing_ok=True)
+    BACKUP.unlink(missing_ok=True)
+    say(f"✓ 通过。距截断点余量 = {TRUNCATE_AT - end}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,  # ★ `--help` 直接打印上面那份**唯一**的说明（含「能力边界」）
@@ -225,30 +278,13 @@ def main() -> int:
         return 0
 
     # ---------- 收口 ----------
-    if args.end:
-        st = load_state()
-        if not st:
-            say("✗ 没有进行中的批（先做一次 --sink/--add）")
-            return 2
-        end = size_of(MEM)
-        growth = end - st["start_bytes"]
-        allowed = args.budget if args.budget != 0 else 0
-        ok = growth <= allowed and end <= TRUNCATE_AT
-        say(f"批收口：start={st['start_bytes']} end={end} 净增={growth} 允许={allowed}")
-        say(f"  下沉 {st['sunk']} / 新增 {st['added']} 字节（{st['calls']} 次调用）")
-        if end > TRUNCATE_AT:
-            say(f"✗ 越过注入截断点 {TRUNCATE_AT}！—— 立即从 {BACKUP.name} 恢复")
-            if BACKUP.exists():
-                shutil.copy2(BACKUP, MEM)
-            STATE.unlink(missing_ok=True)
-            return 1
-        if not ok:
-            say("✗ 净增超过预算 —— 减法没做到位。**本批不通过**（内容保留，便于你重做减法）")
-            return 1
-        STATE.unlink(missing_ok=True)
-        BACKUP.unlink(missing_ok=True)
-        say(f"✓ 通过。距截断点余量 = {TRUNCATE_AT - end}")
-        return 0
+    # ⚠️ 2026-09-26 实测的一个**真陷阱**：这段原来排在「变更」**之前** ⇒ `--sink X --end`
+    #    这样**一次调用**里，`--end` 先跑、发现"没有进行中的批"就 `return 2`，
+    #    **sink 从来没有执行** —— 而我只看到一句"没有进行中的批"，极易误判成别的问题
+    #    （文件其实一个字都没改）。
+    #    ⇒ 规则：**有 --sink / --add 时先应用、再收口**；只有"光 --end"时才单独收口。
+    if args.end and not (args.sink or args.add):
+        return do_end(args.budget)
 
     # ---------- 变更 ----------
     if not args.sink and not args.add:
@@ -277,13 +313,18 @@ def main() -> int:
             anchor, block = parse_pair(spec, "--add")
             n = probe.count(anchor)
             dup = block_conflicts(block, existing_lines(probe))
-            say(f"  [{'ok' if (n == 1 and not dup) else 'BAD'}] --add 锚点 {n} 次"
-                f"{'，且新块有重复行' if dup else ''}：{anchor[:44]!r}")
+            say(
+                f"  [{'ok' if (n == 1 and not dup) else 'BAD'}] --add 锚点 {n} 次"
+                f"{'，且新块有重复行' if dup else ''}：{anchor[:44]!r}"
+            )
             bad += 0 if (n == 1 and not dup) else 1
             if n == 1 and not dup:
                 probe = probe.replace(anchor, f"{anchor}\n{block}", 1)
-        print(f"[mem] 预演结束：{bad} 条 BAD（**文件未改**）；全部 ok 时正文将变为 "
-              f"{len(probe.encode('utf-8'))} 字节", flush=True)
+        print(
+            f"[mem] 预演结束：{bad} 条 BAD（**文件未改**）；全部 ok 时正文将变为 "
+            f"{len(probe.encode('utf-8'))} 字节",
+            flush=True,
+        )
         return 1 if bad else 0
 
     st = load_state() or open_batch()
@@ -355,6 +396,8 @@ def main() -> int:
     if growth > budget:
         say(f"⚠️ 本批净增已超预算 {budget} —— 还来得及：补一次 --sink，或等 --end 时不通过")
     say(f"距截断点余量 = {TRUNCATE_AT - after}")
+    if args.end:
+        return do_end(args.budget)
     return 0
 
 
