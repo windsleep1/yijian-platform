@@ -196,6 +196,11 @@ GITHUB_WORKSPACE="$TMP/ws" GITHUB_STEP_SUMMARY="$TMP/s6.md" \
   bash -eo pipefail "$TMP/step_fail.sh" >"$TMP/s6.out" 2>&1
 check "with -e ON (GitHub's default) the diagnostics DO run" \
   "$(has_flag "$(cat "$TMP/s6.out")" 'verdict=')"
+# ★ 2026-09-27 加：**测试计数**也要能读到（"CI 与本地跑的是不是同一批用例"要靠它）。
+check "…and the pytest summary reaches an annotation (always, not only on failure)" \
+  "$(has_flag "$(cat "$TMP/s6.out")" '::notice title=pytest 摘要::')"
+check "…and that emit sits BEFORE the failure branch (so it also fires on success)" \
+  "$(printf '%s\n' "$STEP" | awk '/::notice title=pytest 摘要::/{e=NR} /^if \[/{c=NR} END{print (e && c && e < c) ? 1 : 0}')"
 
 # ★ 证伪：把 `set +e` 拿掉，同一个场景必须**变哑**。
 #    （不能构造出"它应该报相反结果"的场景，这条检查就不是检查 —— 硬约定 J）
@@ -294,6 +299,16 @@ check "the fingerprint reaches an annotation too" \
   "$(has_flag "$OUT7" '::notice title=覆盖率指纹::')"
 check "second channel: the step summary got the numbers" \
   "$(has_flag "$(cat "$TMP/s7.md")" '4672')"
+# ★ 2026-09-27 加：**逐文件**。没有它，`TOTAL` 只能告诉你"差几行"，不能告诉你"差在哪"
+#   （实测：CI 216 vs 本地 214，光有 TOTAL 定位不了那 2 行）。
+check "per-file rows reach an annotation (TOTAL alone cannot localize)" \
+  "$(has_flag "$OUT7" '::notice title=覆盖率逐文件::')"
+check "…and they carry a real file row" "$(has_flag "$OUT7" 'user_service.py')"
+check "…and rows are joined with %0A (one notice, not N)" "$(has_flag "$OUT7" '%0A')"
+PF_HEADER_LEAKED=0
+has "$OUT7" '::notice title=覆盖率逐文件::Name' && PF_HEADER_LEAKED=1
+check "…and the 'Name' header row is excluded" \
+  "$([ "$PF_HEADER_LEAKED" = "0" ] && echo 1 || echo 0)"
 
 echo "[7b] rc=1（门禁拦下来）—— 拦截式必须还在"
 OUT7B=$(run_cov "$CB" "$TMP/covws/report_ok.txt" 1 "$TMP/s7b.md")
@@ -315,6 +330,19 @@ has "$OUT7C" '::notice title=覆盖率::' || NOTICE_GONE=1
 check "mutated block NO LONGER emits the TOTAL notice (so [7a] can really fail)" "$NOTICE_GONE"
 check "…but it still emits the fingerprint notice (proves the block RAN, i.e. not 假存活)" \
   "$(has_flag "$OUT7C" '::notice title=覆盖率指纹::')"
+
+echo "[7d] mutation: 删掉逐文件 notice —— [7a] 的逐文件检查必须能红"
+CMUT2=$(printf '%s\n' "$CB" | grep -v 'title=覆盖率逐文件::' || true)
+MUT2_DROPPED=0
+has "$CMUT2" 'title=覆盖率逐文件::' || MUT2_DROPPED=1
+check "mutation actually removed the per-file notice line" "$MUT2_DROPPED"
+OUT7D=$(run_cov "$CMUT2" "$TMP/covws/report_ok.txt" 0 "$TMP/s7d.md")
+MUT2_STILL=0
+has "$OUT7D" '::notice title=覆盖率逐文件::' && MUT2_STILL=1
+check "mutated block NO LONGER emits the per-file notice (so [7a] can really fail)" \
+  "$([ "$MUT2_STILL" = "0" ] && echo 1 || echo 0)"
+check "…but the TOTAL notice is still there (proves the block RAN)" \
+  "$(has_flag "$OUT7D" '::notice title=覆盖率::')"
 
 echo
 if [ "$fails" -eq 0 ]; then

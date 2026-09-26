@@ -418,6 +418,16 @@ jobs:
           coverage run --data-file "$GITHUB_WORKSPACE/.coverage.tests" \
             --source app --rcfile "$GITHUB_WORKSPACE/.coveragerc" -m pytest tests -q -rfEXs 2>&1 | tee "$LOG"
           rc=${PIPESTATUS[0]}
+          # ---- 无论成败，都把"跑了几条 / 跳了几条"推出去（2026-09-27 加）----
+          # ⚠️ 依据（用户 2026-09-27 定的判据）：**任何门禁的关键数字，必须走匿名可读通道**。
+          #    `318 passed, 1 skipped` 这种数字本地肉眼可见、CI 匿名读不到 ⇒
+          #    "**CI 与本地跑的是不是同一批用例**"就**无法验证**。
+          #    2026-09-27 实测：CI 覆盖率 `Miss=216` vs 本地 `214`（差 2 行）——
+          #    要定位它，第一件要排除的就是"CI 少跑/多跳了几条用例"，而这一步以前做不到。
+          PY_SUMMARY=$(tail -n 5 "$LOG" | grep -E 'passed|failed|error|skipped|no tests ran' | tail -1 || true)
+          PY_SUMMARY=${PY_SUMMARY:-（没抓到 pytest 汇总行）}
+          PY_SUMMARY_ESC=$(printf '%s' "$PY_SUMMARY" | sed 's/%/%25/g')
+          printf '::notice title=pytest 摘要::rc=%s %s\n' "$rc" "$PY_SUMMARY_ESC"
           if [ "$rc" -ne 0 ]; then
             # <<< PYTEST-DIAG:START >>>
             # ⚠️ 标记供 tools/local-verify/test-pytest-diag.sh **原地提取**本段做单元验证。
@@ -562,6 +572,15 @@ jobs:
           } >> "$sumfile"
           printf '::notice title=覆盖率::rc=%s %s\n' "$cov_rc" "$TOTAL_ESC"
           printf '::notice title=覆盖率指纹::sha256(.coverage)=%s\n' "$FPRINT"
+          # ---- 逐文件（`--skip-covered` ⇒ **只有存在缺失的文件会出现**）----
+          # 为什么必须有它：`TOTAL` 只说"差几行"，**不说"差在哪"**。
+          # 2026-09-27 实测 CI `Miss=216` vs 本地 `214` —— 光有 TOTAL，那 2 行**定位不了**。
+          # 表里行与行之间用 `%0A`（workflow command 的换行转义），
+          # 因为**每个步骤的 notice 有数量上限**（10 条），整表塞进**一条**才安全。
+          ROWS=$(printf '%s\n' "$REPORT" | grep -E '[0-9]+%' | grep -vE '^Name|^TOTAL' \
+            | sed 's/%/%25/g' | tr '\n' '|') || true
+          ROWS=${ROWS//|/%0A}
+          printf '::notice title=覆盖率逐文件::%s\n' "${ROWS:-（没有缺失行）}"
           exit "$cov_rc"
           # <<< COV-ECHO:END >>>
 
