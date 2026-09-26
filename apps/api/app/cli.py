@@ -93,7 +93,24 @@ async def _wait_db(timeout: int) -> int:
 async def _wait_redis(timeout: int) -> int:
     from redis.asyncio import from_url
 
-    client = from_url(settings.redis_url, decode_responses=True)
+    # ⚠️ **必须给单次连接/单次命令加上界**（硬约定 N：无界等待必须加界）。
+    #    下面那个 `deadline` 只守得住**重试循环**，守不住**单次 `ping()`**：
+    #    没有 `socket_timeout` 时，一次 ping 可以**永远**等不到回包 ——
+    #    于是 `while time.monotonic() < deadline` 再也回不到判断，`--timeout` 形同虚设。
+    #
+    #    这就是 CI **连红 12 次**的真因（pytest 12m12s / 121s / 135s / 136s 全是被整步超时打断，
+    #    而单条用例的堆栈指到 `test_wait_redis_returns_0_when_it_answers` → `await client.ping()`）。
+    #    本机复现：同一段 `from_url(...).ping()` 连跑 40 次，**6 次永久卡住**（15%）。
+    #
+    #    对照：隔壁 `_wait_db` 是 `asyncpg.connect(..., timeout=5)` —— **有界**；
+    #    这里当初漏了，而某个测试**在自己的替身里绕过了它**（mock 掉 `from_url`），
+    #    于是"症状在测试里消失了，缺陷还在产品代码里"（这正是坑 66 的同族）。
+    client = from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=2,  # 单次 TCP 连接的上界
+        socket_timeout=2,  # 单次命令读写（含 ping 等回包）的上界 ← 就是它缺了才让 deadline 失效
+    )
     deadline = time.monotonic() + timeout
     last_err: Exception | None = None
     try:

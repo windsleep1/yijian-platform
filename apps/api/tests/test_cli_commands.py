@@ -159,7 +159,45 @@ class _PongServer:
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     @staticmethod
-    def _handle(conn: socket.socket) -> None:
+    def _commands(buf: bytes) -> tuple[list[bytes], bytes]:
+        """切出**完整**的 RESP 命令；返回 `(命令列表, 剩余字节)`。
+
+        ⚠️ 必须按**命令条数**回包，**不能按 `recv` 次数**。redis-py 建连时会先发两条
+        `CLIENT SETINFO` 握手命令，而这两条**经常合进同一个 TCP 段**（本机实测 12 次里 2 次）。
+        旧实现是"一次 `recv` 回一次"，合包时**少回一次** ⇒ 客户端在等第二个握手应答、
+        连 `PING` 都还没发出去 ⇒ **永远等不到**（`await client.ping()` 卡死）。
+        这正是 2026-09-26 CI 连红 12 次的**直接触发点**（产品侧无 socket 超时是放大器，
+        见 `app/cli.py::_wait_redis` 的注释）。
+        """
+        out: list[bytes] = []
+        i = 0
+        while i < len(buf):
+            if buf[i : i + 1] != b"*":
+                break
+            end_of_header = buf.find(b"\r\n", i)
+            if end_of_header < 0:
+                break
+            try:
+                nargs = int(buf[i + 1 : end_of_header])
+                k = end_of_header + 2
+                for _ in range(nargs):
+                    if buf[k : k + 1] != b"$":
+                        raise ValueError
+                    end_of_len = buf.find(b"\r\n", k)
+                    if end_of_len < 0:
+                        raise ValueError
+                    k = end_of_len + 2 + int(buf[k + 1 : end_of_len]) + 2
+                    if k > len(buf):
+                        raise ValueError
+            except ValueError:
+                break  # 半条命令：留给下一次 recv 拼
+            out.append(buf[i:k])
+            i = k
+        return out, buf[i:]
+
+    @classmethod
+    def _handle(cls, conn: socket.socket) -> None:
+        buf = b""
         with conn:
             while True:
                 try:
@@ -168,7 +206,12 @@ class _PongServer:
                     return
                 if not data:
                     return
-                conn.sendall(b"+PONG\r\n" if b"PING" in data.upper() else b"+OK\r\n")
+                buf += data
+                cmds, buf = cls._commands(buf)
+                if cmds:
+                    conn.sendall(
+                        b"".join(b"+PONG\r\n" if b"PING" in c.upper() else b"+OK\r\n" for c in cmds)
+                    )
 
     def close(self) -> None:
         self._srv.close()
@@ -336,8 +379,82 @@ def test_wait_redis_returns_0_when_it_answers(
     server = _PongServer()
     try:
         monkeypatch.setattr(cli, "settings", _cfg(redis_url=f"redis://127.0.0.1:{server.port}/0"))
+        t0 = time.monotonic()
         assert cli.main(["wait-redis", "--timeout", "10"]) == 0
+        elapsed = time.monotonic() - t0
         assert "Redis ready" in _out(capsys)
+        # ★ 上界断言（硬约定 N 的守卫②）：就绪路径必须是"立刻成功"，不是"等出来的"。
+        #   少了它，一旦 `from_url` 丢了 socket 超时（单次 ping 可无限等），
+        #   这条用例会**挂住整轮**而不是**变红** —— 2026-09-26 的 CI 连红 12 次就是这么来的。
+        assert elapsed < 2, f"就绪路径耗时 {elapsed:.2f}s —— 不该等这么久（可能又出现无界等待）"
+    finally:
+        server.close()
+
+
+def test_wait_redis_bounds_each_attempt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`_wait_redis` 的 `from_url` **必须**带上界：`socket_connect_timeout` + `socket_timeout`。
+
+    ⚠️ 为什么这条必须存在（它是 2026-09-26 CI 连红 12 次的真因，用 12 分钟/次的代价换来的）：
+    `_wait_redis` 的 `deadline` 只守得住**重试循环**，守不住**单次 `ping()`**。
+    没有 `socket_timeout` 时，一次 ping 可以**永远**等不到回包 ⇒ 循环再也回不到 deadline 判断
+    ⇒ `--timeout 10` 形同虚设、整轮挂到被外部超时打死。
+    本机复现：同一段 `from_url(...).ping()` 连跑 40 次，**6 次永久卡住**（15%）。
+
+    ⇒ 把"必须有上界"从**注释**升级成**可机械检查的断言**：谁删掉那两个参数，这条就红。
+    （与"约定升级到测试"同源；本文件顶部的契约早就写着"不能永远挂着"，但契约管不住代码。）
+    """
+    seen: dict[str, object] = {}
+
+    class _Stub:
+        async def ping(self) -> bool:
+            return True
+
+        async def aclose(self) -> None:
+            return None
+
+    def _from_url(url: str, **kw: object) -> _Stub:
+        seen["url"] = url
+        seen.update(kw)
+        return _Stub()
+
+    monkeypatch.setattr(redis.asyncio, "from_url", _from_url)
+    monkeypatch.setattr(cli, "settings", _cfg(redis_url="redis://127.0.0.1:6379/0"))
+    assert cli.main(["wait-redis", "--timeout", "1"]) == 0
+    assert seen.get("socket_connect_timeout"), (
+        "`from_url` 少了 `socket_connect_timeout` —— 单次 TCP 连接可以无限等"
+    )
+    assert seen.get("socket_timeout"), (
+        "`from_url` 少了 `socket_timeout` —— 单次 ping 可以无限等，`--timeout` 的 deadline 会失效"
+    )
+
+
+def _recv_exactly(sock: socket.socket, n: int) -> bytes:
+    out = b""
+    while len(out) < n:
+        chunk = sock.recv(n - len(out))
+        if not chunk:
+            break
+        out += chunk
+    return out
+
+
+def test_pong_server_replies_once_per_command() -> None:
+    """桩必须**按命令条数**回包 —— 这条是给**替身自己**的用例（硬约定 H：替身也要被验收）。
+
+    ⚠️ 为什么必须有它：redis-py 建连时先发两条 `CLIENT SETINFO` 握手命令，而这两条
+    **经常合进同一个 TCP 段**（本机实测 12 次里 2 次；CI 上几乎每次都合）。
+    旧桩是"一次 `recv` 回一次"，合包时**少回一次** ⇒ 客户端在等第二个握手应答、
+    连 `PING` 都没发出去 ⇒ `await client.ping()` **永远等不到**。
+    这里**主动**把两条命令写进同一个 `sendall`（= 稳定造出"合包"），断言收到**两条**应答。
+    """
+    server = _PongServer()
+    try:
+        with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
+            sock.sendall(b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n")
+            got = _recv_exactly(sock, len(b"+PONG\r\n") * 2)
+            assert got == b"+PONG\r\n" * 2, f"合包时没有按命令条数回包：{got!r}"
     finally:
         server.close()
 
