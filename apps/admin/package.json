@@ -10,7 +10,9 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "// format:check:shared": "共享包 packages/api-core 与 tools/ 下的检查脚本在 apps/admin **之外**，`prettier --check .` 覆盖不到 —— 不补这一条，它们就是**没有任何格式门禁**的盲区（硬约定 H：没覆盖 ≠ 能过）。",
+    "format:check:shared": "prettier --check --config ./prettier.config.mjs ../../packages/api-core ../../tools/local-verify/check-auth-chain.mjs"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.1.2",

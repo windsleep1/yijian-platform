@@ -11,6 +11,38 @@
 #     npm run lint                 前端 eslint（规则全 error）
 #     npm run format:check         前端格式（prettier，配置见 prettier.config.mjs）
 #     tsc --noEmit                 前端类型
+#     check-auth-chain.mjs         反向检查：认证链路**只有一份实现**（apps/<app>/src 里 0 命中）
+#     node --test packages/api-core 共享包单测（Node 22 的 TS 擦除，14 用例）
+#     npm run build                前端**可编译性**门禁（≠ 部署产物，见下方专节）
+#
+# ## 为什么 `next build` 现在进了 CI（2026-09-26，BL-12）
+#
+# 起因：C 端要复用 admin 的认证链路，做法是抽 `packages/api-core`（**纯 TS 源码**，
+# 不产出 dist）。而"跨包 TS 能不能被 Next 正确编译/解析"**只有 build 会暴露** ——
+# 本机沙箱跑不了 build（坑 60），而 CI 的 runner 恰好就是 `docs/21` **BL-05** 要的那个
+# "**不受沙箱限制的环境**"。所以这一步同时闭合两件事：
+#
+#   ① BL-05（"部署前手工跑一次 build"）**降级成"每次 CI 都验"**；
+#   ② 让"抽共享包"这个决定**有了可验证的前提**（在此之前它是不可验证的 ——
+#      那意味着风险被推迟到部署时，正是 BL-05 记的那个盲区）。
+#
+# 取舍的另一面（为什么不是"抽包 + 本地自测"就够了）：**结构性保证 > 检测保证**。
+# 不抽包、改成"两端标记比对"也能发现问题，但那只告诉你"不一致"；
+# 抽包让"两份"**根本不存在**（`docs/22` §9.2.2 第 1 级）。
+#
+# ⚠️ **它是"可编译性门禁"，不是"部署产物"**：这里没有注入生产 API base，
+#    产出的 `.next/` 只用来证明"能编译、SSR 层没炸"。真部署仍按 `docs/06`。
+# ⚠️ 它**可能第一次就红** —— 那正是它存在的价值：BL-05 记的就是"只有 build/部署
+#    才暴露"的那几类（server component 访问 `window`、`useSearchParams` 缺 Suspense
+#    边界、动态导入、`generateMetadata`）。红了**修代码**，不要 `ignoreDuringBuilds`。
+#
+# ## ⚠️ 与 concurrency 的相互作用（2026-09-26，观察判据见 BL-15）
+#
+# 本 workflow 有 `concurrency: cancel-in-progress`。加上 build（1~3 分钟）之后，
+# **连续快速 push 更可能把前一次 run 取消掉**。取消本身不是错（结果更贴近最新提交），
+# 但它会让"frontend 步骤没跑完"看起来像失败。
+# ⇒ 判据（可判定，不是"观察一两周"）：**连续 3 次 run 的 frontend job conclusion 为
+#    `cancelled`** → 才考虑把 build 限制成只在 push 到 main 时跑。
 #
 # ## 覆盖率为什么要采**三份**数据（2026-09-22 对齐，硬约定 L）
 #
@@ -39,6 +71,9 @@
 # | `coverage combine` | 无（只采 API 进程一份） | **拦截**（2026-09-22：三份各进程插桩 + combine） |
 # | `ruff format --check` | 无 | **拦截**（Commit B：先全仓格式化，再挂 check） |
 # | `npm run format:check` | 无 | **拦截**（同上） |
+# | `check-auth-chain.mjs` | 无 | **拦截**（2026-09-26：共享包落地时同时挂上反向检查） |
+# | 共享包单测 `node --test` | 无 | **拦截**（同上） |
+# | `npm run build` | **不在 CI**（本机沙箱跑不了，见坑 60） | **拦截**（2026-09-26，BL-12） |
 #
 # 两步都遵循同一条取舍：**存量没清完之前只上报，不清完就设拦截会让 CI 恒红，
 # 而恒红的门禁等于没有门禁**（硬约定 H）——
@@ -355,7 +390,7 @@ jobs:
 
   # ================================================================ 前端
   frontend:
-    name: 前端（tsc --noEmit）
+    name: 前端（lint + tsc + build）
     runs-on: ubuntu-latest
 
     steps:
@@ -367,9 +402,28 @@ jobs:
           cache: npm
           cache-dependency-path: apps/admin/package-lock.json
 
+      # ---- 反向检查：认证链路**只有一份实现**（最先跑，最便宜）----
+      #
+      # 它防的是 `docs/22` §9.2 那个决定的**腐化方式**：不是"共享包被改错"，
+      # 而是"有人又在某个 app 里把单飞刷新重写了一遍"。那种漂移**不会报错、不会变红**，
+      # 只会让两端慢慢分叉 —— 这正是"把三处逐字一致交给'我小心'"会输的地方。
+      # 不需要 npm 依赖（纯 node + fs），所以放在 `npm ci` 之前。
+      - name: 反向检查 · 认证链路单一真相（拦截式）
+        run: node tools/local-verify/check-auth-chain.mjs
+
       - name: 安装依赖
         working-directory: apps/admin
         run: npm ci
+
+      # ---- 共享包单测（拦截式）----
+      # 跑的是**源码**（`.ts`），靠 Node 22 的类型擦除 —— 所以这个包不产出 dist，
+      # 也就没有"dist 与 src 漂移"这第二个真相（`docs/22` §9.2.3）。
+      # ⚠️ 入口是 `run-tests.mjs` 而不是裸 `node --test`：后者在**全部 skip** 时退出码也是 0
+      #    （与 pytest 同一个坑）。守卫判 `pass >= 1 且 skipped == 0 且 fail == 0`，
+      #    并在**读不到 TAP 汇总行**时也失败（宁报"没跑成"，不把"读不到"当通过）。
+      - name: 共享包单测 · packages/api-core（拦截式）
+        working-directory: packages/api-core
+        run: npm test
 
       # ---- eslint（拦截式，2026-09-20 起）----
       # 这是它**第一次**成为真门禁：以前 `npm run lint` 连配置都没有，
@@ -391,7 +445,39 @@ jobs:
         working-directory: apps/admin
         run: npm run format:check
 
+      # ---- 共享包 / 检查脚本的格式（它们在 `apps/admin` **之外**）----
+      # `prettier --check .` 的 `.` 是 apps/admin，所以 `packages/api-core` 与
+      # `tools/local-verify/*.mjs` **本来没有任何格式门禁** —— 那是"没覆盖"，
+      # 而"没覆盖"与"能过"是两件事（硬约定 H）。补这一条把它们纳入。
+      - name: npm run format:check:shared（拦截式）
+        working-directory: apps/admin
+        run: npm run format:check:shared
+
       # ---- 三件事之三：tsc（拦截式）----
+      # ⚠️ 这一步**顺带**覆盖了共享包的类型：`api.ts` import 了它，tsc 会跟着编译；
+      #    所以共享包不需要单独一道 typecheck（少一道就少一处会漂的口径）。
       - name: tsc --noEmit
         working-directory: apps/admin
         run: npm run typecheck
+
+      # ---- ★ build（拦截式，2026-09-26 新增，BL-12）----
+      # 这是**"只有 build 会暴露"的那一类问题的唯一闸门**（SSR / server component /
+      # 动态导入 / `useSearchParams` 缺 Suspense 边界 / 跨包 TS 能否被解析）。
+      # 本机沙箱跑不了 build（坑 60）—— CI 就是那个"不受沙箱限制的环境"。
+      # 为什么必须由它来验：抽了 `packages/api-core` 之后，"跨包能不能打出来"
+      # **在本地不可证**，不设这道闸就等于把风险推到部署。
+      #
+      # `timeout-minutes` 是**有界等待**（硬约定 N）：没有它，一个卡住的 build
+      # 只会表现为"这一步一直转"，而失败的形状应该是"自己会说话"。
+      #
+      # ⚠️ **env 口径必须显式**：本机 `apps/admin/.env.local` 是 **gitignored** 的
+      #    （`NEXT_PUBLIC_API_BASE` 指向本地后端），**CI 里不存在** ——
+      #    所以"本地 build"与"CI build"默认**不是同一个配置**（哪怕都成功）。
+      #    这里显式给一个**占位值**，让 CI 的构建配置是可见的、可复现的；
+      #    它**只是门禁用的值，不是部署值**（部署仍按 `docs/06`）。
+      - name: npm run build（拦截式，可编译性门禁）
+        timeout-minutes: 10
+        working-directory: apps/admin
+        env:
+          NEXT_PUBLIC_API_BASE: https://ci-build-gate.invalid/api/v1
+        run: npm run build

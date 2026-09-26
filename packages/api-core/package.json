@@ -1,0 +1,17 @@
+{
+  "name": "@yijian/api-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "前端跨 app 共享的纯逻辑（无 React / 无 DOM / 零依赖）—— 目前只有认证链路",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node run-tests.mjs"
+  },
+  "//": "刻意不装 typescript / 不产出 dist：源码就是唯一真相（消除了“dist 与 src 漂移”这第二个真相）。消费方按源码走 —— 见 docs/22 §9.2.3。",
+  "dependencies": {},
+  "devDependencies": {}
+}

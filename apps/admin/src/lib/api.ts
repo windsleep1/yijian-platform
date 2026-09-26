@@ -1,28 +1,28 @@
 /**
- * 统一的 HTTP 客户端：信封解包 + 401 单飞刷新 + trace_id 透出。
+ * 统一的 HTTP 客户端：信封解包 + trace_id 透出 + 认证链路的**编排**。
  *
- * 这是整个前端的"心脏"，也是坑最密的地方。四个已经踩过/识别过的点：
+ * ## 认证链路（该不该重试 / 单飞 / Rotation 存回）**不在这个文件里**
  *
- *  1. **401 必须"单飞"刷新。** 后端是 Refresh Token Rotation（刷新即作废旧 token）。
- *     如果页面上三个请求同时 401，各自去 refresh，第二个到达的会因为旧 token 已作废而
- *     40105 —— 用户莫名被踢。所以并发只允许发起一次 refresh，其余等同一个 Promise。
+ * 那三处逻辑必须与 C 端（`apps/web`）**逐字一致**，所以它们的**唯一实现**在
+ * `packages/api-core`（`@yijian/api-core`）—— 本文件只负责**调用**它。
+ * 码表、以及"为什么并发刷新会把人踢出去"都写在那个模块的注释里：
+ * **坑要挨着实现写，别在这儿再抄一份**（抄一份就是又造一个会漂的真相）。
  *
- *  2. **刷新后必须存回新的 refresh_token。** Rotation 的语义就是"旧换新"，
- *     只存 access_token 的话下一次刷新必然失败。
+ * 本文件剩下的部分，仍然是"坑最密"的地方：
  *
- *  3. **不是所有 401 都该重试。** `40102`（签名无效，比如 token 被篡改）重试没有意义，
- *     刷一百次也一样。只有 `40100/40101/40104/40105` 才进入刷新重试链路。
- *     另外 `50003`（依赖服务不可用）**不是**认证错误，绝不能触发跳登录 ——
- *     否则 Redis 抖一下，全站用户都被踢出去。
- *
- *  3.1 **但"不重试"不等于"不跳登录"。** `40102` 只是不该先试 refresh，
- *     它依然必须清凭证跳登录：坏 token 留在 localStorage 里，
- *     用户只会卡在错误页，反复点"重试"永远失败 —— 连手动登出的入口都没有。
- *
- *  4. **trace_id 有两个来源。** 业务错误在信封里（`body.trace_id`），
+ *  1. **trace_id 有两个来源。** 业务错误在信封里（`body.trace_id`），
  *     网关/框架层错误（502 HTML、nginx 超时页）没有信封，只能读响应头
  *     `X-Request-ID`（后端 CORS 里已 `expose_headers`，否则前端读不到）。
+ *  2. **没有信封 ≠ 网络失败**：先读 text 再尝试解析 —— 204 空响应、网关 HTML
+ *     都不能无脑 `res.json()`。
+ *  3. **跳登录只在本文件这一处**（`redirectToLogin`）：已经在登录页就不再跳，
+ *     否则刷新失败时会来回横跳；跳之前必须 `clearTokens()`，
+ *     否则坏 token 留在本地，用户卡在死页面上连手动登出都做不到。
+ *  4. **雪花 ID 两个方向都要体检**（响应侧 `assertNoUnsafeIds` / 请求侧
+ *     `assertNoUnsafeIdInBody`）—— 见下面各自的注释。
  */
+
+import { classifyAuthFailure, createSingleFlightRefresh } from "@yijian/api-core";
 
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "./auth-store";
 import { looksLikeUnsafeId, parseJsonSafe } from "./json-bigint";
@@ -50,50 +50,17 @@ export class ApiError extends Error {
 }
 
 /**
- * 值得"刷新一次再重试"的认证类错误码。
- * 刻意不含 40102（签名无效，重试无意义）与 40103（密码错误，属登录接口自身）。
- */
-const RETRYABLE_AUTH_CODES = new Set([40100, 40101, 40104, 40105]);
-
-/**
- * 认证类错误，但**刷新也救不回来** —— 凭证本身就不合法
- * （40102：签名不对 / 类型不对 / 被篡改）。
+ * 认证链路的唯一实例：码集判定 + 单飞刷新 + Rotation 成对存回。
  *
- * 与 RETRYABLE_AUTH_CODES 的差别只在"要不要先试一次 refresh"，
- * 不在"要不要跳登录"：两者都必须清凭证跳登录，否则用户卡在死页面上。
+ * 实现、以及"为什么必须成对存回 / 为什么 `50003` 不能触发跳登录"都在
+ * `packages/api-core`（本文件不再有第二份 —— 这正是它存在的理由）。
+ * 存储走依赖注入：包不知道 localStorage 是谁，将来 C 端迁 cookie 时包不用改。
  */
-const FATAL_AUTH_CODES = new Set([40102]);
-
-/** 并发 401 只允许触发一次 refresh。 */
-let inflightRefresh: Promise<boolean> | null = null;
-
-async function refreshToken(): Promise<boolean> {
-  inflightRefresh ??= (async () => {
-    const rt = getRefreshToken();
-    if (!rt) return false;
-    try {
-      const res = await fetch(`${API_BASE}/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: rt }),
-      });
-      const text = await res.text();
-      const body = text
-        ? parseJsonSafe<Envelope<{ access_token: string; refresh_token: string }>>(text)
-        : null;
-      if (!body || body.code !== 0 || !body.data) return false;
-      // Rotation：必须把新的 refresh_token 一起存回
-      setTokens(body.data.access_token, body.data.refresh_token);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      // 放在 finally 里，保证下一次还能再发起（否则一次网络抖动就永久锁死）
-      inflightRefresh = null;
-    }
-  })();
-  return inflightRefresh;
-}
+const authChain = createSingleFlightRefresh({
+  apiBase: API_BASE,
+  storage: { getRefreshToken, setTokens },
+  parseJson: (text) => parseJsonSafe<unknown>(text),
+});
 
 function redirectToLogin(): void {
   if (typeof window === "undefined") return;
@@ -234,20 +201,36 @@ async function send<T>(
     return body.data;
   }
 
-  // ---- 凭证本身不合法：refresh 也救不回来，别给用户留一个永远失败的重试键 ----
-  if (FATAL_AUTH_CODES.has(body.code)) {
-    redirectToLogin();
-    throw new ApiError(body.code, body.message, body.trace_id || headerTrace, res.status);
-  }
-
-  // ---- 认证类错误：单飞刷新后重试一次 ----
-  if (RETRYABLE_AUTH_CODES.has(body.code) && allowAuthRetry) {
-    const refreshed = await refreshToken();
-    if (!refreshed) {
+  // ---- 认证类错误：三分类由 `classifyAuthFailure` 决定（单一真相 → packages/api-core）----
+  //
+  // ⚠️ 这里用 `switch` + `never` 守卫，而不是几个 `if`：**新增一种 kind 却忘了处理，
+  //    会变成编译错误**。这正是把码表搬进共享包换来的东西（`docs/22` §9.2.2 第 2 级）。
+  const kind = classifyAuthFailure(body.code);
+  switch (kind) {
+    // 凭证本身不合法：refresh 也救不回来，且**不能**留下"永远失败的重试键"
+    case "fatal":
       redirectToLogin();
       throw new ApiError(body.code, body.message, body.trace_id || headerTrace, res.status);
+
+    // 认证类错误：单飞刷新后**重放一次**（已重试过就不再重试，否则死循环）
+    case "retryable": {
+      if (!allowAuthRetry) break;
+      const refreshed = await authChain.refresh();
+      if (!refreshed) {
+        redirectToLogin();
+        throw new ApiError(body.code, body.message, body.trace_id || headerTrace, res.status);
+      }
+      return send<T>(path, doFetch, false);
     }
-    return send<T>(path, doFetch, false);
+
+    case "other":
+      break;
+
+    default: {
+      // 穷尽性守卫。走到这里说明 `AuthFailureKind` 加了新成员而上面没加分支。
+      const unreachable: never = kind;
+      throw new Error(`未处理的认证失败类型：${String(unreachable)}`);
+    }
   }
 
   // ---- 其余业务错误：交给上层统一 toast（带 trace_id）----
