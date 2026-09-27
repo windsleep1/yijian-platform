@@ -3,7 +3,8 @@
 #
 # ★ 它能跑几道（2026-09-27 实测，不是推测）
 #
-#   CI 有 **13 道**。本地**能跑 12 道**（①~⑫），只差 ⑬ `build`：
+#   门禁有 **13 类**；CI 里是 **18 道步骤**（前端 5 类 × `apps/admin` + `apps/web`，
+#   权威清单 = `check-invariants.py` 的 `REQUIRED_GATES`）。本地**能跑 12 类**（①~⑫），只差 ⑬ `build`：
 #
 #     ① CI 诊断段自检      ② 不变量自检        ③ ruff check         ④ ruff format --check
 #     ⑤ pytest(真 PG)     ⑥ 覆盖率门禁       ⑦ 反向检查·认证链路   ⑧ 共享包单测
@@ -23,7 +24,7 @@
 # 用法：
 #     bash tools/preflight.sh                 # 12 道（约 2 分钟）
 #     bash tools/preflight.sh --frontend      # 只跑前端 ⑦~⑫（约 30 秒）—— **前端内循环**用这个
-#     bash tools/preflight.sh --with-build    # 13 道（+ 57s 的 next build）
+#     bash tools/preflight.sh --with-build    # 12 类 + build（每个 app ≈57s）
 #     YIJIAN_PYTHON=/path/to/python bash tools/preflight.sh
 
 # ⚠️ **故意不设 `-e`**：要**跑完所有门禁**再给结论 ——
@@ -57,15 +58,23 @@ if [ -z "$PY" ]; then
 fi
 NODE=$(command -v node || true)
 NPM=$(command -v npm || true)
-ADMIN_MODULES=$repo/apps/admin/node_modules
+
+#: 前端 app = `apps/*/` 里有 `package.json` 的那些（后端 `apps/api` 是 Python，自然不含）。
+#: ★ **自动发现**而不是写死 `admin web` —— 写死的话，将来加第三个 app 时
+#:   它**不会进任何本地门禁**，而症状是静默的（硬约定 H：**没覆盖 ≠ 能过**）。
+APPS=$(for d in "$repo"/apps/*/; do [ -f "${d}package.json" ] && basename "$d"; done | sort | tr '\n' ' ')
+APPS=${APPS% }
 
 echo "[preflight] python = ${PY:-（缺）}"
 echo "[preflight] node   = ${NODE:-（缺）} / npm = ${NPM:-（缺）}"
+echo "[preflight] 前端 app = ${APPS:-（无）}"
 [ "$FRONTEND_ONLY" = "1" ] && echo "[preflight] --frontend：只跑前端 ⑦~⑫（后端 ①~⑥ 标跳过，**不是**已查）"
 [ "$WITH_BUILD" = "1" ] && echo "[preflight] --with-build：**含** 57 秒的 next build"
 
 # ---------------- 逐道跑，并**记下真实状态** ----------------
-# 13 道的槽位一次建好；没跑到的保持 skipped。
+# 13 **类**的槽位一次建好；没跑到的保持 skipped。
+# ⚠️ ⑨~⑬ 是「按 app 实例化」的：**对 $APPS 里每个 app 各跑一遍**，任一红 ⇒ 该类红 ——
+#    所以「本地 12 类」实际覆盖了 CI 的前端 10 道步骤（5 类 × 2 app）。
 declare -a ST=()          # pass / fail / skip
 declare -a SKIP_REASON=()
 for i in $(seq 1 13); do ST[$i]=skip; done
@@ -132,6 +141,40 @@ else
     ST[6]=pass
 fi
 
+#: ⑨~⑬ 与 app 有关：**对每个前端 app 各跑一遍**，任一 app 红 ⇒ 这道门禁红。
+#: 输出**不重定向** —— `lint`/`format`/`tsc` 本来就 1~3 行，藏起来反而看不见失败原因。
+run_gate_apps() {
+    local key="$1" label="$2" script="$3"
+    printf '\n──── [%s] %s ────\n' "$key" "$label"
+    local t0 t1 rc=0 ran=0
+    t0=$(date +%s)
+    for app in $APPS; do
+        if [ ! -d "$repo/apps/$app/node_modules" ]; then
+            printf '  ⏭ %s：无 node_modules（补：cd apps/%s && npm ci）\n' "$app" "$app"
+            continue
+        fi
+        printf '  ── %s ──\n' "$app"
+        ran=$((ran + 1))
+        if ( cd "$repo/apps/$app" && "$NPM" run "$script" ); then
+            :
+        else
+            rc=1
+        fi
+    done
+    t1=$(date +%s)
+    if [ "$ran" = "0" ]; then
+        ST[$key]=skip
+        SKIP_REASON[$key]="没有任何前端 app 装了 node_modules"
+        printf '  ⏭ %s（跳过：所有 app 都没有 node_modules）\n' "$label"
+    elif [ "$rc" = "0" ]; then
+        ST[$key]=pass
+        printf '  ✅ %s（%s 个 app，%ss）\n' "$label" "$ran" "$((t1 - t0))"
+    else
+        ST[$key]=fail
+        printf '  ❌ %s（%ss）\n' "$label" "$((t1 - t0))"
+    fi
+}
+
 # ---- ⑦~⑫ 前端（需要 node / npm）----
 if [ -z "$NODE" ]; then
     for k in 7 8 9 10 11 12; do note_skip "$k" "找不到 node" "前端门禁 $k"; done
@@ -145,27 +188,23 @@ else
         run_gate 8 "共享包单测 · packages/api-core" run_in "$repo/packages/api-core" "$NPM" test
     fi
 
-    if [ ! -d "$ADMIN_MODULES" ]; then
-        for k in 9 10 11 12; do
-            note_skip "$k" "apps/admin/node_modules 不存在（在 apps/admin 里跑 npm ci）" "前端门禁 $k"
-        done
-    elif [ -z "$NPM" ]; then
+    if [ -z "$NPM" ]; then
         for k in 9 10 11 12; do note_skip "$k" "找不到 npm" "前端门禁 $k"; done
     else
-        run_gate 9 "npm run lint" run_in "$repo/apps/admin" "$NPM" run lint
-        run_gate 10 "npm run format:check" run_in "$repo/apps/admin" "$NPM" run format:check
-        run_gate 11 "npm run format:check:shared" run_in "$repo/apps/admin" "$NPM" run format:check:shared
-        run_gate 12 "tsc --noEmit" run_in "$repo/apps/admin" "$NPM" run typecheck
+        run_gate_apps 9 "npm run lint" lint
+        run_gate_apps 10 "npm run format:check" format:check
+        run_gate_apps 11 "npm run format:check:shared" format:check:shared
+        run_gate_apps 12 "tsc --noEmit" typecheck
     fi
 fi
 
-# ---- ⑬ build：**默认不跑**（沙箱要提权 + 57s）----
+# ---- ⑬ build：**默认不跑**（沙箱要提权 + 每个 app ≈57s）----
 if [ "$WITH_BUILD" = "0" ]; then
-    note_skip 13 "默认不跑（本机要越出沙箱才有权写 .next，坑 63；且 57s）—— 加 --with-build 跑" "npm run build"
-elif [ -z "$NPM" ] || [ ! -d "$ADMIN_MODULES" ]; then
-    note_skip 13 "缺 node/npm 或 apps/admin/node_modules" "npm run build"
+    note_skip 13 "默认不跑（本机要越出沙箱才有权写 .next，坑 63；每个 app ≈57s）—— 加 --with-build 跑" "npm run build"
+elif [ -z "$NPM" ]; then
+    note_skip 13 "缺 node/npm" "npm run build"
 else
-    run_gate 13 "npm run build（可编译性门禁）" run_in "$repo/apps/admin" "$NPM" run build
+    run_gate_apps 13 "npm run build（可编译性门禁）" build
 fi
 
 # ---------------- 汇总 + 覆盖矩阵（**数字由真实状态填**）----------------
@@ -183,7 +222,7 @@ ELAPSED=$(( $(date +%s) - T0 ))
 
 cat <<MATRIX
 
-════════════════ 门禁覆盖：本地 vs CI（13 道）════════════════
+════════ 门禁覆盖：本地 vs CI（13 **类**；CI 里是 18 道步骤）════════
 
   门禁（权威清单 = tools/local-verify/check-invariants.py）        本地  CI
   ─────────────────────────────────────────────────────────────  ────  ────
@@ -195,13 +234,14 @@ cat <<MATRIX
   ⑥ 覆盖率门禁（合并三份 → report）                                   $(mark 6)     ✅   ← 同上
   ⑦ 反向检查 · 认证链路单一真相                                       $(mark 7)     ✅
   ⑧ 共享包单测 · packages/api-core                                  $(mark 8)     ✅
-  ⑨ npm run lint                                                   $(mark 9)     ✅
+  ⑨ npm run lint                                                   $(mark 9)     ✅   ← 逐 app
   ⑩ npm run format:check                                           $(mark 10)     ✅
   ⑪ npm run format:check:shared                                    $(mark 11)     ✅
   ⑫ tsc --noEmit                                                   $(mark 12)     ✅
   ⑬ npm run build                                                  $(mark 13)     ✅   ← --with-build 才跑
   ─────────────────────────────────────────────────────────────  ────  ────
-  本次：通过 $npass · 失败 $nfail · 跳过 $nskip   （CI 跑全部 13 道）｜ 总耗时 ${ELAPSED}s
+  本次：通过 $npass · 失败 $nfail · 跳过 $nskip（**类**数；⑨~⑬ 每类含 $APPS 各一遍）
+  CI 侧：18 道步骤（后端 6 + 反向检查 1 + 共享包单测 1 + 前端 5 类 × 2 app）｜ 总耗时 ${ELAPSED}s
 
   ✅ 通过   ❌ 失败   ⏭ 跳过（**没查**，不等于通过）
 MATRIX
@@ -224,5 +264,5 @@ if [ "$nskip" -gt 0 ]; then
     echo "[preflight] ✅ 已跑的 $npass 道全过；但**有 $nskip 道没跑**（见上）—— 别把它读成「全绿」"
     exit 0
 fi
-echo "[preflight] ✅ 13 道全过（与 CI 同口径）"
+echo "[preflight] ✅ 13 类全过（⑨~⑬ 已覆盖 $APPS；与 CI 同口径）"
 exit 0

@@ -694,3 +694,72 @@ jobs:
         env:
           NEXT_PUBLIC_API_BASE: https://ci-build-gate.invalid/api/v1
         run: npm run build
+
+  # ================================================================
+  # C 端（`apps/web`）—— 2026-09-27（P1）新增
+  # ================================================================
+  #
+  # ## 为什么单开一个 job 而不是让 admin 那个 job 顺手跑一遍
+  #
+  # 每个 app 有**自己的 `package.json` / `package-lock.json` / `node_modules`**
+  # （`docs/24` §2 已裁定**不做 npm workspaces**）⇒ 装依赖这一步本来就得分两次。
+  # 硬塞进一个 job 只会让 `cache-dependency-path` 与 `working-directory` 变成
+  # "有时对有时不对"的写法 —— 那是**静默**的错（硬约定 H：没覆盖 ≠ 能过）。
+  #
+  # ## 与 admin job 的**刻意差异**
+  #
+  #  - **不跑反向检查**：`check-auth-chain.mjs` 扫的是 `apps/<app>/src`（全部 app），
+  #    跑两遍只是浪费；它已经在 admin job 的第一步跑过，且**新版 app 一出生就在扫描范围内**
+  #    （`docs/24` §4）。若哪天两个 job 的扫描范围分叉，那是脚本该改，不是这里复制一遍。
+  #  - **不跑共享包单测**：`packages/api-core` 与 app 无关，admin job 已跑。
+  frontend-web:
+    name: 前端 · C 端（lint + tsc + build）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: 安装依赖
+        working-directory: apps/web
+        run: npm ci
+
+      # ---- 五道门禁：与 admin 同款，只是换了 app（名字带 `web · ` 前缀便于区分）----
+
+      - name: web · npm run lint（拦截式）
+        working-directory: apps/web
+        run: npm run lint
+
+      - name: web · npm run format:check（拦截式）
+        working-directory: apps/web
+        run: npm run format:check
+
+      # `format:check:shared` 在两个 app 里**内容相同**（都检查 `packages/api-core` 与
+      # `tools/local-verify/check-auth-chain.mjs`）。为什么两处都留：
+      # 它是**从各自 app 出发**的（用各自的 prettier 配置）——
+      # 若哪天两端的配置分叉，这条会替我们把它变成**红**，而不是静默地各格式化各的。
+      - name: web · npm run format:check:shared（拦截式）
+        working-directory: apps/web
+        run: npm run format:check:shared
+
+      # ⚠️ 这一步**顺带**覆盖了共享包的类型（`api.ts` import 了它）——
+      #    这正是 `packages/api-core` 的第一次真实使用被验的地方。
+      - name: web · tsc --noEmit（拦截式）
+        working-directory: apps/web
+        run: npm run typecheck
+
+      # ---- build：**"只有 build 会暴露"的那类问题的唯一闸门** ----
+      # 对 C 端尤其关键：`useSearchParams` 缺 `<Suspense>` 边界、SSR 里碰 `window`、
+      # 跨包 TS 能否被 Next 打出来 —— 这些**本地 dev 全都正常，只有 `next build` 会红**。
+      # （`login/page.tsx` 就踩过 Suspense 这一条，见那里的注释。）
+      - name: web · npm run build（拦截式，可编译性门禁）
+        timeout-minutes: 10
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_API_BASE: https://ci-build-gate.invalid/api/v1
+        run: npm run build

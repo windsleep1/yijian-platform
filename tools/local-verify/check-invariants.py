@@ -35,9 +35,12 @@ REPO = Path(__file__).resolve().parents[2]
 #: 想偷偷把门槛调低，就得先改一个名叫"基线"的常量（而不是改一个不起眼的数字）。
 FAIL_UNDER_BASELINE = 94.40
 
-#: 门禁清单（13 道）。名字逐字取自 `.github/workflows/ci.yml` 的 `name:`。
+#: 门禁清单（**18 道**）。名字逐字取自 `.github/workflows/ci.yml` 的 `name:`。
 #: ⚠️ 历史口径说的"7 道"是 2026-09 早期的：后来加了诊断自检 / 反向检查 / 共享包单测 /
-#: `format:check:shared` / `build` / **不变量自检** ⇒ 现在是 13 道。
+#: `format:check:shared` / `build` / **不变量自检** ⇒ 13 道；
+#: 2026-09-27（P1）加 `apps/web` 的 5 道 ⇒ **18 道**。
+#: ★ 为什么 C 端要**单独 5 道**而不是"复用 admin 的"：每个 app 有自己的
+#:   `package.json`/lock/node_modules（不做 npm workspaces）⇒ 装依赖本来就分两次。
 REQUIRED_GATES: list[tuple[str, str]] = [
     ("后端", "CI 诊断段自检（拦截式）"),
     ("后端", "不变量自检（拦截式）"),
@@ -52,9 +55,28 @@ REQUIRED_GATES: list[tuple[str, str]] = [
     ("前端", "npm run format:check:shared（拦截式）"),
     ("前端", "tsc --noEmit"),
     ("前端", "npm run build（拦截式，可编译性门禁）"),
+    # ---- C 端（apps/web）—— 名字带 `web · ` 前缀，与 admin 那 5 道区分 ----
+    ("前端 · C 端", "web · npm run lint（拦截式）"),
+    ("前端 · C 端", "web · npm run format:check（拦截式）"),
+    ("前端 · C 端", "web · npm run format:check:shared（拦截式）"),
+    ("前端 · C 端", "web · tsc --noEmit（拦截式）"),
+    ("前端 · C 端", "web · npm run build（拦截式，可编译性门禁）"),
 ]
 
 _results: list[tuple[bool, str]] = []
+
+#: `/admin/*` 的**接口路径字面量**：`/admin/` 前面**紧跟引号或反引号**。
+#:
+#: ⚠️ 为什么不写成裸的 `"/admin/" in line`（**第一版就是这么写的**）：
+#:    那样会把 `apps/admin/src/lib/api.ts` 这类**路径引用**也报成违规 ——
+#:    P1 给 `apps/web` 写"与 admin 同源"的注释时，**一次报出 4 处假红**。
+#:    假红的代价不是"漏报"，而是**被人当成噪音**：一条会误报的守卫，
+#:    下一步就是被人加豁免、或者干脆删掉（硬约定 J：**假红与假绿同族**）。
+#:
+#: ★ 收窄后**故意保留"注释里也算"**：带接口路径的注释是"第二份说明"，
+#:   与 `check-auth-chain.mjs` 的理由一致（改了接口却忘了改注释 = 静默漂移）。
+#:   判据：它匹配的是 `"/admin/…` 这种**字面量形态**；而 `apps/admin/…` 是路径，不是。
+ADMIN_API_LITERAL = re.compile(r"""["'`]/admin/""")
 
 
 def ok(label: str) -> None:
@@ -82,7 +104,9 @@ def read(rel: str) -> str | None:
 
 # ------------------------------------------------------------------ 1
 def check_gates() -> None:
-    print("[1] 门禁完整性（13 道，全拦截式）—— 不变量 1")
+    # ⚠️ 条数**从清单推导**，不写死 —— 写死的话"加门禁忘了改数字"会让输出自相矛盾，
+    #    而矛盾的数字比没有数字更容易误导（2026-09-27：13 → 18 时就差一点漏改）。
+    print(f"[1] 门禁完整性（{len(REQUIRED_GATES)} 道，全拦截式）—— 不变量 1")
     ci = read(".github/workflows/ci.yml")
     if ci is None:
         return
@@ -121,7 +145,7 @@ def check_gates() -> None:
     if offenders:
         bad(f"有步骤挂 continue-on-error（门禁会变成'上报'而不是'拦截'）：{offenders}")
     else:
-        ok("13 道全部是**拦截式**（没有任何 continue-on-error）")
+        ok(f"{len(REQUIRED_GATES)} 道全部是**拦截式**（没有任何 continue-on-error）")
 
 
 # ------------------------------------------------------------------ 2
@@ -192,12 +216,12 @@ def check_admin_isolation() -> None:
             if not f.is_file() or f.suffix not in {".ts", ".tsx", ".js", ".jsx"}:
                 continue
             for i, ln in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
-                if "/admin/" in ln and not ln.lstrip().startswith("//"):
+                if ADMIN_API_LITERAL.search(ln):
                     offenders.append(f"{f.relative_to(REPO)}:{i}")
         if offenders:
-            bad(f"C 端代码里出现 `/admin/` 调用：{offenders[:5]}")
+            bad(f"C 端代码里出现 `/admin/` **接口路径字面量**：{offenders[:5]}")
         else:
-            ok("`apps/web/src` 里没有 `/admin/` 调用")
+            ok("`apps/web/src` 里没有 `/admin/` 接口路径字面量")
     ci = read(".github/workflows/ci.yml")
     if ci is not None and "check-auth-chain.mjs" in strip_comments(ci):
         ok("CI 里有反向检查 `check-auth-chain.mjs`（会覆盖新 app）")
