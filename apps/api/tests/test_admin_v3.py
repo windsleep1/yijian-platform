@@ -29,12 +29,14 @@ from .conftest import (
     ADMIN_PHONE,
     API,
     JS_MAX_SAFE_INT,
+    LOGIN_PATH,
     TEST_PASSWORD,
     assign_roles,
     auth,
     body,
     fresh_user,
     register,
+    relogin,
     sql_fetch,
     _dsn,
 )
@@ -121,19 +123,40 @@ def test_user_detail_404_is_real_404(client: httpx.Client, admin_h: dict[str, st
 
 
 def test_viewer_read_only_flow(client: httpx.Client, admin_h: dict[str, str]) -> None:
-    """超管把新账号设成 viewer，然后验证「能看不能改」。"""
+    """超管把新账号设成 viewer，然后验证「能看不能改」。
+
+    ⚠️ 2026-09-27 改过（`docs/22` §6.5 会话墙）：**授予 B 端角色后必须重新登录**。
+      "权限"确实在分配时立刻生效（缓存已失效）；但**管理端会话**是另一回事 ——
+      身份在**会话建立时**确定、不能事后改变，所以那个 `h5` token 永远变不成管理端会话。
+      ⇒ 这正是 §6.5 的判据（**身份 ≠ 能力**），**不是测试写错**；
+      连带的管理端 UI 文案见 §6.5.6（「该用户需**重新登录**才能进入管理后台」）。
+    """
     stu = fresh_user(client, nickname="只读审计员")
     uid = stu["user"]["id"]
-    h = auth(stu["access_token"])
 
-    # 变成 viewer 之前：连用户列表都进不去
-    assert body(client.get(f"{API}/admin/users", headers=h))["code"] == 40301
+    # 变成 viewer 之前：**连管理端会话都申请不到**（student 不在白名单里）
+    b = body(
+        client.post(
+            LOGIN_PATH,
+            headers={"X-Forwarded-For": stu["_ip"]},
+            json={"phone": stu["phone"], "password": TEST_PASSWORD, "platform": "pc"},
+        )
+    )
+    assert b["code"] == 40306, b
+    # C 端会话（h5）访问 /admin/* → 同一个码，但**是另一道墙**（请求侧 vs 登录侧）
+    assert (
+        body(client.get(f"{API}/admin/users", headers=auth(stu["access_token"])))["code"] == 40306
+    )
 
     # 超管授予 viewer
     g = assign_roles(client, admin_h, uid, ["viewer"])
     assert g["code"] == 0, g
     assert [x["code"] for x in g["data"]["roles"]] == ["viewer"]
     assert set(g["data"]["granted_permissions"]) == VIEWER_PERMS, g["data"]["granted_permissions"]
+
+    # ★ 重新登录拿**管理端会话**（viewer 在 `ADMIN_PLATFORM_ROLES` 里 ⇒ 这次成功）
+    #   —— 这一步漏了，下面每一条都会拿到 40306。见 `conftest.relogin`。
+    h = relogin(client, stu)
 
     # 权限缓存已在分配时失效，同一个 token 立刻生效
     assert body(client.get(f"{API}/admin/users", headers=h))["code"] == 0
@@ -299,12 +322,14 @@ def test_audit_logs_filter_and_diff(client: httpx.Client, admin_h: dict[str, str
     )
     assert bad["code"] == 40001, bad
 
-    # 没有 system:audit → 403
-    s = register(client, nickname="无审计权限")
-    assert (
-        body(client.get(f"{API}/admin/audit-logs", headers=auth(s["access_token"])))["code"]
-        == 40301
-    )
+    # 没有 system:audit → 40301
+    # ★ 用**有管理端身份、但缺 `system:audit`** 的账号，而不是"没角色的账号"：
+    #   会话墙**在权限墙之前**（实测 FastAPI 的依赖装配顺序，见 `docs/24` §9.3）⇒
+    #   没角色的账号先撞 `40306`，就再也测不到 `40301` 了（守卫会变弱）。
+    #   `teacher` 的权限集 = course / exam / stats ⇒ **不含** `system:*` ⇒ 正是要的账号。
+    s = fresh_user(client, nickname="无审计权限")
+    assert assign_roles(client, admin_h, s["user"]["id"], ["teacher"])["code"] == 0
+    assert body(client.get(f"{API}/admin/audit-logs", headers=relogin(client, s)))["code"] == 40301
 
 
 def test_user_detail_recent_audits(client: httpx.Client, admin_h: dict[str, str]) -> None:
@@ -360,6 +385,12 @@ def test_disable_blocks_login_and_invalidates_existing_token(
     也就是说 —— **停用是即时生效的**，不需要等 access token 过期。
     （这一点我一开始写错过：只看 `auth_service` 就得出"令牌过期前仍有效"，
     漏看了 `deps.py` 里的请求级校验。同一个判断散落两处，正是硬约定 A 说的情形。）
+
+    ★ 2026-09-27 追加（会话墙落地后**新暴露**的一条）：**重新启用不复活旧令牌**。
+      停用时 `user_service` 会 `UPDATE user_sessions SET revoked_at = now()`，
+      而会话墙之前**没人读这一列** ⇒ 旧令牌会在重新启用后"又活过来"（旧断言是 `40301`）。
+      现在读它 ⇒ 旧令牌拿 `40105`（**永久**失效），新登录拿到的会话才有效。
+      ⚠️ 这是**行为变化**，不是回归 —— 而且更安全（"撤销"终于名副其实）。
     """
     stu = fresh_user(client, nickname="停用用例")
     uid = stu["user"]["id"]
@@ -369,8 +400,10 @@ def test_disable_blocks_login_and_invalidates_existing_token(
     # 停用前：能登录、能用令牌访问
     assert login_password(client, phone).json()["code"] == 0
     assert body(client.get(f"{API}/admin/users/{uid}", headers=admin_h))["code"] == 0
-    assert body(client.get(f"{API}/admin/users/{uid}", headers=auth(token)))["code"] == 40301, (
-        "学员没有 user:read，这里是 40301 —— 但**不是** 40305，说明账号状态正常"
+    # ★ 2026-09-27：`40301` → **`40306`**（会话墙）。判据不变 —— **不是 `40305`**
+    #   就说明"账号状态正常"（这才是这条断言要证明的事）。
+    assert body(client.get(f"{API}/admin/users/{uid}", headers=auth(token)))["code"] == 40306, (
+        "学员没有管理端会话，这里是 40306 —— 但**不是** 40305，说明账号状态正常"
     )
 
     # ---- 停用 ----
@@ -396,10 +429,27 @@ def test_disable_blocks_login_and_invalidates_existing_token(
     b = set_status(client, admin_h, uid, "active", reason="申诉通过")
     assert b["code"] == 0, b
     assert b["data"]["status"] == "active", b["data"]
-    assert login_password(client, phone).json()["code"] == 0, "启用后应当能正常登录"
-    assert body(client.get(f"{API}/admin/users/{uid}", headers=auth(token)))["code"] == 40301, (
-        "旧令牌又能用了（40301 = 权限不足但账号正常）"
+    fresh = login_password(client, phone).json()
+    assert fresh["code"] == 0, "启用后应当能正常登录"
+
+    # ★★ 2026-09-27 改（会话墙带来的**语义升级**）：**旧令牌不会复活** ——
+    #   得到的是 `40105 Session revoked`，**不是**"权限不足"的码。
+    #   原因链：`user_service.set_status`（停用时）执行
+    #   `UPDATE user_sessions SET revoked_at = now()` —— 但**在会话墙之前没人读这一列** ⇒
+    #   旧行为是"账号一重新启用，那个旧令牌**又能在 access TTL 内继续用**"（当时这里断言 40301）。
+    #   现在 `current_user` 会读 `revoked_at` ⇒ **撤销是永久的**，重新启用也不复活。
+    #   ★ 这比旧行为**更安全**，而且正是"停用要用到会话级"的那半件事。
+    r3 = client.get(f"{API}/admin/users/{uid}", headers=auth(token))
+    assert r3.status_code == 401, (
+        f"停用撤销掉的会话不该因为重新启用而复活（应 401），实际 {r3.status_code} —— "
+        "若这里是 40301/40306，说明会话墙没在读 `revoked_at`"
     )
+    assert r3.json()["code"] == 40105, r3.json()
+
+    # 而**新会话**是好的 ⇒ 判据仍是"**不是** 40305 / 40105 就说明账号状态正常"
+    #   （用的是 `h5` 会话，所以看到会话墙码，不是权限墙码）
+    r4 = client.get(f"{API}/admin/users/{uid}", headers=auth(fresh["data"]["access_token"]))
+    assert body(r4)["code"] == 40306, r4.json()
 
 
 def test_user_status_only_accepts_active_and_disabled(
@@ -430,7 +480,7 @@ def test_user_status_guards(client: httpx.Client, admin_h: dict[str, str]) -> No
     # 造一个普通 admin：有 user:manage，但不是 super_admin
     op = fresh_user(client, nickname="测超管守卫的操作者")
     assert assign_roles(client, admin_h, op["user"]["id"], ["admin"])["code"] == 0
-    oh = auth(op["access_token"])
+    oh = relogin(client, op)  # ★ 授了 B 端角色 ⇒ 重新登录拿管理端会话（§6.5.6）
 
     # 定位超管（按手机号精确定位；库里有 400+ 用户，靠 page_size=100 翻页找不到）
     lst = body(
@@ -468,7 +518,7 @@ def test_user_status_cannot_disable_self(client: httpx.Client, admin_h: dict[str
     u = fresh_user(client, nickname="管理员甲")
     uid = u["user"]["id"]
     assert assign_roles(client, admin_h, uid, ["admin"])["code"] == 0
-    h = auth(u["access_token"])
+    h = relogin(client, u)  # ★ 授了 B 端角色 ⇒ 重新登录拿管理端会话（§6.5.6）
 
     # admin 有 user:manage，能改别人
     victim = fresh_user(client, nickname="被甲停用的人")
@@ -525,7 +575,7 @@ def test_user_status_permission_wall(client: httpx.Client, admin_h: dict[str, st
 
     v = fresh_user(client, nickname="只读审计员")
     assert assign_roles(client, admin_h, v["user"]["id"], ["viewer"])["code"] == 0
-    vh = auth(v["access_token"])
+    vh = relogin(client, v)  # ★ 授了 B 端角色 ⇒ 重新登录拿管理端会话（§6.5.6）
 
     b = set_status(client, vh, uid, "disabled")
     assert b["code"] == 40301 and "user:manage" in b["message"], b

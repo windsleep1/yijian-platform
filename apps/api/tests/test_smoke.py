@@ -150,7 +150,11 @@ def test_rbac_flow(client: httpx.Client) -> None:
     student_h = auth(student_token)
 
     denied = body(client.get(f"{API}/admin/users", headers=student_h))
-    assert denied["code"] == 40301, denied
+    # ★ 2026-09-27：`40301` → **`40306`**（`docs/22` §6.5 会话墙）。
+    #   学员注册拿到的是 `h5` 会话，而 `/admin/*` 要求**管理端会话** ⇒
+    #   它在**会话墙**就被拒了，**走不到"权限不足"那一道**。
+    #   两种拒绝的分工见 `docs/24` §9.3：`40306` = 不是管理端会话；`40301` = 是管理端会话但缺这条权限。
+    assert denied["code"] == 40306, denied
 
     denied2 = body(
         client.put(
@@ -159,7 +163,7 @@ def test_rbac_flow(client: httpx.Client) -> None:
             json={"role_codes": ["admin"]},
         )
     )
-    assert denied2["code"] == 40301, denied2
+    assert denied2["code"] == 40306, denied2
 
     # 5) 超管给学员授予 researcher
     granted = body(

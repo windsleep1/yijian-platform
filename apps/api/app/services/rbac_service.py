@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import redis.asyncio as aioredis
@@ -42,6 +43,42 @@ PRIV_CACHE_KEY = "rbac:priv:{user_id}"
 # 于是「无 user:manage → 按钮 disabled」这个状态**没有任何账号能复现**。
 # viewer 补上了这个缺口：有 user:read、没有 user:manage。
 ASSIGNABLE_ROLES = {"admin", "researcher", "teacher", "operator", "student", "viewer"}
+
+
+# ---------------------------------------------------------------------
+# 管理端会话（`docs/22` §6.5）：通道 = `user_sessions.platform`
+# ---------------------------------------------------------------------
+
+#: 会话通道取值。`pc` = 管理端，`h5` = C 端（也是**默认**）。
+#: ⚠️ 它由**客户端申报** ⇒ 服务端只能把它当"**申请**"，不能当"事实"
+#:   （这就是 `deps.require_admin_session` 在它之上还要看角色白名单的原因）。
+PLATFORM_PC = "pc"
+PLATFORM_H5 = "h5"
+
+#: 能申请管理端会话的**角色**白名单。
+#: ★ 判据是**角色身份**，不是权限码 —— "这是管理端会话"不能由"你恰好有某个权限码"
+#:   推出来（把一个纯 C 端账号授上 `question:read`，它就能读后台了，这正是 §6.5 要堵的）。
+#: ⚠️ 与 `ASSIGNABLE_ROLES` **不是一回事**：那个是"后台能分配哪些角色"（含 student），
+#:   这个是"哪些角色算**管理端**"（**不含** student）。
+#: ★★ `viewer` **必须在列**（2026-09-27 实测修正 —— §6.5.2 的初版名单漏了它）：
+#:   `viewer` 是**管理端只读岗**（"只读审计员"），它存在的理由就是**登录后台**看
+#:   用户列表 / 审计日志 / 统计 / 试卷（`test_viewer_can_read_all_five_endpoints` 钉着）。
+#:   漏掉它的后果不是"权限少一点"，而是**这个角色整个作废** ——
+#:   拿不到 pc 会话、h5 会话又被会话墙挡 ⇒ **它一个接口都读不了**。
+#:   **可证伪判据**：`test_viewer_can_read_all_five_endpoints` 必须是绿的；
+#:   它红了就是这份名单的问题，**不是测试的问题**。
+ADMIN_PLATFORM_ROLES = frozenset(
+    {"super_admin", "admin", "researcher", "teacher", "operator", "viewer"}
+)
+
+
+def is_admin_platform_role(role_codes: Iterable[str]) -> bool:
+    """这批角色里**有任何一个**属于管理端白名单 ⇒ 允许申请管理端会话。
+
+    用"有任何一个"而不是"全部"：一个账号同时挂着 `admin` + `student` 时它仍然是管理员，
+    要求"全部都是管理端角色"会把这种人挡在外面（不合理，且症状是"我明明是管理员却进不去"）。
+    """
+    return any(code in ADMIN_PLATFORM_ROLES for code in role_codes)
 
 
 @dataclass

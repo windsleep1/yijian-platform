@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.v1 import (
     admin_audit,
@@ -16,29 +16,35 @@ from app.api.v1 import (
     auth,
     health,
 )
+from app.core.deps import require_admin_session
 
 api_router = APIRouter()
 
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
-api_router.include_router(admin_users.router)
-api_router.include_router(admin_rbac.router)  # Batch 3：/admin/roles, /admin/permissions
-api_router.include_router(admin_audit.router)  # Batch 3：/admin/audit-logs
-api_router.include_router(admin_questions.router)  # Batch 4：/admin/questions CRUD + 批量删除
-api_router.include_router(admin_chapters.router)  # Batch 4：/admin/chapters/tree
-api_router.include_router(
-    admin_imports.router
-)  # Batch 5：/admin/imports 题库批量导入管道（7 接口）
-# Batch 6：+ /admin/imports/{id}/changes 批次变更日志
-api_router.include_router(admin_exams.router)  # Batch 7：/admin/paper-rules 组卷规则 + /admin/exams
-#   试卷 CRUD / auto-compose / validate / publish（11 接口）
 
-# Batch 8：/admin/stats 统计看板（5 接口：overview / trends /
-#   distributions / funnel / weak-points）
-api_router.include_router(admin_stats.router)
+# ---- ★★ 管理端会话墙（`docs/22` §6.5）：**一处挂**，不散在几十个路由上 ----
+# `current_user` 已保证"**会话有效**"（BL-13，登出即时生效）；
+# 这一层再加"**这是管理端会话**"（`user_sessions.platform == 'pc'`）——
+# **权限码是"能力"，这里要的是"身份"**：把一个纯 C 端账号授上 `question:read`，
+# 在加这道墙之前它是**能读后台的**。
+#
+# ⚠️ 为什么挂在 **router 级**而不是逐个路由写：这里 8 个 admin router、几十个路由，
+#    逐个写**一定会漏**；而"漏一个"的症状是"那个接口不需要管理端会话也能读"（**静默**）。
+# ⚠️ **顺序**（权限墙 vs 会话墙）：两者**都是拒绝**，谁先谁后对安全性零影响；
+#    实际顺序由 FastAPI 的依赖解析决定 —— 既有那几条"无权限账号"的用例**跑一遍看拿到哪个码**，
+#    结果记在 `docs/24`（**不在这里猜**）。
+api_router.include_router(admin_users.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_rbac.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_audit.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_questions.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_chapters.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_imports.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_exams.router, dependencies=[Depends(require_admin_session)])
+api_router.include_router(admin_stats.router, dependencies=[Depends(require_admin_session)])
 
 # 后续批次在此追加：
-#   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点
+#   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点（C 端）
 #   api_router.include_router(practice.router)      # 刷题
 
 __all__ = ["api_router"]

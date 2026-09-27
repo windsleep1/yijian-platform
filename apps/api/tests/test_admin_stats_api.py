@@ -39,7 +39,17 @@ import httpx
 
 from app.core import deps
 
-from .conftest import API, BASE, assign_roles, auth, body, fresh_user
+from .conftest import (
+    API,
+    BASE,
+    LOGIN_PATH,
+    TEST_PASSWORD,
+    assign_roles,
+    auth,
+    body,
+    fresh_user,
+    relogin,
+)
 
 
 def _all_endpoints() -> list[tuple[str, dict[str, Any]]]:
@@ -54,11 +64,15 @@ def _all_endpoints() -> list[tuple[str, dict[str, Any]]]:
 
 
 def _viewer(client: httpx.Client, admin_h: dict[str, str]) -> dict[str, str]:
-    """注册一个全新用户 → 授 `viewer`（有 `stats:read`、但没有写权限）→ 返回其请求头。"""
+    """注册一个全新用户 → 授 `viewer`（有 `stats:read`、但没有写权限）→ 返回其请求头。
+
+    ⚠️ **必须 `relogin`**（`docs/22` §6.5.6：身份在**会话建立时**确定）——
+      注册拿到的是 `h5` 会话；授了 viewer 之后要**重新登录**才拿得到管理端会话。
+    """
     u = fresh_user(client, nickname="看板只读")
     r = assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
     assert r["code"] == 0, r
-    return auth(u["access_token"])
+    return relogin(client, u)
 
 
 # ---------------------------------------------------------------- 权限
@@ -72,19 +86,51 @@ def test_stats_endpoints_require_auth(client: httpx.Client) -> None:
         assert body(r)["code"] == 40100
 
 
-def test_student_has_no_stats_permission(client: httpx.Client) -> None:
-    """`student` 没有任何权限 → **403 + 40301**。
+def test_student_cannot_hold_admin_session(client: httpx.Client) -> None:
+    """`student` **拿不到管理端会话** → `40306`（**不是** `40301`）。
 
-    这与 401 的区别是**语义**：401 = 没登录；403 = 登录了但没这个权限。
-    前端对两者的处理完全不同（跳登录 vs 提示无权限），所以必须分开断言。
+    ★ 原名 `test_student_has_no_stats_permission`，2026-09-27 **改名的理由**：
+      **测试名是契约的文档** —— 名字说"has_no_stats_permission"而断言是会话墙码，
+      下一个人读代码会被误导（与"field 对了但 message 变了"同族）。
+      行为变化的来源是 `docs/22` §6.5 会话墙：`student` 不在管理端角色白名单里
+      （`rbac_service.ADMIN_PLATFORM_ROLES`）⇒ 它在**登录那一步**就被拒，
+      根本走不到"权限不足"。
+
+    两层各测一次，缺一不可：
+      ① **登录侧**：申报 `platform="pc"` → **拒绝登录**
+         （§6.5.2 修正②：`platform` 是客户端申报的"申请"，服务端要审；
+          **不静默降级为 h5** —— 降级会变成"我登进来了但什么都点不了"这种查不出的症状）；
+      ② **请求侧**：拿 C 端（`h5`）会话访问 `/admin/*` → 会话墙拒绝。
+
+    ⚠️ **`stats:read` 的 `40301` 现在测不到 —— 这是诚实记录，不是漏了**：
+      六个可持管理端会话的角色（`super_admin/admin/researcher/teacher/operator/viewer`）
+      **全都有** `stats:read`（`db/schema.sql` 的 `role_permissions` 种子）⇒
+      "**有管理端身份、但缺 `stats:read`**"这个状态**不可表达**。
+      与 `viewer` 当初被创建出来要补的那个缺口（"有 read 没有 write"）是**同一类**，
+      只是方向相反（"有**身份**没有**能力**"）。
+      `40301` 这道墙本身仍有覆盖 —— admin 用例里用"有身份、缺该权限"的角色钉着
+      （映射表见 `docs/24` §9.3；`stats:read` 是唯一 🚫 的一格）。
     """
     u = fresh_user(client, nickname="无权限的学员")
-    h = auth(u["access_token"])
-    r = client.get(f"{API}/admin/stats/overview", headers=h)
+
+    # ① 登录侧：student 申请管理端会话 → 当场拒绝
+    b = body(
+        client.post(
+            LOGIN_PATH,
+            headers={"X-Forwarded-For": u["_ip"]},
+            json={"phone": u["phone"], "password": TEST_PASSWORD, "platform": "pc"},
+        )
+    )
+    assert b["code"] == 40306, b
+    assert "管理端" in b["message"], b
+    assert u["access_token"], "登录被拒不该影响已有的 h5 会话"
+
+    # ② 请求侧：h5 会话访问 /admin/* → 会话墙
+    r = client.get(f"{API}/admin/stats/overview", headers=auth(u["access_token"]))
     assert r.status_code == 403, f"应 403，实际 {r.status_code}: {r.text[:160]}"
     b = body(r)
-    assert b["code"] == 40301
-    assert "stats:read" in b["message"], f"403 消息里应说明缺哪个权限：{b['message']}"
+    assert b["code"] == 40306, b
+    assert "管理端" in b["message"], b
 
 
 def test_viewer_can_read_all_five_endpoints(client: httpx.Client, admin_h: dict[str, str]) -> None:
@@ -242,6 +288,12 @@ def test_timeout_maps_to_503_not_500(client: httpx.Client) -> None:
         session_id=None,
         jti=None,
         id=1,
+        # ★ `CurrentUser` 长了 `platform` 之后，**替身必须跟着长这个属性**（会话墙读它）：
+        #   少了它就是 `AttributeError: no attribute 'platform'`
+        #   （2026-09-27 实测：这条用例就是这么红的 —— **契约变了，替身要跟着变**）。
+        #   造 `"pc"` 的理由：它已经在 `dependency_overrides` 里绕过整个认证链，
+        #   本用例要测的是**超时 → 503**，不是会话墙（那道墙另有专门用例钉着）。
+        platform="pc",
     )
 
     import fakeredis.aioredis

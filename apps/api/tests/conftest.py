@@ -76,10 +76,17 @@ def register(client: httpx.Client, *, nickname: str = "测试用户") -> dict:
 
 
 def admin_token(client: httpx.Client) -> str:
-    """超管 Token。超管由 `python -m app.cli seed-admin` 创建；没跑就 skip。"""
+    """超管 Token。超管由 `python -m app.cli seed-admin` 创建；没跑就 skip。
+
+    ⚠️ **必须申报 `platform: "pc"`**（`docs/22` §6.5）：管理端会话 = `user_sessions.platform == 'pc'`，
+      `require_admin_session` 在 `/admin/*` 上要求它。不申报 ⇒ 落库成 `h5` ⇒
+      全部 admin 用例被会话墙挡在 `40306`（2026-09-27 实测：**136 条**受影响）。
+      这一行是**全部 admin 用例的唯一入口**的修复点。
+    """
     b = body(
         client.post(
-            f"{API}/auth/login/password", json={"phone": ADMIN_PHONE, "password": ADMIN_PASSWORD}
+            f"{API}/auth/login/password",
+            json={"phone": ADMIN_PHONE, "password": ADMIN_PASSWORD, "platform": "pc"},
         )
     )
     if b["code"] != 0:
@@ -87,6 +94,35 @@ def admin_token(client: httpx.Client) -> str:
             f"超管登录失败（{b['code']} {b['message']}）：请先执行 python -m app.cli seed-admin"
         )
     return b["data"]["access_token"]
+
+
+LOGIN_PATH = f"{API}/auth/login/password"
+
+
+def relogin(client: httpx.Client, user: dict, *, platform: str = "pc") -> dict[str, str]:
+    """用**同一个账号重新登录**并申报 `platform`（默认 `"pc"` = 管理端会话）。
+
+    ★ 为什么必须有它（`docs/22` §6.5.6）：**身份在会话建立时确定，不能事后改变** ——
+      授予 B 端角色之后，**同一个 token 拿不到管理端会话**，必须**重新登录**。
+      所以凡是"给账号授了 B 端角色 → 再用这个账号访问 `/admin/*`"的用例，
+      都要走这里，而不是继续用注册时那个 `h5` token。
+
+    ⚠️ **复用 `fresh_user` 分给这个账号的假 IP**：`/auth/login/password` 也按 IP 限流
+      （20 次/60s）——都从 `127.0.0.1` 出来会互相挤额度（见 `fresh_user` 的注释）。
+
+    ⚠️ 它**只负责建立会话**，不校验角色白名单 —— 传一个不在白名单的角色会 `40306`
+      （这本身就是被测行为之一，让调用方自己断言）。
+    """
+    h = {"X-Forwarded-For": user["_ip"]} if user.get("_ip") else {}
+    b = body(
+        client.post(
+            LOGIN_PATH,
+            headers=h,
+            json={"phone": user["phone"], "password": TEST_PASSWORD, "platform": platform},
+        )
+    )
+    assert b["code"] == 0, b
+    return auth(b["data"]["access_token"])
 
 
 def assign_roles(
@@ -207,6 +243,8 @@ def fresh_user(client: httpx.Client, *, nickname: str = "测试用户") -> dict:
     assert b["code"] == 0, b
     data = b["data"]
     data["phone"] = phone  # 方便断言脱敏/明文
+    # 供 `relogin()` 复用**同一个限流桶**（`/auth/login/password` 也按 IP 限流）。
+    data["_ip"] = ip
     return data
 
 

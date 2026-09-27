@@ -33,7 +33,7 @@ import uuid
 import httpx
 import pytest
 
-from .conftest import API, assign_roles, auth, body, fresh_user, register
+from .conftest import API, assign_roles, body, fresh_user, relogin
 
 JS_MAX_SAFE_INT = 2**53 - 1
 
@@ -696,11 +696,20 @@ def test_change_logs_and_version_snapshots_in_db(
 # ================================================================ 9. 权限墙
 
 
-def test_question_permission_wall(client: httpx.Client, sz) -> None:
-    """student 角色没有任何 question:* 权限 → 读写全被拦（前端按钮 disabled 对应的后端那道墙）。"""
+def test_question_permission_wall(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
+    """**有管理端身份、但没有 `question:*` 权限** → 读写全被拦（前端按钮 disabled 对应的那道后端墙）。
+
+    ★ 2026-09-27 改：原来用"没角色的 student"，现在用 **`operator`**。
+      原因：会话墙**在权限墙之前**（实测 FastAPI 依赖装配顺序，`docs/24` §9.3）⇒
+      student 先撞 `40306`（拿不到管理端会话），**再也走不到 `40301`** —— 那等于把这道墙的守卫拆了。
+      `operator` 的权限集 = content / stats / user ⇒ **不含** `question` ⇒
+      它能持管理端会话、又确实缺 `question:*` —— 这才是"**有身份、缺能力**"的账号。
+      两种拒绝的分工见 `docs/24` §9.3：`40306` = 不是管理端会话；`40301` = 是管理端会话但缺这条权限。
+    """
     sid, _ = sz
-    stu = register(client, nickname="题库越权用例")
-    h = auth(stu["access_token"])
+    stu = fresh_user(client, nickname="题库越权用例")
+    assert assign_roles(client, admin_h, stu["user"]["id"], ["operator"])["code"] == 0
+    h = relogin(client, stu)
 
     assert body(client.get(f"{API}/admin/questions", headers=h))["code"] == 40301
     assert body(client.get(f"{API}/admin/questions/1", headers=h))["code"] == 40301
@@ -746,7 +755,11 @@ def _scoped_headers(
     scope_type: str = "subject",
     scope_id: int | None = SZ_SUBJECT_ID,
 ) -> dict[str, str]:
-    """造一个只挂单个科目范围的 researcher，返回认证头。"""
+    """造一个只挂单个科目范围的 researcher，返回认证头。
+
+    ⚠️ 末尾必须 `relogin`（`docs/22` §6.5.6）：注册拿到的是 `h5` 会话，
+      授了 researcher 之后**要重新登录**才拿得到管理端会话。
+    """
     u = fresh_user(client, nickname=nickname)
     ar = assign_roles(
         client,
@@ -757,7 +770,7 @@ def _scoped_headers(
         scope_id=scope_id,
     )
     assert ar["code"] == 0, ar
-    return auth(u["access_token"])
+    return relogin(client, u)
 
 
 def _exists(client: httpx.Client, admin_h: dict[str, str], tag: str) -> bool:

@@ -46,7 +46,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from .conftest import API, assign_roles, auth, body, fresh_user, sql_exec, sql_fetch, _dsn
+from .conftest import API, assign_roles, body, fresh_user, relogin, sql_exec, sql_fetch, _dsn
 
 # 市政实务（教研演示账号的数据范围就是它）
 SZ_SUBJECT_ID = 2007
@@ -913,7 +913,7 @@ def test_data_scope_researcher_only_own_subject(client: httpx.Client, admin_h, c
         scope_id=SZ_SUBJECT_ID,
     )
     assert ar["code"] == 0, ar
-    rh = auth(u["access_token"])
+    rh = relogin(client, u)
 
     # 闸 1：建别科目的卷 → 403
     b = body(
@@ -991,7 +991,7 @@ def test_data_scope_researcher_only_own_subject(client: httpx.Client, admin_h, c
 
 
 def test_exam_endpoints_require_permissions(client: httpx.Client, admin_h, created) -> None:
-    """权限门控：无权限角色一律 403、未登录 401；并**记录一个角色模型缺口**。
+    """权限门控：**有管理端身份、缺权限** → `40301`；**没管理端身份** → `40306`；未登录 → `401`。
 
     ⚠️ 实测发现（`db/schema.sql` 的权限种子）：`exam` 模块的四条权限
     （`read` / `create` / `publish` / `grade`）是**整包**发给角色的 ——
@@ -1002,11 +1002,17 @@ def test_exam_endpoints_require_permissions(client: httpx.Client, admin_h, creat
 
     本批**不新增角色**（改种子超出组卷引擎范围），所以这里如实断言现状：
     `researcher` 是**可以**发布试卷的。缺口记在 `docs/13` §遗留事项。
+
+    ★ 2026-09-27：`40301` 那一半改用 **`operator`**（原来用 student）。
+      原因是会话墙**在权限墙之前**（`docs/24` §9.3）：student 拿不到管理端会话 ⇒
+      先撞 `40306`，`40301` 就再也测不到了（守卫会变弱 —— 那正是我们要避免的）。
+      `operator` 的权限集 = content / stats / user ⇒ **不含 `exam`** ⇒
+      "**有管理端身份、但缺 `exam:read`**" 正是它。
     """
-    u = fresh_user(client, nickname="B7 无权限")
-    # student 无任何权限
-    assign_roles(client, admin_h, u["user"]["id"], ["student"])
-    sh = auth(u["access_token"])
+    u = fresh_user(client, nickname="B7 缺 exam 权限")
+    # `operator` 能持管理端会话（在白名单里），但**没有 exam 模块的任何权限**
+    assert assign_roles(client, admin_h, u["user"]["id"], ["operator"])["code"] == 0
+    sh = relogin(client, u)
 
     b = body(client.get(f"{API}/admin/exams", headers=sh))
     assert b["code"] == 40301 and "exam:read" in b["message"], b
@@ -1043,7 +1049,7 @@ def test_exam_endpoints_require_permissions(client: httpx.Client, admin_h, creat
         scope_type="subject",
         scope_id=JJ_SUBJECT_ID,
     )
-    rh = auth(u2["access_token"])
+    rh = relogin(client, u2)
     exam = body(
         client.post(
             f"{API}/admin/exams",
@@ -1180,7 +1186,7 @@ def test_viewer_can_read_but_not_publish(client: httpx.Client, admin_h, created)
     u = fresh_user(client, nickname="B7 只读岗")
     ar = assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
     assert ar["code"] == 0, ar
-    vh = auth(u["access_token"])
+    vh = relogin(client, u)
 
     # 读：列表 / 详情 / 校验，全部放行
     b = body(client.get(f"{API}/admin/exams", headers=vh, params={"page_size": 100}))
@@ -1374,7 +1380,7 @@ def test_exam_restore_requires_publish_permission(client: httpx.Client, admin_h,
 
     u = fresh_user(client, nickname="B7 恢复权限")
     assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
-    vh = auth(u["access_token"])
+    vh = relogin(client, u)
 
     # 读 OK（含已归档的详情）
     assert body(client.get(f"{API}/admin/exams/{exam['id']}", headers=vh))["code"] == 0
@@ -1503,7 +1509,7 @@ def test_question_restore_requires_delete_permission(
 
     u = fresh_user(client, nickname="B7 题目恢复权限")
     assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
-    vh = auth(u["access_token"])
+    vh = relogin(client, u)
 
     b = restore_question(client, vh, q["id"])
     assert b["code"] == 40301 and "question:delete" in b["message"], b
@@ -1521,7 +1527,7 @@ def test_question_restore_requires_delete_permission(
         scope_type="subject",
         scope_id=JJ_SUBJECT_ID,
     )
-    rh = auth(u2["access_token"])
+    rh = relogin(client, u2)
     assert restore_question(client, rh, q["id"])["code"] == 0
 
 
@@ -1794,7 +1800,7 @@ def test_add_questions_validates_section_and_permission(
 
     u = fresh_user(client, nickname="B7 加题权限")
     assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
-    vh = auth(u["access_token"])
+    vh = relogin(client, u)
     b = add_questions(client, vh, exam["id"], qs)
     assert b["code"] == 40301 and "exam:create" in b["message"], b
     # viewer 也移不了题
@@ -1877,7 +1883,7 @@ def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
     # 所以这个 403 不会造成"页面残废"。
     u = fresh_user(client, nickname="B7 知识点下拉")
     assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
-    vh = auth(u["access_token"])
+    vh = relogin(client, u)
     b_denied = body(
         client.get(
             f"{API}/admin/chapters/knowledge-points",
@@ -1897,7 +1903,7 @@ def test_knowledge_point_dropdown(client: httpx.Client, admin_h) -> None:
         scope_type="subject",
         scope_id=JJ_SUBJECT_ID,
     )
-    rh = auth(r["access_token"])
+    rh = relogin(client, r)
 
     b = body(
         client.get(
@@ -2527,9 +2533,10 @@ def test_rule_preview_validation_and_permission(client: httpx.Client, admin_h) -
     b = preview_rule(client, admin_h, subject_id=999999999, rules=[{"type": "single", "count": 1}])
     assert b["code"] in (40001, 40401), b
 
-    # 无考试权限的用户 → 40301
+    # 有管理端身份、但无考试权限的用户 → 40301（`operator` 的权限集不含 exam 模块）
     u = fresh_user(client, nickname="B7 试算权限")
-    uh = auth(u["access_token"])
+    assert assign_roles(client, admin_h, u["user"]["id"], ["operator"])["code"] == 0
+    uh = relogin(client, u)
     b = preview_rule(client, uh, subject_id=JJ_SUBJECT_ID, rules=[{"type": "single", "count": 1}])
     assert b["code"] == 40301 and "exam:read" in b["message"], b
 
@@ -2543,7 +2550,7 @@ def test_rule_preview_validation_and_permission(client: httpx.Client, admin_h) -
         scope_type="subject",
         scope_id=JJ_SUBJECT_ID,
     )
-    rh = auth(r["access_token"])
+    rh = relogin(client, r)
     b = preview_rule(client, rh, subject_id=JZ_SUBJECT_ID, rules=[{"type": "single", "count": 1}])
     assert b["code"] == 40301, "试算会回传题目明细，必须按数据范围收口"
     # 自己科目内可以
@@ -2692,7 +2699,7 @@ def test_unpublish_permission_and_archived(client: httpx.Client, admin_h, create
     # viewer 只有 exam:read → 40301（与「发布/归档」一致，都是写动作）
     u = fresh_user(client, nickname="B7 下线权限")
     assign_roles(client, admin_h, u["user"]["id"], ["viewer"])
-    b = unpublish(client, auth(u["access_token"]), exam["id"])
+    b = unpublish(client, relogin(client, u), exam["id"])
     assert b["code"] == 40301 and "exam:publish" in b["message"], b
 
     # 归档后 → 40401（已有 delete 用例覆盖归档，这里只验证下线的这一侧）

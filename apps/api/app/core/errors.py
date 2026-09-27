@@ -51,6 +51,21 @@ def forbidden(message: str = "没有操作权限", code: int = 40301) -> BizErro
     return BizError(code, message, 403)
 
 
+def admin_session_required(
+    message: str = "需要管理端会话，请到管理后台重新登录", code: int = 40306
+) -> BizError:
+    """管理端会话墙（`docs/22` §6.5）。
+
+    ★ **403 段不只有"没权限"** —— 三个码必须能区分，否则用户看到的都是"没有权限"，
+      而它们**该做的事完全不同**（拒绝时要给可执行下一步，硬约定 C 的同一条）：
+
+        `40301` 没有操作权限   → 该去**申请授权**
+        `40305` 账号状态异常   → 该去**联系客服**
+        `40306` 不是管理端会话 → 该从**管理后台重新登录**（本码：**身份 ≠ 能力**）
+    """
+    return BizError(code, message, 403)
+
+
 def not_found(message: str = "资源不存在", code: int = 40401) -> BizError:
     return BizError(code, message, 404)
 

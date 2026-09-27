@@ -42,7 +42,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from .conftest import API, TEST_PASSWORD, assign_roles, auth, body
+from .conftest import API, TEST_PASSWORD, assign_roles, body, relogin
 
 REPO = Path(__file__).resolve().parents[3]
 SEED_JSON = REPO / "data" / "seed" / "questions.json"
@@ -235,7 +235,12 @@ def fresh_user(client: httpx.Client, *, nickname: str = "导入用例") -> dict:
         )
     )
     assert b["code"] == 0, b
-    return b["data"]
+    data = b["data"]
+    # 与 `conftest.fresh_user` **返回形状对齐**：`relogin()` 要 `phone`（重新登录用）
+    # 与 `_ip`（复用同一个限流桶）。少了这两个键，`relogin` 会 keyerror / 换桶。
+    data["phone"] = phone
+    data["_ip"] = ip
+    return data
 
 
 @pytest.fixture(scope="module")
@@ -513,7 +518,8 @@ def test_researcher_data_scope(client: httpx.Client, admin_h, sz) -> None:
         client, admin_h, u["user"]["id"], ["researcher"], scope_type="subject", scope_id=subject_id
     )
     assert ar["code"] == 0, ar
-    rh = auth(u["access_token"])  # 权限每次请求从库里取，旧 token 立刻生效
+    rh = relogin(client, u)  # ★ 授了 researcher ⇒ 重新登录拿管理端会话（§6.5.6）；
+    #   注意：**权限**仍是每次请求从库里取 —— 下面改权限的断言用同一个 token 依然立刻生效。
 
     # 闸 1：批次科目越权
     up = upload(
@@ -554,10 +560,17 @@ def test_researcher_data_scope(client: httpx.Client, admin_h, sz) -> None:
     assert count_questions(client, admin_h) == before
 
 
-def test_permission_wall(client: httpx.Client, sz) -> None:
-    """无角色账号（学员）在导入管道上一律 403 —— 包括只读接口。"""
-    u = fresh_user(client, nickname="无角色")
-    h = auth(u["access_token"])
+def test_permission_wall(client: httpx.Client, admin_h, sz) -> None:
+    """**有管理端身份、但没有 `question:*` 权限** 的账号在导入管道上一律 `40301` —— 包括只读接口。
+
+    ★ 2026-09-27 改：原来用"没角色的学员"，现在用 **`operator`**。理由与会话墙的顺序有关
+      （详见 `test_admin_v4.test_question_permission_wall` 与 `docs/24` §9.3）：
+      没角色的账号先撞 `40306`（会话墙），**走不到 `40301`** —— 那等于把这道守卫拆了。
+      `operator` 的权限集 = content / stats / user ⇒ **不含** `question` ⇒ 正是要的账号。
+    """
+    u = fresh_user(client, nickname="无导入权限")
+    assert assign_roles(client, admin_h, u["user"]["id"], ["operator"])["code"] == 0
+    h = relogin(client, u)
 
     assert body(client.get(f"{API}/admin/imports", headers=h))["code"] == 40301
     assert upload(client, h, csv_bytes([row()]), name="t.csv")["code"] == 40301

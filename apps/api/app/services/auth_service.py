@@ -20,7 +20,14 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.errors import bad_request, conflict, forbidden, too_many, unauthorized
+from app.core.errors import (
+    admin_session_required,
+    bad_request,
+    conflict,
+    forbidden,
+    too_many,
+    unauthorized,
+)
 from app.core.idgen import next_id, to_inet
 from app.core.security import (
     create_access_token,
@@ -79,6 +86,22 @@ def _assert_usable(user: User) -> None:
         raise forbidden("账号已被锁定，请联系客服", 40305)
     if user.status == "deleted":
         raise unauthorized("账号不存在或已注销", 40104)
+
+
+async def _assert_platform_allowed(db: AsyncSession, user: User, platform: str | None) -> None:
+    """`platform='pc'` 是**申请**管理端会话 —— 服务端必须审，且**不静默降级**（§6.5.2 修正②）。
+
+    ★ 为什么不能"你传 `pc` 就给你 `pc`"：`platform` 是**客户端申报**的 ——
+      不审的话，C 端客户端自己传一个 `"pc"` 就把整道管理端墙绕过去了。
+    ★ 为什么**不静默降级为 `h5`**：降级之后用户看到的是"我登进来了，但什么都点不了"
+      （每个 `/admin/*` 都回 `40306`）—— 那是个**查不出原因**的症状。
+      宁可当场拒绝并说清"该账号不是管理端账号"，让人知道**该从哪个入口登录**。
+    """
+    if (platform or rbac_service.PLATFORM_H5) != rbac_service.PLATFORM_PC:
+        return
+    codes = await _user_role_codes(db, user.id)
+    if not rbac_service.is_admin_platform_role(codes):
+        raise admin_session_required("该账号不是管理端账号，无法登录管理后台 —— 请用 C 端入口登录")
 
 
 async def _issue_tokens(
@@ -278,6 +301,7 @@ async def login_by_password(
 
     _assert_usable(user)
     await redis.delete(FAIL_KEY.format(phone=payload.phone))
+    await _assert_platform_allowed(db, user, payload.platform)
 
     tokens = await _issue_tokens(
         db,
@@ -334,6 +358,7 @@ async def login_by_sms(
         )
 
     _assert_usable(user)
+    await _assert_platform_allowed(db, user, payload.platform)
     tokens = await _issue_tokens(
         db,
         user=user,

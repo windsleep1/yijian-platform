@@ -19,15 +19,16 @@ from typing import Annotated, Callable
 
 import redis.asyncio as aioredis
 from fastapi import Depends, Header, Query, Request
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import forbidden, too_many, unauthorized
+from app.core.errors import admin_session_required, forbidden, too_many, unauthorized
 from app.core.response import now_ms
 from app.core.security import decode_token
 from app.db.base import get_db, get_redis
-from app.db.models import User
+from app.db.models import User, UserSession
 from app.services import rbac_service
-from app.services.rbac_service import Privileges
+from app.services.rbac_service import PLATFORM_H5, PLATFORM_PC, Privileges
 
 logger = logging.getLogger("app.deps")
 
@@ -63,6 +64,10 @@ class CurrentUser:
     privileges: Privileges
     session_id: int | None = None
     jti: str | None = None
+    #: 会话通道（`user_sessions.platform`）：`'pc'` = 管理端、`'h5'` = C 端（默认）。
+    #: ⚠️ 在 `current_user` 里**查一次就带出来** —— 让 `/admin/*` 的会话墙直接读，
+    #:    而不是自己再查一遍（**两处查询 = 两份真相**，一处改了另一处容易忘）。
+    platform: str | None = None
 
     @property
     def id(self) -> int:
@@ -114,8 +119,43 @@ async def current_user(
     if user.status in ("disabled", "locked"):
         raise unauthorized("账号状态异常，请联系客服", 40305)
 
+    # ---- ★ 会话墙（BL-13 / `docs/22` §6.5.4）：**token 有效 ≠ 会话有效** ----
+    # 在此之前 `current_user` **从不读 `user_sessions` 行** ⇒ 登出 / 撤销会话之后，
+    # access token 仍然有效到自然过期（最长一整个 access TTL）。
+    # ⚠️ 放在 `current_user` 里、而不是只加在 `/admin/*`：**一处实现、两个诉求** ——
+    #    C 端从一开始就有"登出即时生效"，不用等将来"改 C 端登录接口 + 迁移已有会话"。
+    # ⚠️ 成本：每个需登录请求多一次**按主键**的 SELECT（代价可控；
+    #    将来若真成热点，正解是**加缓存**，而不是去掉这道校验）。
+    #
+    # ★ **无 `sid` 的令牌仍然放行**（有意为之，不是漏判）：
+    #   `create_access_token` 的签名**强制** `session_id: int` ⇒ 服务端签发的令牌必然带 `sid`；
+    #   能造出"无 sid 令牌"的只有**测试**（拿不到 `JWT_SECRET` 的人签不出来）。
+    #   ⇒ 容忍它**不削弱**这道墙，却保住了 `tests/test_auth_session.py` 里那条
+    #     "无 sid 令牌"边界用例的既有语义。
+    #   ⚠️ **触发条件**：哪天出现"服务端签发的、合法但无 sid 的令牌类型"（如服务间令牌）
+    #     ⇒ 那时必须改成**拒绝**，否则那类令牌会绕过整道墙。
+    platform: str | None = None
+    if session_id is not None:
+        sess = await db.scalar(
+            select(UserSession).where(
+                UserSession.id == session_id,
+                UserSession.user_id == user_id,
+                UserSession.revoked_at.is_(None),
+                UserSession.expires_at > func.now(),
+            )
+        )
+        if sess is None:
+            raise unauthorized("登录已失效，请重新登录", 40105)
+        platform = sess.platform
+
     priv = await rbac_service.get_privileges(db, user_id, redis)
-    return CurrentUser(user=user, privileges=priv, session_id=session_id, jti=payload.get("jti"))
+    return CurrentUser(
+        user=user,
+        privileges=priv,
+        session_id=session_id,
+        jti=payload.get("jti"),
+        platform=platform,
+    )
 
 
 CurrentUserDep = Annotated[CurrentUser, Depends(current_user)]
@@ -138,6 +178,30 @@ def require_permission(*codes: str, require_all: bool = False) -> Callable:
         return me
 
     return _checker
+
+
+def require_admin_session(me: CurrentUserDep) -> CurrentUser:
+    """`/admin/*` 的门：**在会话墙之上再加一层"这是管理端会话"**（`docs/22` §6.5）。
+
+    ★ 为什么必须有它：**权限码是"能力"，`/admin/*` 要的是"身份"** ——
+      "这是管理端会话"不能由"你恰好有某个权限码"推出来。
+      判据（保留）：*把一个纯 C 端账号授上 `question:read`，它还能不能读后台？*
+      在这道墙之前，答案是"**能**"。
+
+    ★ 通道是 `user_sessions.platform`（`'pc'`），**不是** Redis、也**不是**额外 header：
+      会话本来就在 PG 里，token 里也已带了它的主键（`sid`）—— 再存一份 = **两份真相**
+      （还要同步 TTL）；多带一个 header 只是多一个"两边不一致"的故障模式。
+
+    ⚠️ **这里判的不是权限码**：`platform` 是**客户端申报**的，所以"申请"那一步已经在登录时
+      用**角色白名单**审过（`rbac_service.ADMIN_PLATFORM_ROLES`）；
+      到这里只需要看这个会话**是不是**管理端会话。
+
+    ⚠️ 挂载方式：`api/router.py` 里以 **router 级依赖**挂给 9 个 `admin_*.router` ——
+      **一处挂**（不会漏），而不是在几十个路由上各写一遍。
+    """
+    if (me.platform or PLATFORM_H5) != PLATFORM_PC:
+        raise admin_session_required()
+    return me
 
 
 def rate_limit(

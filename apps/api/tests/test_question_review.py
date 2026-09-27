@@ -24,7 +24,7 @@ import uuid
 import httpx
 import pytest
 
-from .conftest import API, assign_roles, auth, body, fresh_user, register, sql_fetch
+from .conftest import API, assign_roles, body, fresh_user, relogin, sql_fetch
 
 
 # ================================================================ 工具
@@ -335,7 +335,7 @@ def test_reviewer_is_queryable_through_the_api(
     reviewer = fresh_user(client, nickname="审核员甲")
     ar = assign_roles(client, admin_h, reviewer["user"]["id"], ["researcher"])
     assert ar["code"] == 0, ar
-    rh = auth(reviewer["access_token"])
+    rh = relogin(client, reviewer)  # ★ 授了 researcher ⇒ 重新登录拿管理端会话（§6.5.6）
 
     b = _review(client, rh, qid, decision="approve", version=v, comment="由审核员甲通过")
     assert b["code"] == 0, b
@@ -409,18 +409,23 @@ def test_version_history_has_no_gap(client: httpx.Client, admin_h: dict[str, str
 
 
 def test_permission_wall(client: httpx.Client, admin_h: dict[str, str], sz) -> None:
-    """`student` 没有任何 `question:*` 权限 → 两个新入口与旧的 PUT 一样被拦（`40301`）。
+    """**有管理端身份、但没有 `question:*` 权限** → 两个新入口与旧的 PUT 一样被拦（`40301`）。
 
     ⚠️ 这**测不出**"有编辑权但没有审核权"的分界 —— 种子里的角色是按 module 整包发的，
     `admin` / `researcher` 都有 `question:publish`。该限制与 `db/schema.sql` 里
     `viewer` 那段注释记的是同一件事（`docs/21` BL-08）。
+
+    ★ 2026-09-27：改用 **`operator`**（原来用没角色的 student）。理由同上一条用例 ——
+      会话墙在权限墙之前（`docs/24` §9.3），没角色的账号先撞 `40306` 就测不到 `40301` 了。
+      `operator` 的权限集 = content / stats / user ⇒ **不含 `question`**。
     """
     sid, chap = sz
     q = _mk(client, admin_h, sid=sid, chap=chap)
     qid = int(q["id"])
 
-    stu = register(client, nickname="审核越权用例")
-    h = auth(stu["access_token"])
+    stu = fresh_user(client, nickname="审核越权用例")
+    assert assign_roles(client, admin_h, stu["user"]["id"], ["operator"])["code"] == 0
+    h = relogin(client, stu)
 
     assert (
         body(
