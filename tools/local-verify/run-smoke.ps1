@@ -1,8 +1,10 @@
-﻿# 一键本地验收：起 PostgreSQL → 建库 → 载入 schema → 起 API → 跑 pytest → 收尾。
-# 不需要 Docker。各步骤幂等，可重复执行。
+﻿# 一键本地验收：起 PostgreSQL → **一次性库**（建库 + schema + 迁移）→ 起 API → 跑 pytest → 销毁库。
+# 不需要 Docker。★ 默认每次跑在**全新库**上 —— 数据状态与 CI 可比（BL-17 / docs/21 §4.13）。
 #
 #   powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1
 #   powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepRunning
+#   powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -KeepDb        # 留着一性库排查
+#   powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -DbName yijian # 跑在累积的开发库上
 #
 # 若自动挑选的 Python 解释器不对，可显式指定：
 #   ... -Python "C:\path\to\python.exe"
@@ -14,8 +16,15 @@ param(
     [int]   $Port    = 55432,
     [int]   $ApiPort = 8123,
     [string]$Python  = "python",
-    [string]$DbName  = "yijian",
+    # ⚠️ 默认 **空 = 一次性临时库**（`yijian_smoke_<pid>`，跑完销毁）—— BL-17 / `docs/21` §4.13。
+    #    为什么默认必须是一次性：本地开发库 `yijian` **跨会话累积**，覆盖率会被历史数据抬高
+    #    （2026-09-27 实测差 2 行，`import_service.py:1427-1428`），与 CI 的"全新库"**不可比**。
+    #    一个"会忘的 `-Fresh` 开关"救不了这件事 —— **默认行为就该是与 CI 可比**。
+    #    要跑在累积的开发库上（故意为之的调试）：显式 `-DbName yijian`。
+    [string]$DbName  = "",
     [string]$DbUser  = "yijian",
+    # 想跑完留着一性库、事后连上去看看？加这个开关（此时不销毁）。
+    [switch]$KeepDb,
     # 覆盖率门槛**不在本文件里写数字** —— 单一来源是仓库根 `.coveragerc` 的 `fail_under`，
     # `coverage report` 会自己按它判退出码。这里只负责"跑报告 + 看退出码"。
     [switch]$NoCoverage,
@@ -32,80 +41,34 @@ $psql = Join-Path $bin "psql.exe"
 $env:PGCLIENTENCODING = "UTF8"
 
 $apiProc = $null
+# 本次是否跑在**自己建的一次性库**上（§2 里置位）—— finally 据此决定要不要销毁。
+# 在这里初始化而不是在 §2：§2 之前若就 Fail，finally 仍会读它。
+$ephemeral = $false
 
 function Fail($msg) {
     Write-Host "[local-verify] 失败：$msg" -ForegroundColor Red
     exit 1
 }
 
-function Invoke-Psql {
-    param([string[]]$PsqlArgs, [switch]$Quiet)
-    $out = & $psql -h 127.0.0.1 -p $Port -U $DbUser @PsqlArgs 2>&1
-    $rc  = $LASTEXITCODE
-    $text = ($out | Out-String).Trim()
-    if ($rc -ne 0 -and -not $Quiet) {
-        Write-Host "[local-verify] psql 输出："
-        Write-Host $text
-    }
-    return [pscustomobject]@{ Text = $text; ExitCode = $rc }
-}
+# 注：原先这里有个 `Invoke-Psql` 包装函数。建库/建表/迁移委托给 `smoke-db.py` 之后，
+# 它**没有任何调用点**了 ⇒ 2026-09-27 删除。留着它就是留一个"偷偷建库的第二入口"，
+# 与本批"逻辑只能有一份"的原则直接冲突（BL-17）。
+# 仍需 psql 时：`& $psql -h 127.0.0.1 -p $Port -U $DbUser -d <db> -tAc "<sql>"`。
 
 try {
     # ---------- 1. PostgreSQL ----------
     & (Join-Path $here "start-pg.ps1") -Prefix $Prefix -DataDir $DataDir -Port $Port -DbUser $DbUser
     if ($LASTEXITCODE -ne 0) { Fail "PostgreSQL 启动失败" }
 
-    # ---------- 2. 建库（幂等）----------
-    $r = Invoke-Psql -PsqlArgs @("-d", "postgres", "-tAc",
-        "SELECT 1 FROM pg_database WHERE datname='$DbName'")
-    if ($r.Text.Trim() -ne "1") {
-        Write-Host "[local-verify] 创建数据库 $DbName ..."
-        $c = Invoke-Psql -PsqlArgs @("-d", "postgres", "-q", "-c", "CREATE DATABASE $DbName")
-        if ($c.ExitCode -ne 0) { Fail "创建数据库 $DbName 失败" }
-    } else {
-        Write-Host "[local-verify] 数据库 $DbName 已存在"
-    }
-
-    # ---------- 3. 建表（幂等）----------
-    $r = Invoke-Psql -PsqlArgs @("-d", $DbName, "-tAc", "SELECT to_regclass('public.users')")
-    if ([string]::IsNullOrWhiteSpace($r.Text)) {
-        Write-Host "[local-verify] 载入 db/schema.sql ..."
-        $schema = Join-Path $repo "db\schema.sql"
-        if (-not (Test-Path $schema)) { Fail "找不到 $schema" }
-        $s = Invoke-Psql -PsqlArgs @("-d", $DbName, "-q", "-v", "ON_ERROR_STOP=1", "-f", $schema)
-        if ($s.ExitCode -ne 0) { Fail "schema.sql 执行失败" }
-        $n = Invoke-Psql -PsqlArgs @("-d", $DbName, "-tAc",
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")
-        Write-Host "[local-verify] 建表完成，public 下 $($n.Text) 张表"
-    } else {
-        Write-Host "[local-verify] 表已存在，跳过建表"
-    }
-
-    # ---------- 3.5 迁移（幂等，按文件名排序）----------
-    # ⚠️ 为什么必须有这一步：schema.sql **只在首次建库时**载入（上面那个 to_regclass 判断），
-    #    库已存在时整段跳过。所以任何"加列 / 回填 / 补种子权限"如果只改 schema.sql，
-    #    对已有数据的库**永远不生效** —— 表现为"新代码读一个不存在的列"。
-    #    所有迁移脚本必须自身幂等（ADD COLUMN IF NOT EXISTS / ON CONFLICT DO NOTHING），
-    #    这样才能无条件重跑。
-    $migDir = Join-Path $repo "db\migrations"
-    if (Test-Path $migDir) {
-        $migs = @(Get-ChildItem -Path $migDir -Filter *.sql | Sort-Object Name)
-        if ($migs.Count -gt 0) {
-            Write-Host "[local-verify] 应用 $($migs.Count) 个迁移脚本 ..."
-            foreach ($m in $migs) {
-                $mr = Invoke-Psql -PsqlArgs @("-d", $DbName, "-q", "-v", "ON_ERROR_STOP=1", "-f", $m.FullName)
-                if ($mr.ExitCode -ne 0) { Fail "迁移 $($m.Name) 执行失败" }
-                Write-Host "[local-verify]   ✓ $($m.Name)"
-            }
-        }
-    }
-
-    # ---------- 4. 选一个「真的装了依赖」的 Python ----------
+    # ---------- 1.5 选一个「真的装了依赖」的 Python ----------
     # 教训：PATH 上的 `python` 很可能是 Anaconda 之类，未必有 fastapi/asyncpg/fakeredis。
     # 这里按优先级逐个探测，第一个能 import 全部依赖的才用。
     # ⚠️ `greenlet` 必须在列：`.coveragerc` 的 `[run] concurrency = greenlet` 依赖它。
     #    它是 `sqlalchemy[asyncio]` 的传递依赖（本地"碰巧装了"≠ CI 装得到），
     #    所以在这里显式声明为前置条件 —— 缺了要**当场报错**，而不是等覆盖率先跑出个错数字。
+    #
+    # ⚠️ 2026-09-27 上移：这一段原先排在"建库/建表/迁移"之后，但那段现在委托给
+    #    `smoke-db.py`（BL-17），而**调 Python 工具必须先有解释器** ⇒ 探测必须最先做。
     $probe = "import fastapi, sqlalchemy, asyncpg, fakeredis, uvicorn, pytest, httpx, coverage, greenlet"
     $cands = New-Object System.Collections.Generic.List[string]
     if ($Python -and $Python -ne "python") { $cands.Add($Python) }
@@ -128,6 +91,34 @@ try {
         Fail "未找到满足依赖的 Python（需 fastapi/sqlalchemy/asyncpg/fakeredis/uvicorn/pytest/httpx/coverage/greenlet）。可用 -Python <绝对路径> 指定，或先在目标解释器执行： pip install -r apps/api/requirements.txt"
     }
     Write-Host "[local-verify] 使用 Python: $pyExe"
+
+    # ---------- 2. 库：默认**一次性**（BL-17）----------
+    # 为什么整段换成调 `smoke-db.py`，而不是继续在这里用 psql 写：
+    #   ① **逻辑只能有一份** —— 同一个「建库 + schema + migrations」若 PS 写一份、
+    #      另一处再写一份，迟早漂（本文件「题库种子」那段已立过同一条规矩：两边各写一套
+    #      就又回到"本地绿、CI 红"的口径分歧）；
+    #   ② 一次性库必须带**安全闸**（拒绝误删开发库）与**自检**，而这两样都要落成
+    #      可执行代码才好被验证（`smoke-db.py --self-test`，硬约定 H/J）。
+    # ⚠️ 仍然必须载入 db/migrations/：schema.sql **只在首次建库时**载入，之后的
+    #    「加列 / 回填 / 补种子权限」全靠迁移；只改 schema.sql 对已有库**永远不生效**
+    #    （表现为"新代码读一个不存在的列"）。所有迁移脚本自身幂等，可无条件重跑。
+    if (-not $DbName) {
+        # 名字由 smoke-db.py 生成（`yijian_smoke_<pid>`）——单一来源，前缀可 grep。
+        $DbName = (& $pyExe (Join-Path $here "smoke-db.py") name).Trim()
+        $ephemeral = $true
+        Write-Host "[local-verify] 一次性库：$DbName（跑完销毁；要保留请加 -KeepDb）"
+    } else {
+        Write-Host "[local-verify] 注意：显式指定 -DbName $DbName ⇒ 不销毁，且该库可能**跨会话累积** —— 与 CI 的干净基线不可比"
+    }
+    & $pyExe (Join-Path $here "smoke-db.py") provision `
+        --psql $psql --port $Port --user $DbUser --db $DbName --repo $repo
+    if ($LASTEXITCODE -ne 0) { Fail "建库 / 建表 / 迁移失败（smoke-db.py provision --db $DbName）" }
+    Write-Host "[local-verify] 建库完成（schema.sql + migrations）"
+
+    # 注：原先这里还有「第 3 步（建表）」「第 3.5 步（迁移）」「第 4 步（选 Python）」——
+    #     ① 建表 / 迁移已并入 §2 的 `smoke-db.py provision`（同一件事**逻辑只留一份**）；
+    #     ② 选 Python 已上移到 §1.5（调 Python 工具必须先有解释器）。
+    #     ⇒ 编号跳过 3 / 4 **不是遗漏**，是这两段被合并/上移了。
 
     # ---------- 4.2 题库种子（生成 + 灌库）----------
     # ⚠️ 为什么必须有这一步（坑 51）：`db/schema.sql` 只灌 subjects / chapters / RBAC，
@@ -405,6 +396,24 @@ finally {
     if ($apiProc -and -not $apiProc.HasExited) {
         Stop-Process -Id $apiProc.Id -Force -ErrorAction SilentlyContinue
         Write-Host "[local-verify] API 已停止"
+    }
+    # ---------- 销毁一次性库（BL-17）----------
+    # ⚠️ 顺序：**API 停掉之后**再 DROP —— DROP DATABASE 要求"没有活动连接"；虽然
+    #    smoke-db.py 会先 pg_terminate_backend，让连接自己散干净更省事。
+    # ⚠️ **只在本次是自己建的一次性库时才删**。显式 `-DbName` 传进来的库（比如开发库
+    #    `yijian`）绝不在这里碰 —— `smoke-db.py` 的 `assert_smoke_db` 是第二道闸
+    #    （名字不匹配 `yijian_smoke_*` 即拒绝，硬约定 O）。
+    if ($ephemeral) {
+        if ($KeepDb) {
+            Write-Host "[local-verify] 按 -KeepDb 保留一次性库 $DbName（记得手动清理）" -ForegroundColor Yellow
+        } elseif ($pyExe) {
+            & $pyExe (Join-Path $here "smoke-db.py") drop --psql $psql --port $Port --user $DbUser --db $DbName
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "[local-verify] 已销毁一次性库 $DbName"
+            } else {
+                Write-Host "[local-verify] ⚠️ 销毁一次性库 $DbName 失败 —— 下次 provision 会先收掉它（同名残留保护）" -ForegroundColor Yellow
+            }
+        }
     }
     if (-not $KeepRunning) {
         & (Join-Path $here "stop-pg.ps1") -Prefix $Prefix -DataDir $DataDir -Port $Port

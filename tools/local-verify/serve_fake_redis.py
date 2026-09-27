@@ -28,6 +28,7 @@ base_url 来自 `AI_BASE`）。所以业务代码**全部执行在这个进程�
 正常走到 `cov.stop()/cov.save()`。**不用信号**：Windows 上给别的进程发不了 SIGTERM，
 而 `signal` 处理器只在 main 线程生效，加进去反而多一层平台差异。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -91,8 +92,16 @@ def main() -> None:
         cov.start()
 
     # 这些必须在 import app.* 之前设置好。
-    os.environ["DATABASE_URL"] = (
-        f"postgresql+asyncpg://yijian@127.0.0.1:{args.pg_port}/yijian"
+    #
+    # ⚠️ 这里**曾经是强制赋值、且库名硬编码 `yijian`**：
+    #       os.environ["DATABASE_URL"] = f"postgresql+asyncpg://yijian@127.0.0.1:{port}/yijian"
+    #    在 CI 上库名**恰好就是** `yijian` ⇒ 覆盖后毫无变化 ⇒ **这个硬编码永远看不出来**。
+    #    但本机一旦跑"一次性库"（`yijian_smoke_<pid>`，BL-17），API 就被**静默指向累积库**：
+    #    测试的数据"写进 A、却去 B 里查" ⇒ 2026-09-27 一次性 29 条用例失败。
+    #    ⇒ 改成 `setdefault`：**调用方给了就用调用方的**，只有完全没给时才兜底。
+    #    顺带修好 `run-smoke.ps1 -DbName <别的库>` —— 以前那个参数对 API 进程**根本无效**。
+    os.environ.setdefault(
+        "DATABASE_URL", f"postgresql+asyncpg://yijian@127.0.0.1:{args.pg_port}/yijian"
     )
     os.environ["APP_ENV"] = os.environ.get("APP_ENV", "local")
     os.environ.setdefault("JWT_SECRET", "local-verify-secret-not-for-production")
@@ -117,9 +126,7 @@ def main() -> None:
     log_config = {
         "version": 1,
         "disable_existing_loggers": False,
-        "formatters": {
-            "default": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"}
-        },
+        "formatters": {"default": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"}},
         "handlers": {
             "file": {
                 "class": "logging.FileHandler",
