@@ -1,0 +1,36 @@
+{
+  "name": "yijian-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "一建通 · C 端（移动端优先）v0.1 —— P1 骨架 + 登录闭环",
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "// format:check:shared": "共享包 packages/api-core 与 tools/ 下的检查脚本在 apps/web **之外**，`prettier --check .` 覆盖不到 —— 不补这一条，它们就是**没有任何格式门禁**的盲区（硬约定 H：没覆盖 ≠ 能过）。与 apps/admin 同款。",
+    "format:check:shared": "prettier --check --config ./prettier.config.mjs ../../packages/api-core ../../tools/local-verify/check-auth-chain.mjs"
+  },
+  "dependencies": {
+    "next": "14.2.18",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.11",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "postcss": "^8.4.47",
+    "prettier": "^3.3.0",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3"
+  }
+}

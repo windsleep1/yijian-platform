@@ -1,0 +1,44 @@
+# Prettier 忽略清单 —— 门禁整顿第二步（Commit B）
+#
+# 只列"**不该被格式化**"的东西，每条都写理由（否则下一个人不知道该不该往这里加）。
+
+# ---- 依赖与构建产物 ----
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# ---- 锁文件 ----
+# npm 自己生成、自己维护格式，prettier 改它只会让 `npm ci` 的校验和 diff 都变味。
+package-lock.json
+
+# ---- Next 自动生成 ----
+next-env.d.ts
+
+# ---- ⚠️ Markdown 与截图：**刻意不格式化** ----
+#
+# 1. `docs/` 下是**手写文档**（`B端联调坑.md`、各批验收记录）。它们的换行是**刻意的**：
+#    表格靠手工对齐、列表项按语义断行、代码块里的输出是原样抄的。
+#    prettier 会重排这些排版，产出几百行"无信息量的 diff"，
+#    而格式化文档**不带来任何工程收益**（没有编译器/运行时读它）。
+# 2. `screenshots/` 是二进制图片 + README 索引，同上。
+# 3. `README.md` 里有大量手工对齐的目录树与表格。
+#
+# 所以本仓的 prettier 只管**代码与配置**：ts / tsx / js / mjs / json / css。
+# （`apps/admin/README.md` 是文档，同此列被忽略。）
+*.md
+docs/
+screenshots/
+
+# ---- 非文本 ----
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.webp
+*.woff
+*.woff2
+*.ttf

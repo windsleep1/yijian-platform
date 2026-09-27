@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * C 端的语义色变量（`tailwind.config.ts` 里的 `hsl(var(--x))` 指向这里）。
+ *
+ * 为什么走 CSS 变量而不是把颜色写进 tw 配置：**将来要做主题/暗色时只改这里**，
+ * 不用满仓改 class。首批不做暗色（配置里刻意没开 `darkMode`），
+ * 但把通道留好 —— 成本是这几行，收益是以后不用全局搜替。
+ *
+ * ⚠️ 值用 **H S% L%** 三段式（不带 `hsl()`）：Tailwind 的透明度修饰符
+ * （`bg-ink/50`）需要它能拼进 `hsl(H S L / 0.5)`，写成 `hsl(...)` 会拼坏。
+ */
+:root {
+  --ink: 222 22% 12%; /* 正文 */
+  --sub: 220 9% 46%; /* 次要文字 */
+  --line: 220 13% 91%; /* 分隔线/边框 */
+  --brand: 222 82% 52%; /* 品牌色 */
+  --brand-fg: 0 0% 100%; /* 品牌色上的文字 */
+  --danger: 0 72% 51%;
+  --bg: 0 0% 100%;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: hsl(var(--bg));
+  color: hsl(var(--ink));
+  /* ⚠️ 移动端：禁止横向滚动 —— 一个元素超宽就把整页推出可视区，
+     在手机上表现为"页面能左右滑"（比桌面端难察觉得多）。 */
+  overflow-x: hidden;
+}
