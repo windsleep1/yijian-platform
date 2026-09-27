@@ -54,6 +54,10 @@ PG_USER = "yijian"
 SMOKE_DB = HERE / "smoke-db.py"
 SMOKE_PREFIX = "yijian_smoke_"
 
+#: 本地门禁预检（`tools/preflight.sh`）—— **静态检查那 4 道**，不碰数据库。
+#: 跑在起 PG 之前：这几道几十秒就能出结论，**没必要先花 3 分钟建库再发现 ruff 红了**。
+PREFLIGHT = REPO_DEFAULT / "tools" / "preflight.sh"
+
 
 def say(msg: str) -> None:
     print(f"[pipe] {msg}", flush=True)
@@ -85,6 +89,26 @@ def run(cmd: list[str], cwd: Path, env: dict[str, str], label: str, timeout: int
     r = subprocess.run(cmd, cwd=str(cwd), env=env, timeout=timeout, check=False)
     say(f"  -> exit={r.returncode}")
     return r.returncode
+
+
+def preflight(p: Pipeline) -> None:
+    """本地门禁预检（`tools/preflight.sh`）：4 道静态门禁，**跑在起 PG 之前**。
+
+    ★ 为什么放最前：这几道**几十秒**就出结论 —— 没必要先花三分钟建库、
+      再发现 ruff 红了。fail-fast 省的是"一次建库 + 一次全量 pytest"。
+
+    ⚠️ 它需要 `bash`（那 4 道里有两道是 bash harness）。**找不到 bash 时大声跳过、不静默**：
+      "跳过"是**少查了 4 道**，不是"查过了"—— 所以要把警告和手工命令都打出来
+      （硬约定 H 的同族：**没覆盖 ≠ 能过**）。
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        say("!! 找不到 bash ⇒ **跳过本地门禁预检（少查 4 道，不等于通过）**")
+        say("   装了 Git Bash 之后手工跑：bash tools/preflight.sh")
+        return
+    rc = run([bash, str(PREFLIGHT)], p.repo, p.env, "preflight（本地门禁 ①~④）")
+    if rc != 0:
+        raise SystemExit("本地门禁预检未通过 —— 先修这里，别往下跑（省一次建库）")
 
 
 class Pipeline:
@@ -494,10 +518,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--db", default="", help="显式库名（默认空 = 一次性库，跑完销毁）")
     ap.add_argument("--keep-db", action="store_true", help="不销毁一次性库")
     ap.add_argument("--no-pg-stop", action="store_true", help="不停 PostgreSQL（即使是我起的）")
+    ap.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="跳过本地门禁预检（tools/preflight.sh：诊断自检 / 不变量 / ruff ×2）",
+    )
     args = ap.parse_args(argv)
 
     p = Pipeline(args)
     try:
+        # ---- 第 0 步：本地门禁预检（fail-fast）----
+        # 本地共 6 道门禁：这里 4 道（静态）+ 下面 pytest/覆盖率 2 道。CI 另有 7 道前端。
+        # 明细与"差几道"见 `tools/preflight.sh` 的输出和 `docs/24` §10。
+        if not args.no_preflight:
+            preflight(p)
         p.start_pg()
         p.provision_db()
         p.clean_coverage()

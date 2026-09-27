@@ -56,6 +56,21 @@ function Fail($msg) {
 # 仍需 psql 时：`& $psql -h 127.0.0.1 -p $Port -U $DbUser -d <db> -tAc "<sql>"`。
 
 try {
+    # ---------- 0. 本地门禁预检（静态 4 道，fail-fast）----------
+    # 本地共 **6 道**门禁：这里 4 道（诊断自检 / 不变量 / ruff check / ruff format）
+    # + 后面的 pytest / 覆盖率 2 道。**CI 另有 7 道前端** —— 差几道、为什么差，
+    # 见 `tools/preflight.sh` 打印的覆盖矩阵与 `docs/24` §10。
+    # ⚠️ 它需要 bash（那 4 道里有两道是 bash harness）。找不到就**大声跳过**：
+    #    "跳过"是**少查了 4 道**，不是"查过了"（硬约定 H 的同族）。
+    $bashCmd = Get-Command bash -ErrorAction SilentlyContinue
+    if (-not $bashCmd) {
+        Write-Host "[local-verify] !! 找不到 bash ⇒ 跳过本地门禁预检（少查 4 道，不等于通过）"
+        Write-Host "[local-verify]    装了 Git Bash 之后手工跑：bash tools/preflight.sh"
+    } else {
+        & $bashCmd.Source (Join-Path $repo "tools/preflight.sh")
+        if ($LASTEXITCODE -ne 0) { Fail "本地门禁预检未通过 —— 先修这里，别往下跑" }
+    }
+
     # ---------- 1. PostgreSQL ----------
     & (Join-Path $here "start-pg.ps1") -Prefix $Prefix -DataDir $DataDir -Port $Port -DbUser $DbUser
     if ($LASTEXITCODE -ne 0) { Fail "PostgreSQL 启动失败" }
