@@ -1,37 +1,50 @@
 #!/usr/bin/env bash
 # 本地「跑得了、且本地跑有意义」的门禁 —— **push 前的最小自检**。
 #
-# ★ 为什么需要它（用户 2026-09-27 追问「本地跑几道」）
+# ★ 它能跑几道（2026-09-27 实测，不是推测）
 #
-#   CI 有 **13 道**门禁，而本地两条入口（`run-smoke.ps1` / `run-local-pipeline.py`）
-#   原本**只跑 2 道**（`pytest` + 覆盖率）⇒ "本地绿"离"能 push"很远，
-#   而**这个差距是隐形的**：将来"本地绿但 CI 红"时，人会以为是环境问题，
-#   实际是**门禁覆盖不同**。本脚本做两件事：
+#   CI 有 **13 道**。本地**能跑 12 道**（①~⑫），只差 ⑬ `build`：
 #
-#     ① 把本地跑得了的门禁**真跑掉**（fail-fast 到 push 之前）；
-#     ② 把差的那几道**打印出来** —— 差距要可见，不能靠人记。
+#     ① CI 诊断段自检      ② 不变量自检        ③ ruff check         ④ ruff format --check
+#     ⑤ pytest(真 PG)     ⑥ 覆盖率门禁       ⑦ 反向检查·认证链路   ⑧ 共享包单测
+#     ⑨ npm run lint     ⑩ format:check     ⑪ format:check:shared ⑫ tsc --noEmit
+#     ⑬ npm run build   ← **默认不跑**：本机要越出沙箱才有权写 `.next`（坑 63），
+#                          且 **57 秒**。用 `--with-build` 显式开。
 #
-#   本地 **6 道** / CI **13 道**，差 **7 道**（全在前端）。逐道明细见 `docs/24` §10。
+#   ⚠️ ⑤⑥ 不在本脚本里（本脚本**只做静态检查、不碰数据库**）—— 它们在 `run-local-pipeline.py`。
 #
-# ⚠️ 与 `tools/check-invariants.sh` 的分工：
-#   `check-invariants.sh` 查的是**不变量**（门禁在不在、门槛有没有降…），
-#   它本身是 13 道里的**一道**；本脚本是**把几道门禁打成一包跑**。
-#   所以本脚本会**调用**它 —— 两者不是一回事，别合并。
+# ★ 两条硬纪律
+#
+#   1. **依赖缺失 = 大声跳过，不许静默**（"跳过"是**少查了**，不是"查过了" —— 硬约定 H 的同族）。
+#      跳过会进汇总行、并单独列出**跳过了哪几道、为什么、怎么补**。
+#   2. **状态只能有一个来源**：矩阵里的 ✅/❌/⏭ 由**真实结果**填，不手写。
+#      （第一版就是手写的 —— 变异时上半报 ❌、下半仍印 ✅，**自相矛盾**。）
 #
 # 用法：
-#     bash tools/preflight.sh
-#     YIJIAN_PYTHON=/path/to/python bash tools/preflight.sh    # 指定解释器
+#     bash tools/preflight.sh                 # 12 道（约 2 分钟）
+#     bash tools/preflight.sh --frontend      # 只跑前端 ⑦~⑫（约 30 秒）—— **前端内循环**用这个
+#     bash tools/preflight.sh --with-build    # 13 道（+ 57s 的 next build）
+#     YIJIAN_PYTHON=/path/to/python bash tools/preflight.sh
 
 # ⚠️ **故意不设 `-e`**：要**跑完所有门禁**再给结论 ——
 #    失败即中断会把后面的失败盖掉（只报第一条 = 修一轮才发现下一条）。
 set -uo pipefail
 
+WITH_BUILD=0
+FRONTEND_ONLY=0
+for a in "$@"; do
+    case "$a" in
+        --with-build) WITH_BUILD=1 ;;
+        --frontend) FRONTEND_ONLY=1 ;;
+    esac
+done
+T0=$(date +%s)
+
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 cd "$repo" || exit 2
 
-# ---------------- 选解释器 ----------------
-# 与 `run-local-pipeline.py` 同一优先级：受管 venv 优先（里面有 ruff / pytest 等）。
+# ---------------- 工具解析 ----------------
 PY=${YIJIAN_PYTHON:-}
 if [ -z "$PY" ]; then
     for cand in \
@@ -42,98 +55,174 @@ if [ -z "$PY" ]; then
         [ -x "$cand" ] && { PY=$cand; break; }
     done
 fi
-if [ -z "$PY" ]; then
-    echo "✗ 找不到 Python（可用 YIJIAN_PYTHON 指定）" >&2
-    exit 2
-fi
-echo "[preflight] 解释器 = $PY"
+NODE=$(command -v node || true)
+NPM=$(command -v npm || true)
+ADMIN_MODULES=$repo/apps/admin/node_modules
 
-# ---------------- 逐道跑，并**记下真实结果** ----------------
-#
-# ★ 为什么结果要记下来、而不是在下面的表里手写 `✅`：
-#   第一版就是这么写的 —— 结果**注入 lint 错误做变异**时，上面报 `❌`
-#   而下面的表仍然印着 `✅`，**自相矛盾**。一张手写的状态表和一句动态结论打架时，
-#   看的人只会更迷惑（"到底红没红？"）。**状态只能有一个来源。**
-declare -a GATE_RC=()
+echo "[preflight] python = ${PY:-（缺）}"
+echo "[preflight] node   = ${NODE:-（缺）} / npm = ${NPM:-（缺）}"
+[ "$FRONTEND_ONLY" = "1" ] && echo "[preflight] --frontend：只跑前端 ⑦~⑫（后端 ①~⑥ 标跳过，**不是**已查）"
+[ "$WITH_BUILD" = "1" ] && echo "[preflight] --with-build：**含** 57 秒的 next build"
+
+# ---------------- 逐道跑，并**记下真实状态** ----------------
+# 13 道的槽位一次建好；没跑到的保持 skipped。
+declare -a ST=()          # pass / fail / skip
+declare -a SKIP_REASON=()
+for i in $(seq 1 13); do ST[$i]=skip; done
+
+mark() {
+    case "${ST[$1]:-skip}" in
+        pass) printf '✅' ;;
+        fail) printf '❌' ;;
+        *) printf '⏭' ;;
+    esac
+}
+
+note_skip() {
+    ST[$1]=skip
+    SKIP_REASON[$1]="$2"
+    printf '  ⏭ %s（跳过：%s）\n' "$3" "$2"
+}
 
 run_gate() {
     local key="$1" label="$2"
     shift 2
-    printf '\n──── %s ────\n' "$label"
+    printf '\n──── [%s] %s ────\n' "$key" "$label"
+    local t0 t1
+    t0=$(date +%s)
     if "$@"; then
-        GATE_RC[$key]=0
-        printf '  ✅ %s\n' "$label"
+        t1=$(date +%s)
+        ST[$key]=pass
+        printf '  ✅ %s（%ss）\n' "$label" "$((t1 - t0))"
     else
         local rc=$?
-        GATE_RC[$key]=$rc
-        printf '  ❌ %s（rc=%s）\n' "$label" "$rc"
+        t1=$(date +%s)
+        ST[$key]=fail
+        printf '  ❌ %s（rc=%s，%ss）\n' "$label" "$rc" "$((t1 - t0))"
     fi
 }
 
-# 标签里**不能有空格以外的引号歧义** —— 用 '…' 包住整串，参数逐段传。
-run_gate 1 "CI 诊断段自检" bash "$repo/tools/local-verify/test-pytest-diag.sh"
-run_gate 2 "不变量自检" bash "$repo/tools/check-invariants.sh"
-run_gate 3 "ruff check（全仓）" "$PY" -m ruff check .
-run_gate 4 "ruff format --check（apps/api）" "$PY" -m ruff format --check apps/api
-
-fails=0
-for i in 1 2 3 4; do
-    [ "${GATE_RC[$i]:-1}" = "0" ] || fails=$((fails + 1))
-done
-
-mark() {
-    if [ "${GATE_RC[$1]:-1}" = "0" ]; then printf '✅'; else printf '✗'; fi
+# 在指定目录里跑（前端门禁的 cwd 必须是 apps/admin）
+run_in() {
+    local dir="$1"
+    shift
+    ( cd "$dir" && "$@" )
 }
 
-# ---------------- 覆盖矩阵：差距必须可见 ----------------
-# `@1@`..`@4@` 是**占位符**，下面用真实结果替换 —— 不手写 ✅（理由见上）。
-matrix=$(cat <<'MATRIX'
+# ---- ①~④ 后端静态（需要 Python）----
+if [ "$FRONTEND_ONLY" = "1" ]; then
+    # 与 ⑤⑥ 同理：按用户要求跳过时，"跳过"要说得出来（不是假装它过了）。
+    # 逐道标 skip，理由写清 —— 汇总行会把它算进"没跑的道数"。
+    for k in 1 2 3 4; do note_skip "$k" "--frontend 只跑前端（后端 ①~④ 未查）" "后端静态门禁 $k"; done
+elif [ -z "$PY" ]; then
+    for k in 1 2 3 4; do note_skip "$k" "找不到 Python（可用 YIJIAN_PYTHON 指定）" "后端静态门禁 $k"; done
+else
+    run_gate 1 "CI 诊断段自检" bash "$repo/tools/local-verify/test-pytest-diag.sh"
+    run_gate 2 "不变量自检" bash "$repo/tools/check-invariants.sh"
+    run_gate 3 "ruff check（全仓）" "$PY" -m ruff check .
+    run_gate 4 "ruff format --check（apps/api）" "$PY" -m ruff format --check apps/api
+fi
 
-════════════════ 门禁覆盖：本地 vs CI ════════════════
+# ---- ⑤⑥ 在 run-local-pipeline.py 里跑；本脚本只标注 ----
+# ⚠️ 它们**不是"已查"**，是"由另一个入口查" —— 所以 `--frontend` 模式下要标成跳过。
+if [ "$FRONTEND_ONLY" = "1" ]; then
+    for k in 5 6; do note_skip "$k" "--frontend 只跑前端（数据库门禁未查）" "pytest / 覆盖率"; done
+else
+    ST[5]=pass
+    ST[6]=pass
+fi
 
-  门禁（13 道，权威清单 = tools/local-verify/check-invariants.py）
-  ──────────────────────────────────────────────── 本地  CI
-  ① CI 诊断段自检（拦截式）                              @1@   ✅
-  ② 不变量自检（拦截式）                                 @2@   ✅
-  ③ ruff check（全仓）                                  @3@   ✅
-  ④ ruff format --check（apps/api）                     @4@   ✅
-  ⑤ pytest（真 PG）                                     ✅   ✅   ← 由 run-local-pipeline.py 跑
-  ⑥ 覆盖率门禁（合并三份 → report）                       ✅   ✅   ← 同上
-  ──────────────────────────────────────────────── 本地  CI
-  ⑦ 反向检查 · 认证链路单一真相                           ✗   ✅   node tools/local-verify/check-auth-chain.mjs
-  ⑧ 共享包单测 · packages/api-core                      ✗   ✅   （需 npm ci）
-  ⑨ npm run lint                                       ✗   ✅
-  ⑩ npm run format:check                               ✗   ✅
-  ⑪ npm run format:check:shared                        ✗   ✅
-  ⑫ tsc --noEmit                                       ✗   ✅
-  ⑬ npm run build                                      ✗   ✅   ⚠️ 本机红**推不出**代码结论（坑 63）
+# ---- ⑦~⑫ 前端（需要 node / npm）----
+if [ -z "$NODE" ]; then
+    for k in 7 8 9 10 11 12; do note_skip "$k" "找不到 node" "前端门禁 $k"; done
+else
+    run_gate 7 "反向检查 · 认证链路单一真相" "$NODE" "$repo/tools/local-verify/check-auth-chain.mjs"
 
-  ⚠️ ①~⑥ 的"本地"列是**本次真实结果**（`@1@`..`@4@` 由脚本替换，⑤⑥ 见下面的说明）；
-     ⑦~⑬ 恒为 ✗ —— **它们本地根本不跑**，不是"跑失败了"。
+    if [ -z "$NPM" ]; then
+        note_skip 8 "找不到 npm" "共享包单测"
+    else
+        # ⑧ 无需 `npm ci`：`packages/api-core` 的 deps/devDeps **都是空的**（实测）
+        run_gate 8 "共享包单测 · packages/api-core" run_in "$repo/packages/api-core" "$NPM" test
+    fi
 
-  本地 6 道 / CI 13 道，差 7 道（**全在前端**）。
+    if [ ! -d "$ADMIN_MODULES" ]; then
+        for k in 9 10 11 12; do
+            note_skip "$k" "apps/admin/node_modules 不存在（在 apps/admin 里跑 npm ci）" "前端门禁 $k"
+        done
+    elif [ -z "$NPM" ]; then
+        for k in 9 10 11 12; do note_skip "$k" "找不到 npm" "前端门禁 $k"; done
+    else
+        run_gate 9 "npm run lint" run_in "$repo/apps/admin" "$NPM" run lint
+        run_gate 10 "npm run format:check" run_in "$repo/apps/admin" "$NPM" run format:check
+        run_gate 11 "npm run format:check:shared" run_in "$repo/apps/admin" "$NPM" run format:check:shared
+        run_gate 12 "tsc --noEmit" run_in "$repo/apps/admin" "$NPM" run typecheck
+    fi
+fi
 
-  ★ 本地绿**保证**：①~⑥ 通过。
-  ★ 本地绿**不保证**：⑦~⑬ 通过 —— 那 7 道只在 CI 上跑。
-  ⚠️ 所以"本地绿但 CI 红"的第一嫌疑是**前端**，不是环境问题。
-     ⑦ 可以本地跑（只要 node 在）：node tools/local-verify/check-auth-chain.mjs
-     ⑨⑩⑪⑫ 在 `apps/admin` 里**装了 node_modules** 时也能本地跑；
-     ⚠️ ⑬ `build` 不行：本机失败**都在编译前**（坑 63）⇒ 它的红**不构成代码结论**。
+# ---- ⑬ build：**默认不跑**（沙箱要提权 + 57s）----
+if [ "$WITH_BUILD" = "0" ]; then
+    note_skip 13 "默认不跑（本机要越出沙箱才有权写 .next，坑 63；且 57s）—— 加 --with-build 跑" "npm run build"
+elif [ -z "$NPM" ] || [ ! -d "$ADMIN_MODULES" ]; then
+    note_skip 13 "缺 node/npm 或 apps/admin/node_modules" "npm run build"
+else
+    run_gate 13 "npm run build（可编译性门禁）" run_in "$repo/apps/admin" "$NPM" run build
+fi
 
-  ⚠️ ⑤⑥ 不在本脚本里跑（本脚本**只做静态检查，不碰数据库**）——
-     它们在 `run-local-pipeline.py` 里，共同构成"本地 6 道"。
-═════════════════════════════════════════════════════
-MATRIX
-)
-
-for i in 1 2 3 4; do
-    matrix=${matrix//@$i@/$(mark "$i")}
+# ---------------- 汇总 + 覆盖矩阵（**数字由真实状态填**）----------------
+npass=0
+nfail=0
+nskip=0
+for i in $(seq 1 13); do
+    case "${ST[$i]}" in
+        pass) npass=$((npass + 1)) ;;
+        fail) nfail=$((nfail + 1)) ;;
+        *) nskip=$((nskip + 1)) ;;
+    esac
 done
-printf '%s\n' "$matrix"
+ELAPSED=$(( $(date +%s) - T0 ))
 
-if [ "$fails" -eq 0 ]; then
-    echo "[preflight] ✅ 本地 4 道全过（⑤⑥ 由 run-local-pipeline.py 跑 ⇒ 本地共 6 道；CI 另有 7 道前端）"
+cat <<MATRIX
+
+════════════════ 门禁覆盖：本地 vs CI（13 道）════════════════
+
+  门禁（权威清单 = tools/local-verify/check-invariants.py）        本地  CI
+  ─────────────────────────────────────────────────────────────  ────  ────
+  ① CI 诊断段自检（拦截式）                                          $(mark 1)     ✅
+  ② 不变量自检（拦截式）                                             $(mark 2)     ✅
+  ③ ruff check（全仓）                                              $(mark 3)     ✅
+  ④ ruff format --check（apps/api）                                 $(mark 4)     ✅
+  ⑤ pytest（真 PG）                                                 $(mark 5)     ✅   ← run-local-pipeline.py
+  ⑥ 覆盖率门禁（合并三份 → report）                                   $(mark 6)     ✅   ← 同上
+  ⑦ 反向检查 · 认证链路单一真相                                       $(mark 7)     ✅
+  ⑧ 共享包单测 · packages/api-core                                  $(mark 8)     ✅
+  ⑨ npm run lint                                                   $(mark 9)     ✅
+  ⑩ npm run format:check                                           $(mark 10)     ✅
+  ⑪ npm run format:check:shared                                    $(mark 11)     ✅
+  ⑫ tsc --noEmit                                                   $(mark 12)     ✅
+  ⑬ npm run build                                                  $(mark 13)     ✅   ← --with-build 才跑
+  ─────────────────────────────────────────────────────────────  ────  ────
+  本次：通过 $npass · 失败 $nfail · 跳过 $nskip   （CI 跑全部 13 道）｜ 总耗时 ${ELAPSED}s
+
+  ✅ 通过   ❌ 失败   ⏭ 跳过（**没查**，不等于通过）
+MATRIX
+
+if [ "$nskip" -gt 0 ]; then
+    echo ""
+    echo "  ⚠️ 本**跳过了 $nskip 道**（原因/补救）："
+    for i in $(seq 1 13); do
+        [ "${ST[$i]}" = "skip" ] && echo "     ⏭ [$i] ${SKIP_REASON[$i]}"
+    done
+    echo "  ⇒ 本轮的绿**不覆盖**上面这几道 —— 它们只在 CI 上跑。"
+fi
+
+echo ""
+if [ "$nfail" -gt 0 ]; then
+    echo "[preflight] ❌ $nfail 道失败 —— 先修这里，别推"
+    exit 1
+fi
+if [ "$nskip" -gt 0 ]; then
+    echo "[preflight] ✅ 已跑的 $npass 道全过；但**有 $nskip 道没跑**（见上）—— 别把它读成「全绿」"
     exit 0
 fi
-echo "[preflight] ❌ $fails 道失败 —— 先修这里，别推"
-exit 1
+echo "[preflight] ✅ 13 道全过（与 CI 同口径）"
+exit 0
