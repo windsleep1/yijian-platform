@@ -1,6 +1,6 @@
 # B 端前后端联调常见坑
 
-> **72 条**实战坑，覆盖 Batch 2 ~ Batch 7（认证/RBAC → 管理后台 → 题库 CRUD
+> **74 条**实战坑，覆盖 Batch 2 ~ Batch 7（认证/RBAC → 管理后台 → 题库 CRUD
 > → 导入管道 → 导入向导 → 组卷引擎）+ 数据范围收口 + 门禁整顿 + 补测批 + Batch 8 统计看板
 > + Batch 9 审计链补齐 + C 端方案（共享包 / CI:build / harness 假绿）。
 > 每条都按
@@ -3406,6 +3406,60 @@ questions=6000   content_change_logs=0   import_batches=0   users=1
 ★ 这条也解释了为什么"**把默认环境变干净**"值得做：它不只是为了数字可比 ——
 **它本身就是个 bug 探测器**。本次一次就揪出 3 个被掩盖的缺陷
 （坑 71 的库名写死 / 本条漏题库种子 / `run-smoke.ps1 -DbName` 对 API 失效）。
+
+## 73. 无类型的 `NULL` 参数：SQL 看着完全正常，asyncpg 报 `AmbiguousParameterError` ★（2026-09-28）
+
+**现象**：C 端科目列表接口稳定 `50001`，服务端堆栈是
+
+    asyncpg.exceptions.AmbiguousParameterError:
+        could not determine data type of parameter $2
+
+**真身**：SQL 里写了"可选过滤"的常见写法
+
+```sql
+WHERE status = 'on'
+  AND exam_level = :exam_level
+  AND (:category IS NULL OR category = :category)   -- ★ $2 出现在两个位置
+```
+
+`category` 传 `None` 时，asyncpg 要**准备**这条语句并推断每个参数的类型 ——
+而 `:category IS NULL` 里的那个 `NULL` **没有类型信息**，PG 推不出来 ⇒ 直接报错。
+**SQL 本身没错**（psql 里手敲能跑），错在"参数化 + 无类型 NULL"这个组合。
+
+**修法**：**显式声明 bind 参数类型**（不要改 SQL 去绕）：
+
+```python
+_STMT = text(SQL).bindparams(
+    bindparam("exam_level", type_=String), bindparam("category", type_=String)
+)
+```
+
+**判据（可复用）**：**"这条 SQL 在 psql 里能跑" ≠ "参数化之后能跑"** ——
+`IS NULL` / `COALESCE` / `= ANY()` 里的可选参数**都要声明类型**。
+⚠️ 而且它的症状（`50001`）**完全不提 SQL**，看起来像"服务挂了"。
+
+## 74. 陈旧的生成物让本机门禁变红，而 CI 恒绿（**假红**）★（2026-09-28）
+
+**现象**：把 `src/app/page.tsx` 迁进路由组 `(tabs)/` 之后，`tsc --noEmit` 报
+
+    .next/types/app/page.ts(2,24): error TS2307:
+    Cannot find module '../../../src/app/page.js'
+
+**真身**：Next 会把 `.next/types/**/*.ts` 塞进 tsconfig 的 `include`，而那份文件是
+**上一次 `next dev` / `next build` 生成的**（记录"当时有哪些路由"）。路由被删/改名后，
+它就指着一个不存在的模块。**源码一个字没错。**
+
+**为什么 CI 不报**：CI 是全新 checkout ⇒ **`.next/` 根本不存在** ⇒ 同一个门禁在 CI 永远绿。
+⇒ 这是**本机独有**的一类红：**陈旧生成物在告状**。
+
+**修法**：`preflight.sh` 的 ⑫ 跑之前把 `.next/types` **改名挪走**（只挪 `types/`，
+保住 `next dev` 的编译缓存），让本机的 tsc 看到**与 CI 同一份输入**。
+
+**判据（可复用）**：**同一个门禁"CI 绿 / 本机红"，先问"本机多出了什么生成物"** ——
+`.next/`、`dist/`、`__pycache__`、覆盖率数据都是候选。
+★ 与坑 63 / 71 同族：**变量是环境，不是代码**；而假红的代价不是"漏报"，
+是**让人去查不存在的问题**（硬约定 J：假红与假绿同族）。
+
 
 ## 附：一批交付收尾的固定动作
 
