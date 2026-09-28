@@ -15,6 +15,8 @@ from app.api.v1 import (
     admin_users,
     auth,
     health,
+    subjects,
+    users,
 )
 from app.core.deps import require_admin_session
 
@@ -43,8 +45,15 @@ api_router.include_router(admin_imports.router, dependencies=[Depends(require_ad
 api_router.include_router(admin_exams.router, dependencies=[Depends(require_admin_session)])
 api_router.include_router(admin_stats.router, dependencies=[Depends(require_admin_session)])
 
+# ---- ★ C 端（P2a 起）：**刻意不加** `require_admin_session` ----
+# 它们是普通学员用的，只走 `current_user`（会话有效即可）。
+# ⚠️ 反向的红线：C 端**一个都不许**复用 `/admin/*`（`docs/22` §5.3）——
+#    `/admin/questions/{id}` 会返答案。这条由 `check-auth-chain.mjs` +
+#    `check-invariants.py` 的不变量 ④（扫 `apps/web/src` 里的 `/admin/` 字面量）机械守着。
+api_router.include_router(subjects.router)  # GET /subjects（引导页「选专业」）
+api_router.include_router(users.router)  # PUT /users/me/profile（引导）
+
 # 后续批次在此追加：
-#   api_router.include_router(subjects.router)      # 科目 / 章节 / 知识点（C 端）
-#   api_router.include_router(practice.router)      # 刷题
+#   api_router.include_router(practice.router)      # 刷题（P2b）
 
 __all__ = ["api_router"]
