@@ -117,6 +117,47 @@ echo "[preflight] 前端 app = ${APPS:-（无）}$([ -n "$APP_FILTER" ] && echo 
 echo "[preflight] 范围 = $MDESC"
 [ "$WITH_BUILD" = "1" ] && echo "[preflight] --with-build：**含** next build（每个 app ≈57s，可能要提权）"
 
+# ---------------- ⓿ 顺手清理「7 天以上的构建残留」----------------
+# 它们从哪来：`e2e-web-login.py` 在 build / dev 之前会把 `.next` **改名挪走**
+#   —— 因为宿主的删除保护会拦"一次 ≥50 项"的删除，**只能 rename**（见该文件抬头）。
+#   代价就是会越积越多（每个 100~300MB）。
+#
+# ⚠️ 三条设计约束（都不是洁癖）：
+#   1. **只清 7 天以上**（`-mtime +7`）：当轮刚挪走的那份可能还要用
+#      （`--keep-db` 调试时要回看"上一次构建是什么样"）。
+#   2. **清了才算数**：`rm -rf` 之后要**回查目录在不在** —— 删除保护可能让它"看起来删了"。
+#   3. **删不掉要大声报，且不影响退出码**：这不是门禁，是卫生。
+#      把它算成"失败"会让"磁盘上有个删不掉的目录"被读成"代码错了"（假红，硬约定 J）；
+#      静默跳过则会让它无限堆积（**没清掉 ≠ 不用清**，硬约定 H）。
+clean_stale_builds() {
+    local cleaned=0 failed=0 scanned=0
+    local base d
+    for base in "$repo"/apps/*/node_modules/.cache "$repo"/apps; do
+        [ -d "$base" ] || continue
+        for d in "$base"/next-stale-* "$base"/.next.stale-*; do
+            [ -d "$d" ] || continue
+            # 只看 7 天以上（`-maxdepth 0` = 只判这个目录本身，不递归）
+            [ -n "$(find "$d" -maxdepth 0 -mtime +7 2>/dev/null)" ] || continue
+            scanned=$((scanned + 1))
+            rm -rf "$d" 2>/dev/null
+            if [ -d "$d" ]; then
+                failed=$((failed + 1))
+                printf '  ⚠️ 清不掉（宿主的删除保护）：%s\n' "${d#"$repo"/}"
+            else
+                cleaned=$((cleaned + 1))
+                printf '  🧹 已清 7 天以上的构建残留：%s\n' "${d#"$repo"/}"
+            fi
+        done
+    done
+    if [ "$scanned" -eq 0 ]; then
+        echo "[preflight] ⓿ 构建残留：无 7 天以上的（next-stale-*）"
+    else
+        echo "[preflight] ⓿ 构建残留：清掉 $cleaned / 待清 $scanned（删不掉 $failed）"
+        [ "$failed" -gt 0 ] && echo "        ↳ 手工清：rm -rf <上面那些目录>（在你自己的终端里跑，不受本工具的保护策略限制）"
+    fi
+}
+clean_stale_builds
+
 # ---------------- 逐道跑，并**记下真实状态** ----------------
 # 13 **类**的槽位一次建好；没跑到的保持 skipped。
 # ⚠️ ⑨~⑬ 是「按 app 实例化」的：**对 $APPS 里每个 app 各跑一遍**，任一红 ⇒ 该类红 ——
