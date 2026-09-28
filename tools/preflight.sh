@@ -155,6 +155,18 @@ clean_stale_builds() {
         echo "[preflight] ⓿ 构建残留：清掉 $cleaned / 待清 $scanned（删不掉 $failed）"
         [ "$failed" -gt 0 ] && echo "        ↳ 手工清：rm -rf <上面那些目录>（在你自己的终端里跑，不受本工具的保护策略限制）"
     fi
+
+    # 覆盖率回收站：**同一手法**（`rename` 挪走，见 run-local-pipeline.py::_retire）。
+    # 它每次只长 ~150KB，但同样没有别的机会被清 ⇒ 同一条规则管它。
+    local cov="$repo/.coverage-trash"
+    if [ -d "$cov" ] && [ -n "$(find "$cov" -maxdepth 0 -mtime +7 2>/dev/null)" ]; then
+        rm -rf "$cov" 2>/dev/null
+        if [ -d "$cov" ]; then
+            echo "  ⚠️ 清不掉（宿主的删除保护）：.coverage-trash/"
+        else
+            echo "  🧹 已清 7 天以上的覆盖率回收站：.coverage-trash/"
+        fi
+    fi
 }
 clean_stale_builds
 
@@ -228,10 +240,41 @@ else
     ST[6]=pass
 fi
 
+#: ⑫ 专用：跑 `tsc` 之前，把**上一次构建/开发生成的** `.next/types` 挪走。
+#
+# ⚠️ 为什么必须这么做（2026-09-28 实测，一次**假红**）：
+#   Next 会往 tsconfig 的 `include` 里塞 `.next/types/**/*.ts`，而那份文件是**上次
+#   `next dev` / `next build` 时生成的**。源码里的路由一旦被删或改名（本轮把
+#   `src/app/page.tsx` 迁进了 `(tabs)/`），它就报
+#
+#       .next/types/app/page.ts(2,24): error TS2307:
+#       Cannot find module '../../../src/app/page.js'
+#
+#   —— **源码一个字没错**，是陈旧产物在告状。而 **CI 上根本不存在 `.next/`**
+#   （全新 checkout）⇒ 同一个门禁在 CI 永远绿、在本机红。这正是"**假红**"：
+#   它会让人去查不存在的问题（硬约定 J：假红与假绿同族）。
+#
+# ⇒ 挪走它 = 让本机的 tsc 看到**与 CI 同一份输入**（差别只剩"没跑构建"）。
+# ⚠️ 只挪 `types/`，**不挪整个 `.next`**：`next dev` 的编译缓存在别处，
+#   内循环不需要为一次 tsc 重新编译整个应用。
+# ⚠️ 挪进 `node_modules/.cache/`（tsc / prettier / eslint 都默认跳过它），
+#   名字用 `next-types-*`，正好被 ⓿ 的"7 天以上清理"一起管。
+prepare_tsc_input() {
+    local app="$1"
+    local t="$repo/apps/$app/.next/types"
+    [ -d "$t" ] || return 0
+    local cache="$repo/apps/$app/node_modules/.cache"
+    mkdir -p "$cache" 2>/dev/null || return 0
+    if mv "$t" "$cache/next-types-$(date +%s)" 2>/dev/null; then
+        printf '  （陈旧的 .next/types 已挪走 —— 让本机与 CI 看到同一份输入）\n'
+    fi
+}
+
 #: ⑨~⑬ 与 app 有关：**对每个前端 app 各跑一遍**，任一 app 红 ⇒ 这道门禁红。
 #: 输出**不重定向** —— `lint`/`format`/`tsc` 本来就 1~3 行，藏起来反而看不见失败原因。
+#: `$4`（可选）= 跑之前的准备函数（目前只有 ⑫ 用，见 `prepare_tsc_input`）。
 run_gate_apps() {
-    local key="$1" label="$2" script="$3"
+    local key="$1" label="$2" script="$3" pre="${4:-}"
     printf '\n──── [%s] %s ────\n' "$key" "$label"
     local t0 t1 rc=0 ran=0
     t0=$(date +%s)
@@ -242,6 +285,7 @@ run_gate_apps() {
         fi
         printf '  ── %s ──\n' "$app"
         ran=$((ran + 1))
+        [ -n "$pre" ] && "$pre" "$app"
         if ( cd "$repo/apps/$app" && "$NPM" run "$script" ); then
             :
         else
@@ -281,7 +325,7 @@ else
         run_gate_apps 9 "npm run lint" lint
         run_gate_apps 10 "npm run format:check" format:check
         run_gate_apps 11 "npm run format:check:shared" format:check:shared
-        run_gate_apps 12 "tsc --noEmit" typecheck
+        run_gate_apps 12 "tsc --noEmit" typecheck prepare_tsc_input
     fi
 fi
 

@@ -1,4 +1,4 @@
-"""C 端「登录闭环」的**浏览器**端到端走查 —— 补上 P1 唯一没验过的那一层。
+"""C 端**浏览器**端到端走查（两个场景：`--scenario login` / `--scenario p2a`）。
 
 为什么要单独写一个（而不是塞进 pytest）
 --------------------------------------
@@ -12,8 +12,15 @@
 ★ 顺序判据（用户 2026-09-27）：**P2 全是交互；不在开 P2 之前把交互层点通一次，
   就是"在没验证的交互层上再叠一层没验证的交互"。** 所以它是 P2 的前置，不是"顺手"。
 
-走查步骤（每步都**断言**，不是"看一眼"）
-----------------------------------------
+两个场景（**为什么放同一个文件**：构建 / 起服务 / CDP / 断言助手全都一样，
+复制一份就等于把"本机 build 的前置隔离"那套经验再赌一次）
+--------------------------------------------------------------------------------
+    --scenario login（默认）  P1 的登录闭环：用**现成账号**（超管）走登录 → 首页 → 登出
+    --scenario p2a            P2a：Tab 守卫 / 注册闭环 / 三条 Tab / 引导 / 反向守卫
+
+walkthrough 步骤（每步都**断言**，不是"看一眼"）
+----------------------------------------------
+    login 场景：
     1. 未登录访问 `/`        → middleware 跳到 `/login`（且带 `next=`）
     2. 登录页 hydrate 完成   → 填表 → ★ 断言**框里真的有值**（React value tracker 那类坑：
        "框里有字、提交却是空的"）
@@ -35,12 +42,12 @@
 用法
 ----
     # 单跑（自己负责把 API 起好；通常用 `run-local-pipeline.py --e2e-web` 一把起）
-    python tools/local-verify/e2e-web-login.py \\
+    python tools/local-verify/e2e-web.py \\
         --api-base http://127.0.0.1:8123/api/v1 \\
         --phone 13800000000 --password 'Admin@123456'
 
-    python tools/local-verify/e2e-web-login.py --keep-web    # 跑完不关服务（手工接着点）
-    python tools/local-verify/e2e-web-login.py --force-build # 强制重新构建
+    python tools/local-verify/e2e-web.py --keep-web    # 跑完不关服务（手工接着点）
+    python tools/local-verify/e2e-web.py --force-build # 强制重新构建
 
 ★ `--dev`：用 `next dev` 而不是"构建 + `next start`"
 -----------------------------------------------------
@@ -75,9 +82,11 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import shutil
 import socket
+import string
 import subprocess
 import sys
 import time
@@ -331,7 +340,155 @@ _RAW_ME_JS_WITH_TOKEN = """(async () => {
 })()"""
 
 
-async def drive(args: argparse.Namespace) -> dict[str, object]:
+async def drill_to_me(b: cdp_browser.Browser) -> None:
+    """切到「我的」Tab（底栏第三个），并等到那一屏真的渲染出来。
+
+    ⚠️ P2a 起「退出登录」在「我的」里，不在首页 —— 所以登录场景也要先切 Tab。
+    """
+    await b.click_text("我的", tag="a")
+    await b.wait_for("location.pathname === '/me'", timeout=30, label="切到 /me")
+    await b.wait_for(
+        "document.body.innerText.includes('退出登录')", timeout=30, label="/me 渲染完成"
+    )
+
+
+#: 从注册页第 2 步的"开发模式"提示里读验证码。
+#: ★ 它**不是**"绕过验证码" —— 后端在 `SMS_PROVIDER=mock` 且非生产时**特意**把
+#:   `dev_code` 返回给前端（`schemas/auth.py::SmsSendOut`），页面按设计显示它。
+#:   走查读它 = 走的是**用户/联调者看到的那条路**，而不是另开一条后门。
+_DEV_CODE_JS = """(() => {
+  const p = Array.from(document.querySelectorAll('p'))
+    .find(x => (x.innerText || '').includes('验证码是'));
+  if (!p) return '';
+  const s = p.querySelector('.font-mono');
+  return s ? s.textContent.trim() : '';
+})()"""
+
+
+async def drive_p2a(args: argparse.Namespace) -> dict[str, object]:
+    """P2a 场景：Tab 布局 + 注册 + 引导（用户 2026-09-28 给的五条验收判据）。
+
+        ① 未登录访问**任意** Tab ⇒ 跳登录（不只是 `/`）
+        ② 注册能走完：手机号 → 验证码 → 设置密码 → 进首页
+        ③ 三个 Tab 都能切到（首页 / 练习 / 我的）
+        ④ 引导能走完：选专业 → 选考试年份 → 进首页
+        ⑤ 已登录访问 `/login` ⇒ 跳首页（反向守卫）
+
+    ⚠️ 关于"注册 → 进首页"与"引导 → 进首页"：两条判据都落在**首页** ⇒
+      引导做成**可后补**（首页给入口卡），而不是"未引导不许进 Tab"。
+      这是按用户给的判据实现的；要改成阻塞式，改 `(tabs)/layout.tsx` 一处即可。
+    """
+    report: dict[str, object] = {}
+    phone = "13" + "".join(random.choice(string.digits) for _ in range(9))
+    password = "Yjtest123"
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        # ---------------- ① 未登录访问任意 Tab ----------------
+        say("① 未登录访问 / /practice /me ⇒ 三个都要跳 /login（带 next=）")
+        seen: list[str] = []
+        for path in ("/", "/practice", "/me"):
+            await b.goto(f"{args.web_base}{path}")
+            await b.wait_for("location.pathname === '/login'", timeout=40, label=f"{path} 跳登录")
+            loc = await b.eval("location.pathname + location.search")
+            need(isinstance(loc, str) and "next=" in loc, f"{path} 的跳转没带 next：{loc}")
+            seen.append(loc)
+        report["tabs_guard"] = seen
+
+        # ---------------- ② 注册闭环 ----------------
+        say("② 注册：手机号 → 验证码 → 设置密码")
+        await b.goto(f"{args.web_base}/register")
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await b.type_text('input[autocomplete="tel"]', phone)
+        await b.click_text("获取验证码", tag="button")
+
+        await b.wait_for("location.pathname === '/register'", timeout=20, label="停在注册页")
+        dev_code = ""
+        for _ in range(40):  # 等页面把 dev_code 渲染出来
+            dev_code = await b.eval(_DEV_CODE_JS)
+            if dev_code:
+                break
+            await asyncio.sleep(0.3)
+        need(bool(dev_code), "注册页没有显示验证码（开发模式下后端应当返回 dev_code）")
+        report["dev_code_source"] = "页面上的「开发模式」提示"
+
+        await b.type_text('input[autocomplete="one-time-code"]', dev_code)
+        await b.click_text("下一步", tag="button")
+        await b.wait_for("location.pathname === '/register'", timeout=20, label="到第 3 步")
+        await b.type_text('input[type="password"]', password)
+        await b.click_text("完成注册", tag="button")
+        # 注册成功 ⇒ setTokens + replace("/") ⇒ 落在 Tab 布局的首页
+        await b.wait_for("location.pathname === '/'", timeout=60, label="注册后进首页")
+        await b.wait_for(
+            "!!localStorage.getItem('yj_access_token')", timeout=20, label="本地已存 token"
+        )
+        report["register_phone"] = phone
+
+        # ---------------- ③ 三个 Tab 都能切 ----------------
+        say("③ 三个 Tab 依次切换")
+        await b.wait_for(
+            f"document.body.innerText.includes({json.dumps(phone)})",
+            timeout=40,
+            label="首页显示刚注册的手机号",
+        )
+        tabs_visited: list[str] = ["/"]
+        await b.click_text("练习", tag="a")
+        await b.wait_for("location.pathname === '/practice'", timeout=30, label="切到 /practice")
+        await b.wait_text("这一屏还没做", timeout=20)
+        tabs_visited.append("/practice")
+
+        await drill_to_me(b)
+        tabs_visited.append("/me")
+
+        await b.click_text("首页", tag="a")
+        await b.wait_for("location.pathname === '/'", timeout=30, label="切回 /")
+        tabs_visited.append("/")
+        report["tabs_visited"] = tabs_visited
+
+        # ---------------- ④ 引导：选专业 → 选年份 ----------------
+        say("④ 引导：选专业 → 选考试年份 → 回首页")
+        await b.wait_text("还差一步", timeout=30)  # 未引导 ⇒ 首页有入口卡
+        await b.click_text("还差一步", tag="a")
+        await b.wait_for("location.pathname === '/onboarding'", timeout=30, label="进引导页")
+
+        await b.wait_for(
+            "document.querySelectorAll('main ul button').length > 0",
+            timeout=40,
+            label="专业列表加载完成",
+        )
+        picked = await b.eval(
+            "(document.querySelectorAll('main ul button')[0] || {}).innerText || ''"
+        )
+        need(bool(picked), "没能读到第一个专业按钮的文案")
+        await b.click("main ul button", nth=0)
+        await b.click_text("下一步", tag="button")
+
+        await b.wait_for(
+            "document.querySelectorAll('main ul button').length > 0",
+            timeout=30,
+            label="年份列表出现",
+        )
+        year = await b.eval(
+            "(document.querySelectorAll('main ul button')[0] || {}).innerText || ''"
+        )
+        await b.click("main ul button", nth=0)
+        await b.wait_for("location.pathname === '/'", timeout=60, label="引导完成回首页")
+
+        # 首页现在应显示"已完成"（引导真的落库了，不是前端自己记的）
+        await b.wait_for(
+            "document.body.innerText.includes('已完成')", timeout=40, label="首页显示引导已完成"
+        )
+        report["onboarding"] = f"{picked.strip()} / {year.strip()}"
+
+        # ---------------- ⑤ 反向守卫：已登录访问 /login ----------------
+        say("⑤ 已登录访问 /login ⇒ 期望被送回首页")
+        await b.goto(f"{args.web_base}/login")
+        await b.wait_for("location.pathname === '/'", timeout=40, label="/login 跳首页")
+        report["login_reverse_guard"] = True
+
+    return report
+
+
+async def drive_login(args: argparse.Namespace) -> dict[str, object]:
     report: dict[str, object] = {}
     async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
         # ---------------- 1. middleware：未登录访问 / ----------------
@@ -418,7 +575,10 @@ async def drive(args: argparse.Namespace) -> dict[str, object]:
         report["token_present"] = True
 
         # ---------------- 5. 退出登录 ----------------
-        say("⑤ 退出登录 ⇒ 期望回 /login 且本地凭证清空")
+        say("⑤ 退出登录（在「我的」Tab 里）⇒ 期望回 /login 且本地凭证清空")
+        # ⚠️ P2a 把「退出登录」从首页搬进了「我的」Tab（版式变化，不是回归）。
+        #    所以这一步先切 Tab 再点 —— 顺带把"底栏能切"也验了一次。
+        await drill_to_me(b)
         await b.click_text("退出登录", tag="button")
         await b.wait_for("location.pathname === '/login'", timeout=40, label="回登录页")
         st = await b.eval(
@@ -469,13 +629,19 @@ def find_tool(name: str) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="e2e-web-login.py",
-        description="C 端登录闭环的浏览器端到端走查（生产构建 + CDP 移动视口 375×667）",
+        prog="e2e-web.py",
+        description="C 端浏览器端到端走查（CDP 移动视口 375×667）：login = 登录闭环 / p2a = Tab + 注册 + 引导",
     )
     ap.add_argument("--repo", default=str(REPO_DEFAULT))
     ap.add_argument("--api-base", default="http://127.0.0.1:8123/api/v1")
     ap.add_argument("--port", type=int, default=3001, help="next start 的端口")
     ap.add_argument("--phone", default="13800000000")
+    ap.add_argument(
+        "--scenario",
+        default="login",
+        choices=["login", "p2a"],
+        help="login = P1 登录闭环（用现成账号密码登录）；p2a = Tab + 注册 + 引导",
+    )
     ap.add_argument("--password", default="Admin@123456")
     ap.add_argument("--node", default="", help="node 可执行文件（默认从 PATH 找）")
     ap.add_argument("--npm", default="", help="npm 可执行文件（默认从 PATH 找）")
@@ -540,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             ensure_build(args, web_dir, env)
         proc = start_web(args, web_dir, env)
-        report = asyncio.run(drive(args))
+        report = asyncio.run(drive_p2a(args) if args.scenario == "p2a" else drive_login(args))
     except Failure as e:
         say(f"❌ 走查失败：{e}")
         return 1
@@ -567,7 +733,11 @@ def main(argv: list[str] | None = None) -> int:
     say("════════ 走查结果 ════════")
     for k, v in report.items():
         say(f"  ✅ {k} = {v}")
-    say("✅ 登录闭环全部通过（1~7 步）")
+    say(
+        "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
+        if args.scenario == "login"
+        else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+    )
     return 0
 
 

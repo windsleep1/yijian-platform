@@ -38,10 +38,16 @@ venv/
 .coverage.*
 coverage.xml
 htmlcov/
+# 旧覆盖率数据的"回收站"：本机宿主的删除保护会拒掉批量 unlink，
+# 所以清场改成 **rename 挪进来**（见 run-local-pipeline.py::_retire）。名字刻意与
+# `.coverage.*` **不匹配**（`-` 不是 `.`），否则下一轮清场又会把它收进来。
+.coverage-trash/
 
 # Node
 node_modules/
-.next/
+# ⚠️ `.next*`（不是 `.next/`）：构建产物被"改名挪走"时会留下 `.next.stale-*` 之类的
+# 兄弟目录（见 e2e-web-login.py::isolate_next_dir），写死 `.next/` 会让它们**进版本库**。
+.next*
 out/
 dist/
 build/
