@@ -16,8 +16,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const HINT_COOKIE = process.env.NEXT_PUBLIC_AUTH_HINT_COOKIE || "yj_web_authed";
 
-/** C 端目前只有登录页是公开的（注册页 P2 加进来时**必须同步加到这里**）。 */
-const PUBLIC_PREFIXES = ["/login"];
+/** 公开路由（不需要登录就能看）。**新加公开页必须同步加到这里**，否则会被挡在 `/login`。 */
+const PUBLIC_PREFIXES = ["/login", "/register"];
 
 export function middleware(req: NextRequest) {
   const { pathname, search } = req.nextUrl;

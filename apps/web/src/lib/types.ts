@@ -60,3 +60,37 @@ export type TokenPair = {
   expires_in: number;
   user: Me;
 };
+
+/**
+ * `GET /subjects` 的一项（`schemas/c_end.py` 的 `SubjectOut`）。
+ *
+ * ★ `id` 同样是 **string**（雪花 ID）—— 它会被当作 `target_subjects` 写回去，
+ *   所以**必须**原样传递，任何 `Number()` 都会让它变成一个不存在的科目。
+ */
+export type Subject = {
+  id: string;
+  code: string;
+  name: string;
+  short_name: string | null;
+  exam_level: string;
+  /** `public` 公共课 / `professional` 专业课。引导页的"选专业"筛的是后者。 */
+  category: string;
+  /** 专业课的所属专业码（`jz`/`sz`…）；公共课为 `null`。它就是引导页要存的值。 */
+  professional: string | null;
+  full_score: number;
+  pass_score: number;
+  duration_min: number;
+  color: string | null;
+  sort_no: number;
+};
+
+/** `PUT /users/me/profile` 的请求体（`schemas/c_end.py` 的 `ProfileUpdateIn`）。 */
+export type ProfileUpdate = {
+  exam_level?: "yijian" | "erjian";
+  professional?: string;
+  exam_year?: number;
+  /** ⚠️ 科目 ID 用**字符串**：后端会拒数字（雪花 ID 会被 JSON 静默舍入）。 */
+  target_subjects?: string[];
+  target_score?: number;
+  daily_goal_min?: number;
+};
