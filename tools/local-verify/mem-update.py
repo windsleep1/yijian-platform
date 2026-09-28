@@ -12,7 +12,7 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
     # 批内第一次调用会自动开启一个"批"（记下开始字节数）
     python tools/local-verify/mem-update.py \\
         --sink "<要被替换掉的原文>"="<替换成什么>" \\
-        --add  "<锚点行的一部分>"="<要插入的整行文本>" \\
+        --add  "<锚点（**必须到行尾为止**，或干脆整行）>"="<要插入的整行文本>" \\
         --budget 0
 
     python tools/local-verify/mem-update.py --end          # 收口 + 断言 + 清理
@@ -41,6 +41,11 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
    **`--sink` 从来没有执行** —— 而文件**一个字都没改**（实测：13 处下沉 + 4 条新增全被吞掉）。
    > 教训：**一个"看起来像失败"的报错，可能掩盖"命令根本没做那件事"**。
    > 拿它当判据之前，先看**文件字节数有没有变**（坑 64 的同族：看字节，不看叙事）。
+6. **`--add` 的锚点必须停在行边界**（2026-09-28 加，见 `add_after_line`）：
+   它原来是"在锚点子串之后插入"，于是**锚点取半行时会把这一行劈成两半** ——
+   前半留在原行、后半被推到新块后面。症状**看起来像**"新内容没插进去"，实际是**把旧行拆了**。
+   > 判据：锚点结尾要么是 `\n`、要么是文末；否则**拒绝**（不替你"补到行尾" —— 那只是
+   > 把一种静默换成另一种静默）。`--self-test` 里有正例/反例各一条。
 
 ## 能力边界（写在 `--help` 里，不靠用的人记住）
 
@@ -74,6 +79,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 MEM = Path(__file__).resolve().parents[2].parent / ".workbuddy" / "memory" / "MEMORY.md"
 STATE = MEM.parent / ".mem-batch.json"
@@ -110,6 +116,33 @@ def block_conflicts(block: str, existing: set[str]) -> list[str]:
         if len(s) >= DUP_MIN_LEN and s in existing and s not in out:
             out.append(s)
     return out
+
+
+def add_after_line(text: str, anchor: str) -> int:
+    """`--add` 的插入位置 = **锚点所在那一行的行尾**。
+
+    ⚠️ 2026-09-28 加这道守卫（实测踩到）：`--add` 原来是在**锚点子串**之后插入
+    （`text.replace(anchor, anchor + "\\n" + block)`）⇒ 锚点只取半行时，会把这一行**劈成两半**：
+    前半点留在原行、后半点被推到新块后面。症状**看起来像**"新内容没插进去"，
+    实际是**把旧行拆了** —— 实测：`--add "- ⚠️ **本机跑全量**：\\`run-local-pipeline.py\\`"` 把
+    那一行拆成了"只剩开头的残行 + 新块 + 原来的后半句"。
+
+    ⇒ 判据：**锚点必须停在行边界上**（匹配结尾要么是 `\\n`，要么是文末）。
+      不满足就**拒绝**，而**不是**"聪明地替你补到行尾" —— 那只是把一种静默换成另一种静默。
+    """
+    n = text.count(anchor)
+    if n != 1:
+        raise ValueError(f"--add 锚点匹配 {n} 次（要求恰好 1 次）：{anchor[:60]!r}")
+    start = text.index(anchor)
+    end = start + len(anchor)
+    if end != len(text) and text[end] != "\n":
+        rest_of_line = text[end:].split("\n", 1)[0]
+        raise ValueError(
+            "--add 锚点**停在一行中间** —— 拒绝（否则会把这一行劈成两半）。\n"
+            f"      锚点结尾之后还有：{rest_of_line[:60]!r}\n"
+            "      ⇒ 把锚点写成**到行尾为止**的整段文本（或干脆整行）。"
+        )
+    return end
 
 
 def self_test() -> int:
@@ -156,8 +189,36 @@ def self_test() -> int:
         ok = got == want
         print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got} want={want}）")
         bad += 0 if ok else 1
+
+    # ★ 约束 4c（2026-09-28 补）：`--add` 的锚点**必须停在行边界**。
+    #   正例 + 反例各一条 —— 反例就是当天真实踩到的那个形状。
+    extra: list[tuple[str, bool, bool]] = [
+        (
+            "6) 锚点是整行（结尾即 \\n）→ 允许",
+            add_after_line("- A：`cmd`\n下一行\n", "- A：`cmd`") == len("- A：`cmd`"),
+            True,
+        ),
+        (
+            "7) 锚点停在行中间 → 必须拒绝（会把整行劈开）",
+            _raises(lambda: add_after_line("- A：`cmd` 后面还有字\n", "- A：`cmd`")),
+            True,
+        ),
+    ]
+    for name, got, want in extra:
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
+        bad += 0 if ok else 1
+
     print(f"[mem-update --self-test] {'ALL PASSED' if bad == 0 else f'{bad} CHECK(S) FAILED'}")
     return 0 if bad == 0 else 1
+
+
+def _raises(fn: Callable[[], object]) -> bool:
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 —— 自检只关心"有没有响"，不关心哪种异常
+        return True
+    return False
 
 
 def size_of(p: Path) -> int:
@@ -311,15 +372,24 @@ def main() -> int:
                 probe = probe.replace(old, new, 1)
         for spec in args.add:
             anchor, block = parse_pair(spec, "--add")
-            n = probe.count(anchor)
             dup = block_conflicts(block, existing_lines(probe))
+            problems = []
+            if probe.count(anchor) != 1:
+                problems.append(f"锚点匹配 {probe.count(anchor)} 次")
+            try:
+                pos = add_after_line(probe, anchor)
+            except ValueError:
+                pos = None
+                problems.append("锚点没停在**行边界**（会把这行劈开）")
+            if dup:
+                problems.append("新块有重复行")
             say(
-                f"  [{'ok' if (n == 1 and not dup) else 'BAD'}] --add 锚点 {n} 次"
-                f"{'，且新块有重复行' if dup else ''}：{anchor[:44]!r}"
+                f"  [{'ok' if not problems else 'BAD'}] --add："
+                f"{'、'.join(problems) if problems else 'ok'}（锚点：{anchor[:44]!r}）"
             )
-            bad += 0 if (n == 1 and not dup) else 1
-            if n == 1 and not dup:
-                probe = probe.replace(anchor, f"{anchor}\n{block}", 1)
+            bad += 1 if problems else 0
+            if pos is not None and not problems:
+                probe = probe[:pos] + "\n" + block + probe[pos:]
         print(
             f"[mem] 预演结束：{bad} 条 BAD（**文件未改**）；全部 ok 时正文将变为 "
             f"{len(probe.encode('utf-8'))} 字节",
@@ -348,10 +418,11 @@ def main() -> int:
         for spec in args.add:
             anchor, block = parse_pair(spec, "--add")
             block = unescape(block)
-            if text.count(anchor) != 1:
-                raise SystemExit(
-                    f"--add 锚点匹配 {text.count(anchor)} 次（要求恰好 1 次）：{anchor[:60]!r}"
-                )
+            # ★ 约束 4c：锚点**必须停在行边界**（否则会把这一行劈成两半）—— 2026-09-28 实测踩到
+            try:
+                pos = add_after_line(text, anchor)
+            except ValueError as e:
+                raise SystemExit(str(e)) from None
             # ★ 约束 4a：新块里不能有"文件里已经有"的行。
             #    `--add` 是**追加**（anchor + "\n" + block）⇒ 把锚点原文也写进新块，就会出现两次。
             #    我实际犯过这个错，而当时脚本一句话都没说（硬约定 J：判据要能证伪，也要真的响）。
@@ -362,7 +433,7 @@ def main() -> int:
                     "      最常见的原因是**把锚点原文也写进了新块**（本脚本是追加 ⇒ 该行会出现两次）。\n"
                     "      重复行：" + " ｜ ".join(c[:60] for c in dup_in_block[:3])
                 )
-            text = text.replace(anchor, f"{anchor}\n{block}", 1)
+            text = text[:pos] + "\n" + block + text[pos:]
             added += len(block.encode())
             say(f"  新增 {len(block.encode())} 字节（锚点：{anchor[:40]!r}…）")
 

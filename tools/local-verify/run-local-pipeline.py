@@ -27,6 +27,11 @@
     python tools/local-verify/run-local-pipeline.py --keep-db        # 跑完不销毁库（连上去看）
     python tools/local-verify/run-local-pipeline.py --no-pg-stop     # 别停 PG（我另有用途）
     python tools/local-verify/run-local-pipeline.py --db yijian      # 故意跑在开发累积库上
+
+    python tools/local-verify/run-local-pipeline.py --e2e-web        # ★ 换成浏览器走查（C 端登录闭环）
+        # 同一套脚手架（一次性库 / 种子 / 同源 env / 已就绪的 API），
+        # 但被测对象从 httpx 换成**真浏览器**（`e2e-web-login.py`，移动视口 375×667）。
+        # 它不跑覆盖率门禁 —— 量的是"交互通不通"，不是覆盖率。
 """
 
 from __future__ import annotations
@@ -340,27 +345,32 @@ class Pipeline:
             if rc != 0:
                 raise SystemExit(f"app.cli {sub} 失败")
 
-    def start_api(self) -> None:
+    def start_api(self, *, coverage: bool = True) -> None:
         stop_file = self.tmp / "yb-cov-stop"
         stop_file.unlink(missing_ok=True)
         log = (self.tmp / "yb-api.log").open("w", encoding="utf-8")  # noqa: SIM115
-        self.api = subprocess.Popen(
-            [
-                self.a.python,
-                "serve_fake_redis.py",
-                "--pg-port",
-                str(self.a.pg_port),
-                "--api-port",
-                str(self.a.api_port),
-                "--log-file",
-                str(self.tmp / "yb-api-inner.log"),
+        args = [
+            self.a.python,
+            "serve_fake_redis.py",
+            "--pg-port",
+            str(self.a.pg_port),
+            "--api-port",
+            str(self.a.api_port),
+            "--log-file",
+            str(self.tmp / "yb-api-inner.log"),
+            # ⚠️ --shutdown-file 是必须的：本机收尾若走 terminate，atexit 不跑
+            #    ⇒ 优雅退出（以及覆盖率落盘）都不会发生。
+            "--shutdown-file",
+            str(stop_file),
+        ]
+        if coverage:
+            args += [
                 "--coverage",
                 "--cov-data-file",
                 str(self.cov_file("api")),
-                # ⚠️ --shutdown-file 是必须的：本机收尾若走 terminate，atexit 不跑 ⇒ 覆盖率一个字写不出来。
-                "--shutdown-file",
-                str(stop_file),
-            ],
+            ]
+        self.api = subprocess.Popen(
+            args,
             cwd=str(HERE),
             env=self.env,
             stdout=log,
@@ -394,6 +404,45 @@ class Pipeline:
             self.api_dir,
             self.env,
             f"pytest {self.a.pytest_args}",
+        )
+
+    def e2e_web(self) -> int:
+        """**把 pytest 那一步换成浏览器走查**（`e2e-web-login.py`）。
+
+        为什么复用这套脚手架而不是另写一个起服务脚本
+        ----------------------------------------------
+        浏览器走查需要的东西与 pytest **完全一样**：一次性库、RBAC + 超管种子、
+        同源 env（`JWT_SECRET` / `APP_ENV`）、一个已就绪的 API。
+        再写一遍就等于**再赌一次** PG 的启动与就绪（"端口开着 ≠ 就绪"）、
+        资源的拥有者归属（坑 68）、env 同源（`JWT_SECRET` 不一致就报 40102）。
+        ⇒ 差别只有"被测对象"：一个是 httpx 打接口，一个是真浏览器点页面。
+
+        ⚠️ **不灌题库**：登录闭环不需要题目（`subjects` / `chapters` 在 `schema.sql` 里，
+        本来就建好了）。P2b 要选题时再加 —— 现在加只是白等 30 秒。
+        """
+        cmd = [
+            self.a.python,
+            str(HERE / "e2e-web-login.py"),
+            "--repo",
+            str(self.repo),
+            "--api-base",
+            f"http://127.0.0.1:{self.a.api_port}/api/v1",
+            "--phone",
+            self.a.e2e_phone,
+            "--password",
+            self.a.e2e_password,
+        ]
+        if self.a.e2e_no_build:
+            cmd.append("--no-build")
+        if self.a.e2e_force_build:
+            cmd.append("--force-build")
+        if self.a.e2e_dev:
+            cmd.append("--dev")
+        if self.a.e2e_keep_web:
+            cmd.append("--keep-web")
+        # 构建 + 起 next + 浏览器走查：给 15 分钟（首次构建 ~40s，冷启动 ~10s）
+        return run(
+            cmd, HERE, self.env, "e2e-web-login（浏览器走查，移动视口 375×667）", timeout=900
         )
 
     def stop_api_gracefully(self) -> None:
@@ -523,6 +572,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="跳过本地门禁预检（tools/preflight.sh：诊断自检 / 不变量 / ruff ×2）",
     )
+    # ---- 浏览器走查（`--e2e-web`）：把 pytest 那一步换成"真浏览器点一遍"----
+    ap.add_argument(
+        "--e2e-web",
+        action="store_true",
+        help="跑 C 端登录闭环的浏览器走查（不起覆盖率门禁；见 e2e-web-login.py）",
+    )
+    ap.add_argument(
+        "--e2e-phone", default="13800000000", help="走查用的账号（默认 = seed-admin 的）"
+    )
+    ap.add_argument("--e2e-password", default="Admin@123456")
+    ap.add_argument("--e2e-no-build", action="store_true", help="复用现有 apps/web/.next")
+    ap.add_argument("--e2e-force-build", action="store_true", help="强制重新构建 apps/web")
+    ap.add_argument(
+        "--e2e-dev",
+        action="store_true",
+        help="走查用 `next dev` 而不是「构建 + next start」（★ 本机必加，理由见 e2e-web-login.py 抬头）",
+    )
+    ap.add_argument(
+        "--e2e-keep-web", action="store_true", help="走查完不关 next start（手工接着点）"
+    )
     args = ap.parse_args(argv)
 
     p = Pipeline(args)
@@ -534,6 +603,15 @@ def main(argv: list[str] | None = None) -> int:
             preflight(p)
         p.start_pg()
         p.provision_db()
+        if args.e2e_web:
+            # 浏览器走查分支：只灌 RBAC + 超管（走查要用的账号就是它），**不跑覆盖率门禁**
+            # —— 它量的是"浏览器交互通不通"，不是覆盖率；混进来只会让门槛无意义地红。
+            p.seed_cli()
+            p.start_api(coverage=False)
+            rc = p.e2e_web()
+            p.stop_api_gracefully()
+            say(f"e2e-web exit={rc} ⇒ 本轮 {'通过' if rc == 0 else '未通过'}")
+            return rc
         p.clean_coverage()
         # ⚠️ **顺序与 CI 对齐**：先 RBAC + 超管，**再**灌题库。
         #    2026-09-27 实测：反过来的顺序（题库先）在**全新库**上会有一批用例失败 ——

@@ -14,6 +14,7 @@
 - **截图走 `Page.captureScreenshot`**，全页用 `captureBeyondViewport`。
 - 视口固定 1440×900：截图要能进文档，尺寸得稳定。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,8 +65,18 @@ def _free_port() -> int:
 class Browser:
     """同步外观、内部 asyncio 的极简浏览器。"""
 
-    def __init__(self, *, width: int = 1440, height: int = 900, headless: bool = True):
+    def __init__(
+        self,
+        *,
+        width: int = 1440,
+        height: int = 900,
+        headless: bool = True,
+        mobile: bool = False,
+    ):
         self.width, self.height, self.headless = width, height, headless
+        #: 移动端仿真（C 端 E2E 用 375×667）。**默认 False** —— B 端截图是 1440×900，
+        #: 改默认值会让历史截图与新截图不可比。
+        self.mobile = mobile
         self.port = _free_port()
         self.profile = Path(tempfile.mkdtemp(prefix="cdp-profile-"))
         self.proc: subprocess.Popen | None = None
@@ -123,13 +134,26 @@ class Browser:
         if not target:
             raise RuntimeError("Chrome devtools 端口未就绪")
 
-        self.ws = await websockets.connect(target["webSocketDebuggerUrl"], max_size=64 * 1024 * 1024)
+        self.ws = await websockets.connect(
+            target["webSocketDebuggerUrl"], max_size=64 * 1024 * 1024
+        )
         await self.send("Page.enable")
         await self.send("Runtime.enable")
         await self.send(
             "Emulation.setDeviceMetricsOverride",
-            {"width": self.width, "height": self.height, "deviceScaleFactor": 1, "mobile": False},
+            {
+                "width": self.width,
+                "height": self.height,
+                "deviceScaleFactor": 2 if self.mobile else 1,
+                "mobile": self.mobile,
+            },
         )
+        if self.mobile:
+            # ⚠️ 只设 `mobile=True` 不够：触摸事件域要单独打开，否则页面上的
+            #    `touchstart` 类监听不会被触发（C 端 P3 要验滑动切题，那时会踩到）。
+            await self.send(
+                "Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5}
+            )
 
     async def close(self) -> None:
         try:
@@ -366,7 +390,9 @@ class Browser:
         )
         if not box:
             raise RuntimeError(f"hover 目标不存在：{selector}[{nth}]")
-        await self.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": box[0], "y": box[1]})
+        await self.send(
+            "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": box[0], "y": box[1]}
+        )
         await asyncio.sleep(0.8)
 
     async def select_option(self, label: str) -> None:

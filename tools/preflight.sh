@@ -21,11 +21,21 @@
 #   2. **状态只能有一个来源**：矩阵里的 ✅/❌/⏭ 由**真实结果**填，不手写。
 #      （第一版就是手写的 —— 变异时上半报 ❌、下半仍印 ✅，**自相矛盾**。）
 #
-# 用法：
-#     bash tools/preflight.sh                 # 12 道（约 2 分钟）
-#     bash tools/preflight.sh --frontend      # 只跑前端 ⑦~⑫（约 30 秒）—— **前端内循环**用这个
-#     bash tools/preflight.sh --with-build    # 12 类 + build（每个 app ≈57s）
-#     YIJIAN_PYTHON=/path/to/python bash tools/preflight.sh
+# 用法：**三种范围**（选错了会白等 —— 所以关系写在最前面）
+#
+#     bash tools/preflight.sh                    # ①~⑫  全部本地门禁（含后端）≈2.5 分钟 → push 前
+#     bash tools/preflight.sh --frontend         # ⑦~⑫  前端 6 类 × **全部**前端 app    ≈55 秒
+#     bash tools/preflight.sh --app web          # ⑦⑧ + 只跑 **web** 的 ⑨~⑫            ≈30 秒 → ★ C 端主循环
+#
+#   ① 为什么 `--frontend` **不跑后端**：它是给"前端内循环"用的 —— 改一个 `.tsx`
+#      不值得跑一遍 pytest（162s）。后端那几道要么跑默认，要么本来就归 `run-local-pipeline.py`。
+#   ② 为什么 `--app web` 仍然跑 ⑦⑧：它们**与具体 app 无关**且便宜（合计 <5s）——
+#      ⑦ 反向检查**扫的就是 `apps/<app>/src`**（把正在写的那个 app 一起扫，且它真抓过 bug），
+#      ⑧ 共享包单测是 C 端正在消费的包。省掉它们只会让"内循环绿"少一层意义。
+#      ⇒ `--app X` 的准确含义：**把"按 app 实例化"的 ⑨~⑬ 限定到 X**。
+#
+#   可组合：`--app web --with-build` = 上面的 30 秒 + web 的 build。
+#   其它：`YIJIAN_PYTHON=/path/to/python bash tools/preflight.sh`
 
 # ⚠️ **故意不设 `-e`**：要**跑完所有门禁**再给结论 ——
 #    失败即中断会把后面的失败盖掉（只报第一条 = 修一轮才发现下一条）。
@@ -33,11 +43,23 @@ set -uo pipefail
 
 WITH_BUILD=0
 FRONTEND_ONLY=0
-for a in "$@"; do
-    case "$a" in
+#: `--app <name>`：把"按 app 实例化"的门禁（⑨~⑬）**限定到这一个 app**。
+#: ⚠️ 名字故意不叫 `--only-web` —— 将来加第 3 个 app 时**不用改脚本**（硬约定 H 同族：
+#:   写死的东西会在加东西时**静默**失效）。
+APP_FILTER=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         --with-build) WITH_BUILD=1 ;;
         --frontend) FRONTEND_ONLY=1 ;;
+        --app) shift; APP_FILTER="${1:-}" ;;
+        --app=*) APP_FILTER="${1#--app=}" ;;
+        *)
+            echo "[preflight] ✗ 不认识参数：$1" >&2
+            echo "  可用：--frontend | --app <name> | --with-build（见文件头用法）" >&2
+            exit 2
+            ;;
     esac
+    shift
 done
 T0=$(date +%s)
 
@@ -65,11 +87,35 @@ NPM=$(command -v npm || true)
 APPS=$(for d in "$repo"/apps/*/; do [ -f "${d}package.json" ] && basename "$d"; done | sort | tr '\n' ' ')
 APPS=${APPS% }
 
+APPS_ALL=$APPS
+#: `--app <name>`：限定到单个 app，并**隐式进入前端模式**（不限定就会跑全部 app，与"只跑 X"矛盾）。
+#: ⚠️ 名字必须**校验**：写错一个字母时，若只是"过滤后没剩 app"就往下跑，症状是
+#:   **⑨~⑬ 全变跳过、汇总看起来"没失败"** —— 静默失效。这里直接 rc=2 拒掉。
+if [ -n "$APP_FILTER" ]; then
+    FRONTEND_ONLY=1
+    case " $APPS " in
+        *" $APP_FILTER "*) APPS="$APP_FILTER" ;;
+        *)
+            echo "[preflight] ✗ 不认识 app「$APP_FILTER」—— 现有前端 app：${APPS_ALL:-（无）}" >&2
+            exit 2
+            ;;
+    esac
+fi
+
+#: 三种范围的**说法**（只用来打印，避免下面几处各写一份、然后各说各的）。
+if [ -n "$APP_FILTER" ]; then
+    MDESC="--app $APP_FILTER：⑦⑧ + 只跑 $APP_FILTER 的 ⑨~⑫（后端 ①~⑥ 未查）"
+elif [ "$FRONTEND_ONLY" = "1" ]; then
+    MDESC="--frontend：只跑前端 ⑦~⑫（后端 ①~⑥ 未查）"
+else
+    MDESC="默认范围：①~⑫"
+fi
+
 echo "[preflight] python = ${PY:-（缺）}"
 echo "[preflight] node   = ${NODE:-（缺）} / npm = ${NPM:-（缺）}"
-echo "[preflight] 前端 app = ${APPS:-（无）}"
-[ "$FRONTEND_ONLY" = "1" ] && echo "[preflight] --frontend：只跑前端 ⑦~⑫（后端 ①~⑥ 标跳过，**不是**已查）"
-[ "$WITH_BUILD" = "1" ] && echo "[preflight] --with-build：**含** 57 秒的 next build"
+echo "[preflight] 前端 app = ${APPS:-（无）}$([ -n "$APP_FILTER" ] && echo "（全部：${APPS_ALL:-无}）")"
+echo "[preflight] 范围 = $MDESC"
+[ "$WITH_BUILD" = "1" ] && echo "[preflight] --with-build：**含** next build（每个 app ≈57s，可能要提权）"
 
 # ---------------- 逐道跑，并**记下真实状态** ----------------
 # 13 **类**的槽位一次建好；没跑到的保持 skipped。
@@ -122,7 +168,7 @@ run_in() {
 if [ "$FRONTEND_ONLY" = "1" ]; then
     # 与 ⑤⑥ 同理：按用户要求跳过时，"跳过"要说得出来（不是假装它过了）。
     # 逐道标 skip，理由写清 —— 汇总行会把它算进"没跑的道数"。
-    for k in 1 2 3 4; do note_skip "$k" "--frontend 只跑前端（后端 ①~④ 未查）" "后端静态门禁 $k"; done
+    for k in 1 2 3 4; do note_skip "$k" "$MDESC（后端 ①~④ 未查）" "后端静态门禁 $k"; done
 elif [ -z "$PY" ]; then
     for k in 1 2 3 4; do note_skip "$k" "找不到 Python（可用 YIJIAN_PYTHON 指定）" "后端静态门禁 $k"; done
 else
@@ -135,7 +181,7 @@ fi
 # ---- ⑤⑥ 在 run-local-pipeline.py 里跑；本脚本只标注 ----
 # ⚠️ 它们**不是"已查"**，是"由另一个入口查" —— 所以 `--frontend` 模式下要标成跳过。
 if [ "$FRONTEND_ONLY" = "1" ]; then
-    for k in 5 6; do note_skip "$k" "--frontend 只跑前端（数据库门禁未查）" "pytest / 覆盖率"; done
+    for k in 5 6; do note_skip "$k" "$MDESC（数据库门禁未查）" "pytest / 覆盖率"; done
 else
     ST[5]=pass
     ST[6]=pass
@@ -223,6 +269,7 @@ ELAPSED=$(( $(date +%s) - T0 ))
 cat <<MATRIX
 
 ════════ 门禁覆盖：本地 vs CI（13 **类**；CI 里是 18 道步骤）════════
+ 范围：$MDESC
 
   门禁（权威清单 = tools/local-verify/check-invariants.py）        本地  CI
   ─────────────────────────────────────────────────────────────  ────  ────
@@ -232,9 +279,9 @@ cat <<MATRIX
   ④ ruff format --check（apps/api）                                 $(mark 4)     ✅
   ⑤ pytest（真 PG）                                                 $(mark 5)     ✅   ← run-local-pipeline.py
   ⑥ 覆盖率门禁（合并三份 → report）                                   $(mark 6)     ✅   ← 同上
-  ⑦ 反向检查 · 认证链路单一真相                                       $(mark 7)     ✅
-  ⑧ 共享包单测 · packages/api-core                                  $(mark 8)     ✅
-  ⑨ npm run lint                                                   $(mark 9)     ✅   ← 逐 app
+  ⑦ 反向检查 · 认证链路单一真相                                       $(mark 7)     ✅   ← 扫**全部** app，与 --app 无关
+  ⑧ 共享包单测 · packages/api-core                                  $(mark 8)     ✅   ← 与 app 无关
+  ⑨ npm run lint                                                   $(mark 9)     ✅   ← 逐 app：$APPS
   ⑩ npm run format:check                                           $(mark 10)     ✅
   ⑪ npm run format:check:shared                                    $(mark 11)     ✅
   ⑫ tsc --noEmit                                                   $(mark 12)     ✅
@@ -252,7 +299,7 @@ if [ "$nskip" -gt 0 ]; then
     for i in $(seq 1 13); do
         [ "${ST[$i]}" = "skip" ] && echo "     ⏭ [$i] ${SKIP_REASON[$i]}"
     done
-    echo "  ⇒ 本轮的绿**不覆盖**上面这几道 —— 它们只在 CI 上跑。"
+    echo "  ⇒ 本轮的绿**不覆盖**上面这几道（有些是 CI 才能跑，有些是本轮范围没选到）。"
 fi
 
 echo ""
@@ -264,5 +311,5 @@ if [ "$nskip" -gt 0 ]; then
     echo "[preflight] ✅ 已跑的 $npass 道全过；但**有 $nskip 道没跑**（见上）—— 别把它读成「全绿」"
     exit 0
 fi
-echo "[preflight] ✅ 13 类全过（⑨~⑬ 已覆盖 $APPS；与 CI 同口径）"
+echo "[preflight] ✅ 本范围全过（范围 = $MDESC）—— 13 类里没跑到的见上"
 exit 0
