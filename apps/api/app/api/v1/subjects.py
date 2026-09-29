@@ -12,12 +12,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Path, Query
 
 from app.core.deps import CurrentUserDep, DbSession
 from app.core.response import Envelope, ok
-from app.schemas.c_end import SubjectOut
-from app.services import subject_service
+from app.schemas.c_end import ChapterOut, SubjectOut
+from app.services import practice_service, subject_service
 
 router = APIRouter(prefix="/subjects", tags=["C 端 · 科目"])
 
@@ -45,3 +45,26 @@ async def list_subjects(
 ) -> dict:
     items = await subject_service.list_subjects(db, exam_level=exam_level, category=category)
     return ok([s.model_dump() for s in items])
+
+
+@router.get(
+    "/{subject_id}/chapters",
+    response_model=Envelope[list[ChapterOut]],
+    summary="科目的章节树（选章节页）",
+    description=(
+        "需要登录。返回该科目**未删除**的全部章节，按 `sort_no` 排序（`parent_id` 可自行嵌套）。\n\n"
+        "★ `question_count` / `my_answered` / `my_correct` **都是「含子章节」的实时值**：\n"
+        "- `question_count` **实时从 `questions` 算**，不读 `chapters.question_count` 那个冗余列 ——\n"
+        "  它写着「定时刷新」，但**没有任何定时任务在刷**（实测还是建表默认值 0）。\n"
+        "  读它会得到「每章 0 题」，看起来像没有题库（实际有 6000 道）；\n"
+        "- 题挂在**叶子**章节上，所以一级章节的数字由子章节**自底向上汇总** ——\n"
+        "  只报直接数会让用户看到「我什么都没做」。"
+    ),
+)
+async def list_chapters(
+    db: DbSession,
+    me: CurrentUserDep,
+    subject_id: int = Path(description="科目 id"),
+) -> dict:
+    items = await practice_service.list_chapters(db, subject_id=subject_id, user_id=me.id)
+    return ok([c.model_dump() for c in items])

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -71,3 +71,159 @@ class ProfileUpdateIn(BaseModel):
             if not item.isdigit():
                 raise ValueError(f"目标科目 ID 必须是数字字符串（收到 {item!r}）")
         return v
+
+
+# ============================================================ P2b-1 · 刷题（选章节 + 答题）
+#
+# 这组模型里有两条**刻意的**设计，都不是顺手写的：
+#
+# ① **答案 / 解析在 `SessionItemOut` 上是可选字段**（`answer` / `analysis`），
+#    而不是"另开一个 results 接口"。理由：`docs/24` §3.2 #5 把"一个 resource、两种状态"
+#    定成了这个接口的**形状**（`doing` 不返答案、`finished` 返全）——
+#    可见性判断因此**只留最外层一处**（硬约定 A：读路径只留一处可见性判断）。
+#
+# ② `chapter.question_count` **不用表里的冗余列**。`db/schema.sql` 写着它"定时刷新"，
+#    但**没有任何定时任务在刷它**（2026-09-29 核实：那张表里这一列还是建表默认值 0）。
+#    ⇒ 选章节页要是读它，就会"每个章节都是 0 题"——**看起来像没有题库，实际有 6000 道**。
+#    所以这里一律**实时从 `questions` 算**（见 practice_service.list_chapters）。
+#    判据同硬约定 F：**"读路径判断了某状态" ≠ "该状态可达"** —— 一个没人写的冗余列，
+#    与"这个字段存在"是两件事。
+
+
+class QuestionOptionOut(BaseModel):
+    """题目的一个选项。**不含 `is_correct`** —— C 端拿不到答案。"""
+
+    label: str
+    content: str
+    content_html: str | None = None
+
+
+class ChapterOut(BaseModel):
+    """章节（带"我做过多少"）。选章节页的数据源。"""
+
+    id: BigIntStr
+    parent_id: BigIntStr | None = None
+    code: str
+    name: str
+    level: int
+    outline_ref: str | None = None
+    weight: float
+    sort_no: int
+    #: 这个章节（**含子章节**）下**真的能练**的题数 —— 实时算，不是表里的冗余列。
+    question_count: int = 0
+    #: 我在这儿做过的题数 / 答对的题数（同样含子章节）。
+    my_answered: int = 0
+    my_correct: int = 0
+
+
+class SessionCreateIn(BaseModel):
+    """创建一次练习。P2b-1 只支持 `mode='chapter'`（`chapter_id` 必填）。"""
+
+    subject_id: BigIntStr
+    chapter_id: BigIntStr | None = None
+    count: int = Field(10, ge=1, le=100)
+
+
+class SessionItemOut(BaseModel):
+    item_id: BigIntStr
+    seq: int
+    question_id: BigIntStr
+    type: str
+    stem: str
+    stem_html: str | None = None
+    options: list[QuestionOptionOut] = []
+    #: 我提交过的答案（没答过 = None）。
+    my_value: list[Any] | None = None
+    is_correct: bool | None = None
+    score: float | None = None
+    answered: bool = False
+    #: ⚠️ **只有"已作答"或"会话已结束"时才非空** —— 见 practice_service 的 `_may_reveal`。
+    answer: dict[str, Any] | None = None
+    analysis: str | None = None
+    analysis_html: str | None = None
+
+
+class SessionProgressOut(BaseModel):
+    total: int
+    answered: int
+    correct: int
+    score: float
+
+
+class SessionOut(BaseModel):
+    """一次练习（`doing` = 断点恢复；`finished` = 报告）。"""
+
+    id: BigIntStr
+    mode: str
+    status: str
+    subject_id: BigIntStr | None = None
+    subject_name: str | None = None
+    chapter_id: BigIntStr | None = None
+    chapter_name: str | None = None
+    title: str
+    #: 第一道**还没作答**的 item（全答完 = None）—— "刷新后还在"就是靠它回到原处。
+    current_item_id: BigIntStr | None = None
+    total: int
+    answered: int
+    correct: int
+    score: float
+    items: list[SessionItemOut] = []
+
+
+class AnswerIn(BaseModel):
+    """提交一道题。
+
+    ⚠️ `value` **故意放宽成 `list[Any]`**：判分要看题目类型，而类型得查库才知道 ——
+      在这里按"选择题"校验会把判断题一起拒掉。类型化的校验放在 service 里做，
+      好处是能给出"**是哪一道题、它是什么类型**"的错误（硬约定：拒绝要说清是哪一条）。
+    """
+
+    item_id: BigIntStr
+    #: 选择题 = 标号数组（`["B"]` / `["A","C"]`）；判断题 = `[true]` / `[false]`。
+    value: list[Any] = Field(min_length=1, max_length=8)
+
+
+class AnswerResultOut(BaseModel):
+    item_id: BigIntStr
+    is_correct: bool
+    score: float
+    correct_answer: dict[str, Any]
+    my_value: list[Any]
+    analysis: str | None = None
+    analysis_html: str | None = None
+    #: 这道题**之前已经答过**（"目标状态已达成" ⇒ **零写入**，硬约定 C）。
+    idempotent: bool = False
+    session: SessionProgressOut
+
+
+def parse_answer_doc(raw: Any) -> dict[str, Any]:
+    """把库里的 `answer` / `user_answer` JSONB 解成 **dict**。
+
+    ⚠️ 为什么需要它：这两列是 `JSONB`，而驱动交回来的可能是 `str`（未解析的 JSON 文本）
+      也可能是已经解析好的 `dict` —— **取决于列类型与驱动版本**。
+      写死一种形态会在另一种上直接炸，而报错会指向"数据坏了"（实际是取值方式错了）。
+      `dict(str)` 更糟：那会把字符串当"可迭代的键值对"去拆，得到一个**看似正常**的错值。
+    """
+    import json as _json
+
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def parse_answer_value(raw: Any) -> list[Any]:
+    """取"答案标号数组"：`{"value": ["B"]}` → `["B"]`。
+
+    兼容三个形态（都实测过会出现在返回值里）：`dict`（`{"value": [...]}`）、
+    `str`（JSON 文本）、以及**裸 `list`**（测试里直接构造的行）。
+    """
+    doc = parse_answer_doc(raw)
+    if doc:
+        v = doc.get("value")
+        return v if isinstance(v, list) else []
+    return raw if isinstance(raw, list) else []
