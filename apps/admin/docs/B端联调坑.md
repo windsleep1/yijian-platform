@@ -3461,6 +3461,79 @@ _STMT = text(SQL).bindparams(
 是**让人去查不存在的问题**（硬约定 J：假红与假绿同族）。
 
 
+## 75. **写路径漏了 `db.commit()`：接口 200 + `code=0` + 返回合法 id，数据却没了** ★（2026-09-29）
+
+**形状**：新写的刷题接口，9 条用例**全红在同一种表现上** ——
+`POST /practice/sessions` 返回 `code: 0` 且给了一个合法的雪花 id，
+紧接着 `GET /practice/sessions/<那个 id>` 却是 **`40401 练习不存在`**。
+
+**第一反应（错的）**：按 id 查的那条 SQL 写错了 / 主从延迟 / 事务隔离级别。
+
+**真因**：`app/db/base.py::get_db` **不自动 commit** ——
+它只有 `async with SessionLocal() as session: yield session`，**异常时 rollback，正常退出时什么都不做**。
+
+```python
+async def get_db() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+```
+
+⇒ 会话关闭时整个事务被丢弃。**而请求已经返回过了**，所以：
+**HTTP 200 / `code: 0` / id 合法 —— 三者都对，只有数据不在。**
+
+**判据（写进工具链假设里）**：**写路径的"成功了但查不到"，先查 `commit`，再查 SQL。**
+本仓的约定是"**service 层自己 `await db.commit()`**"
+（`auth_service` 5 处 / `question_service` 7 处 / `exam_service` 13 处 …）——
+`get_db` **不是** UoW 自动提交模式。
+
+⚠️ 它比"报错"危险：报错会让人去看 SQL；**这个不会**，9 条红的形状完全一致，
+看起来像"这一个查询有问题"（而实际是"9 个写入没有一个落库"）。
+★ 同族：坑 55（本地有遗留物所以 CI 静默 skip）、坑 71（写死库名）——
+**"不报错"的缺陷只在有人依赖它时爆炸**。
+
+---
+
+## 76. **同一个题型在库里有"两套答案写法"** —— 直接 `bool()` 读会把**错答判成对** ★（2026-09-29）
+
+**形状**：写刷题判分时，判断题的正确答案从库里读出来长这样：
+
+| 来源 | `answer` | `question_options` |
+|---|---|---|
+| 管理端新建（`question_service.derive_answer`） | `{"value": [true]}` | 有选项 |
+| **种子生成器**（`db/seed/gen_seed_questions.py::gen_judge`） | `{"value": ["A"]}`（A = 表述正确）/ `{"value": ["B"]}` | **空**（那类题只有"正确 / 错误"两个按钮） |
+
+两类题**同时存在于同一个库里**，而且**都叫 `type='judge'`**。
+
+**危险在哪**：如果"顺手 `bool()` 一下"：
+
+```python
+answer = bool(correct[0])     # correct = ["A"]
+user   = True                 # 用户选了"正确"
+is_correct = (answer == user) # bool("A") == True ⇒ True
+```
+
+⇒ 无论用户选什么，`["A"]` 的题**永远判对**；而 `["B"]` 的题会把**对答判成错答**。
+**它不报错、还给人满分** —— 是本批最危险的一类 bug。
+
+**处置**：`practice_service._judge_bool()` **唯一一处**理解这两套写法
+（`A/T/TRUE/对/正确/√` → True；`B/F/FALSE/错/错误/×` → False；**认不出来返回 `None`，绝不猜**），
+判分与出参**都**过它；出参统一成布尔，前端因此只认识 `true` / `false`。
+
+**钉住它的两条判据**（缺一不可）：
+- 构造输入：`grade("judge", ["A"], [False]) == (False, 0.0)`（**方向反了这条必红**）；
+- **数据级**：查库把所有 `type='judge'` 的 `answer.value` 都过一遍 `_judge_bool`，
+  有一条认不出来就红 —— **生成器哪天换了写法，构造输入的那条不会红，这条会**。
+
+⚠️ 留了待办 **BL-20**（统一库内口径，见 `docs/21`）。
+★ 同族：坑 73（SQL 看着正常、症状在别处）——**"同一件事有两种写法"不会报错，
+只会让读取方按自己习惯的那一种解释**。
+
+---
+
 ## 附：一批交付收尾的固定动作
 
 每批做完，**在提交前**按这个清单过一遍（都是上面坑的"可执行版"）：
