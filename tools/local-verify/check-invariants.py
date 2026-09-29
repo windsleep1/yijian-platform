@@ -1,10 +1,13 @@
-"""`docs/24` §8 的 5 条不变量 —— **能机械检查的那部分**。
+"""不变量清单 —— **能机械检查的那部分**（`docs/24` §8 的 5 条 + `docs/25` 的第 6 条）。
+
+第 6 条（2026-09-29 加）：**宿主删除保护** —— 会被拦的删除一律 `rename` 到 `.trash/`；
+未登记的"直接删"必须变红。判据来源 = 项目约定 **R**，方案 `docs/25-宿主删除保护.md`。
 
 为什么要有它（用户 2026-09-27）：
     不变量**不是"开工前确认一次"**，而是"**每次 push 后跑一次**" ——
     P0→P3 每推一次都可能把它们破掉。写成可执行文件才能每批收尾自动跑。
 
-判据来源：`docs/24-C端首批-范围冻结.md` §8。
+判据来源：`docs/24-C端首批-范围冻结.md` §8；第 6 条 → `docs/25-宿主删除保护.md`。
 
 设计约束
 --------
@@ -242,13 +245,214 @@ def check_docs() -> None:
         bad("`docs/24-C端首批-范围冻结.md` 不见了")
 
 
+# ------------------------------------------------------------------ 6
+#: 只扫**代码**。`.md` 不扫 —— `docs/` 里有大量 `rm -rf` 的**示例**，
+#: 把它们算成违规就是"判据写糙给假红"，而假红的下场是被加豁免或干脆删掉（硬约定 J）。
+GUARD_SUFFIXES: dict[str, str] = {
+    ".py": "py",
+    ".sh": "sh",
+    ".bash": "sh",
+    ".ps1": "ps1",
+    ".js": "js",
+    ".mjs": "js",
+    ".cjs": "js",
+    ".ts": "js",
+    ".tsx": "js",
+}
+#: 无后缀但**必须显式扫到** —— 否则"没扫"是一个**静默漏洞**：没人会问"为什么它不在扫的范围里"。
+GUARD_EXTRA_NAMES: dict[str, str] = {"Dockerfile": "sh"}
+#: 扫的时候整目录跳过（构建产物 / 依赖 / 回收站本身）。
+GUARD_SKIP_PARTS = frozenset(
+    {"node_modules", "__pycache__", ".git", ".trash", ".ruff_cache", ".pytest_cache", "htmlcov"}
+)
+
+#: 删除 token —— **按语言分开**。`rm -rf` 出现在 `.py` 的字符串里不是删除；
+#: `unlink(` 出现在 `.sh` 里也不是。（合成一张表会有大量假红。）
+DELETE_TOKENS: dict[str, tuple[str, ...]] = {
+    # trash-ok: 判据的定义处（token 表）—— 这些串是"要找什么"，不是"要删什么"
+    "py": ("shutil.rmtree(", "os.remove(", "os.unlink(", "os.rmdir(", ".unlink(", ".rmdir("),
+    "sh": ("rm -rf", "rm -fr", "rm -r ", "rm -f ", "rmdir "),
+    "ps1": ("Remove-Item",),
+    "js": (
+        "fs.rm(",
+        "fs.rmSync(",
+        # trash-ok: 同上（token 表）
+        "fs.unlink(",
+        "fs.unlinkSync(",
+        # trash-ok: 同上（token 表）
+        "fs.rmdir(",
+        "fs.rmdirSync(",
+        "recursiveDelete(",
+        "rimraf(",
+    ),
+}
+
+#: **按路径整体豁免**。理由必须写在**这里**（一处可审完），不散在代码注释里。
+PATH_EXEMPT: dict[str, str] = {
+    "apps/api/Dockerfile": "在**容器镜像内**执行（`RUN` 层），不碰宿主文件系统 —— 宿主的删除保护管不到它",
+}
+
+#: 已经"改对了"的地方没得可查，但**登记过的豁免**要能被一眼数出来（否则豁免会悄悄变多）。
+TRASH_OK = "trash-ok:"
+
+
+def _strip_py(text: str) -> str:
+    """抹掉 Python 的 `#` 注释与三引号块，**保留换行**（行号因此仍然对齐）。
+
+    ⚠️ 必须抹：`preflight.sh` 的 ⓿ 段里就有一条**打印给用户看的** `rm -rf .trash`
+    手工命令（不是它自己执行的删除）。不抹 ⇒ 它变成一个恒红的假红。
+    ⚠️ 只做词法级处理，不 import ast：这个脚本必须**纯标准库 + 零依赖**（硬约定 H）。
+    """
+    res: list[str] = []
+    i, n = 0, len(text)
+    quote: str | None = None
+    while i < n:
+        ch = text[i]
+        if quote:
+            if text.startswith(quote, i):
+                res.append(" " * 3)
+                i += 3
+                quote = None
+                continue
+            res.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            quote = text[i : i + 3]
+            res.append(" " * 3)
+            i += 3
+            continue
+        if ch == "#":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            res.append(" " * (j - i))
+            i = j
+            continue
+        res.append(ch)
+        i += 1
+    return "".join(res)
+
+
+def _strip_eol(text: str, markers: tuple[str, ...]) -> str:
+    """抹掉行尾注释（shell / PS / JS），保留换行与行内缩进。"""
+    out: list[str] = []
+    for ln in text.split("\n"):
+        cut = len(ln)
+        for m in markers:
+            k = ln.find(m)
+            if k >= 0:
+                cut = min(cut, k)
+        out.append(ln[:cut] + " " * (len(ln) - cut))
+    return "\n".join(out)
+
+
+def _guard_files():
+    """产出 `(相对路径, 语言)`；只含**代码**。"""
+    roots = [REPO / d for d in ("tools", "apps", "packages", "db", "deploy")]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for f in sorted(root.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(REPO)
+            if any(p in GUARD_SKIP_PARTS or p.startswith(".next") for p in rel.parts):
+                continue
+            if f.name in GUARD_EXTRA_NAMES:
+                yield str(rel).replace("\\", "/"), GUARD_EXTRA_NAMES[f.name]
+            elif f.suffix in GUARD_SUFFIXES:
+                yield str(rel).replace("\\", "/"), GUARD_SUFFIXES[f.suffix]
+
+
+def _strip(text: str, lang: str) -> str:
+    if lang == "py":
+        return _strip_py(text)
+    if lang in ("sh", "ps1"):
+        return _strip_eol(text, ("#",))
+    return _strip_eol(text, ("//",))  # js
+
+
+def _is_marker_line(line: str) -> bool:
+    """这一行是不是"**只有注释、且写着 `trash-ok:`**"？—— 登记可以写在删除的**上一行**。
+
+    为什么允许上一行：代码行常常已经贴着 100 列上限，再往后接一句理由会**为了写登记而破格式**
+    （而格式红线本身是另一道门禁）。允许"上一行独立注释"之后，两条约束不打架。
+    ⚠️ 只认**独立注释行**：`x = 1  # trash-ok` 这种带代码的不算 —— 否则
+    `# trash-ok` 会被一个"顺手的说明"满足掉，登记就退化成噪音。
+    """
+    s = line.strip()
+    return (
+        (s.startswith("#") or s.startswith("//") or s.startswith("/*"))
+        and TRASH_OK in s
+        and len(s) < 160
+    )
+
+
+def check_delete_guard() -> None:
+    print("[6] 宿主删除保护（R：会被拦的删除一律改 rename）—— 不变量 6")
+    scanned = 0
+    offenders: list[str] = []
+    registered: list[str] = []
+    for rel, lang in _guard_files():
+        if rel in PATH_EXEMPT:
+            continue
+        scanned += 1
+        try:
+            raw = (REPO / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            bad(f"{rel} 读不了 —— 「读不了」不能算通过")
+            continue
+        stripped = _strip(raw, lang).split("\n")
+        raw_lines = raw.split("\n")
+        for i, (code, orig) in enumerate(zip(stripped, raw_lines), 1):
+            hit = next((t for t in DELETE_TOKENS[lang] if t in code), None)
+            if hit is None:
+                continue
+            if TRASH_OK in orig or _is_marker_line(raw_lines[i - 2] if i >= 2 else ""):
+                registered.append(f"{rel}:{i}")
+                continue
+            offenders.append(f"{rel}:{i}  「{hit}」  {orig.strip()[:58]}")
+    for rel, why in PATH_EXEMPT.items():
+        if (REPO / rel).is_file():
+            print(f"  [--] 整路径豁免：{rel} —— {why}")
+    if offenders:
+        bad(f"{len(offenders)} 处**未登记**的删除 —— 宿主的删除保护会拦（或至少是隐患）")
+        for o in offenders[:10]:
+            print(f"        {o}")
+        if len(offenders) > 10:
+            print(f"        …还有 {len(offenders) - 10} 处")
+        print(
+            "      ⇒ 两条出路：① **改 rename**（`from trash import trash` 一行搞定）；"
+            f"② 确实是**单文件 + 非递归** ⇒ 在**同一行尾部**或**上一行独立注释**里写 `{TRASH_OK} <理由>`。"
+        )
+    else:
+        ok(f"扫描 {scanned} 个代码文件 —— 没有未登记的删除（已登记豁免 {len(registered)} 处）")
+        if registered:
+            print(
+                f"        （豁免清单：{'、'.join(registered[:6])}{'…' if len(registered) > 6 else ''}）"
+            )
+
+    # 回收站本身：它在不在版本控制里、入口是不是唯一
+    if (REPO / "tools" / "local-verify" / "trash.py").is_file():
+        ok("唯一回收站入口 `tools/local-verify/trash.py` 在")
+    else:
+        bad("`tools/local-verify/trash.py` 不见了 ⇒ `.trash/` 的布局会退化成各写一份")
+    gi = read(".gitignore")
+    if gi is not None:
+        if re.search(r"^\.trash/?\s*$", gi, re.MULTILINE):
+            ok("`.gitignore` 含 `.trash/`")
+        else:
+            bad("`.gitignore` 缺 `.trash/` ⇒ 回收站里的东西会进版本库")
+
+
 def main() -> int:
-    print("=== 不变量自检（`docs/24` §8；用户 2026-09-27：每批收尾跑一次）===")
+    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条；用户 2026-09-27：每批收尾跑一次）===")
     check_gates()
     check_coverage_ratchet()
     check_ephemeral_db()
     check_admin_isolation()
     check_docs()
+    check_delete_guard()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()

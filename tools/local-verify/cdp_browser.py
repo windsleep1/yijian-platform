@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -170,7 +169,32 @@ class Browser:
                     self.proc.kill()
                 except Exception:
                     pass
-        shutil.rmtree(self.profile, ignore_errors=True)
+        self._retire_profile()
+
+    def _retire_profile(self) -> None:
+        """把 Chrome 的临时 user-data-dir **改名挪走**，不删（项目约定 R / `docs/25`）。
+
+        ⚠️ 它是**目录**（内含几十到上百项缓存）⇒ 宿主的删除保护会拦递归删除 ⇒ **只能 rename**。
+        挪到 `%TEMP%` 下的兄弟目录，由操作系统回收 —— 关键是**本脚本自己不删**
+        （"由宿主/OS 回收"与"应用删"是两件事，见 R 里那条区分）。
+        ⚠️ 挪不动就**算了**（吞 `OSError`）：**绝不能因为"清理失败"让走查本身报错** ——
+        那会让一个纯粹的卫生问题伪装成"E2E 挂了"（假红，硬约定 J）。
+        """
+        raw = self.profile
+        if raw is None:
+            return
+        try:
+            p = Path(raw)
+            if not p.exists():
+                return
+            dst = p.with_name(p.name + "-trash")
+            n = 1
+            while dst.exists():
+                dst = p.with_name(f"{p.name}-trash{n}")
+                n += 1
+            p.rename(dst)
+        except OSError:
+            pass
 
     # ---------------------------------------------------------------- 原语
 

@@ -168,6 +168,7 @@ def main() -> int:
         CHAIN.write_bytes(original)
 
     restored = CHAIN.read_bytes() == original
+    # trash-ok: 单文件（变异前的备份），非递归
     backup.unlink(missing_ok=True)
 
     caught = sum(1 for _, v in results if v == "捕获")

@@ -153,6 +153,7 @@ def main() -> None:
     if args.shutdown_file:
         sentinel = Path(args.shutdown_file)
         # 起来之前先清掉可能残留的旧哨兵，否则会刚起就退。
+        # trash-ok: 单文件（sentinel），非递归
         sentinel.unlink(missing_ok=True)
 
         def _watch_sentinel() -> None:

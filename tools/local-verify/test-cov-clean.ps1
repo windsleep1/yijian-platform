@@ -63,9 +63,19 @@ $tempRoot = [System.IO.Path]::GetFullPath($env:TEMP)
 # The extracted block calls this -- it must exist before invocation.
 function Fail { param([string]$Message) throw ("FAIL: " + $Message) }
 
+# 按项目约定 R：**目录**删除一律 rename（宿主的删除保护会拦递归删除，坑 62 实测过一次
+# `htmlcov/` 55 项就把额度吃光）。夹具在 %TEMP% 下、没有 `<repo>/.trash/` 可用，
+# 所以挪到 %TEMP% 的**兄弟目录**，由操作系统回收 —— 关键是**本脚本自己不删**。
+function Move-ToTempTrash {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $dst = Join-Path $tempRoot ("yijian-trash-" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+    Move-Item -LiteralPath $Path -Destination $dst -Force -ErrorAction SilentlyContinue
+}
+
 function New-Fixture {
     param([string]$Dir)
-    Remove-Item -Path $Dir -Recurse -Force -ErrorAction SilentlyContinue
+    Move-ToTempTrash -Path $Dir
     New-Item -ItemType Directory -Path $Dir -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Dir "htmlcov") -Force | Out-Null
     Set-Content -Path (Join-Path $Dir "htmlcov\index.html") -Value "<html>stale</html>" -Encoding UTF8
@@ -169,7 +179,7 @@ Check "mutation really did delete .coveragerc (the danger is real)" `
       (-not (Test-Path (Join-Path $fixture ".coveragerc")))
 Write-Host ""
 
-Remove-Item -Path $fixture -Recurse -Force -ErrorAction SilentlyContinue
+Move-ToTempTrash -Path $fixture
 
 if ($failures.Count -gt 0) {
     Write-Host ("[cov-clean-test] FAILED (" + $failures.Count + "): " + ($failures -join " / ")) -ForegroundColor Red

@@ -469,6 +469,7 @@ def test_execute_with_missing_batch_file_is_rejected(client: httpx.Client, admin
     path = _FILE_DIR / f"{bid}.csv"
     assert path.exists(), f"原始文件应当已落盘：{path}"
     try:
+        # trash-ok: 单文件（测试自己写的临时文件），非递归
         os.remove(path)
         ex = _execute(client, admin_h, bid)
         assert ex["code"] == 40001, ex

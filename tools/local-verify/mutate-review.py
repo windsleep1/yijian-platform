@@ -240,6 +240,7 @@ def main() -> int:
     shutil.copy2(SERVICE, backup)  # ← 文件备份还原（不用 git checkout --）
     say(f"已备份 {SERVICE.name} → {backup.name}")
 
+    # trash-ok: 单文件（PG 的 pid 文件），非递归
     (PG_DATA / "postmaster.pid").unlink(missing_ok=True)
     # 不保留句柄：PG 的收尾统一走 `pg_ctl stop`（见 finally），
     # 而 `postgres.exe` 被 terminate 会留下不干净的关闭 —— 这一点与 API 那次不同。

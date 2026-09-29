@@ -117,58 +117,60 @@ echo "[preflight] 前端 app = ${APPS:-（无）}$([ -n "$APP_FILTER" ] && echo 
 echo "[preflight] 范围 = $MDESC"
 [ "$WITH_BUILD" = "1" ] && echo "[preflight] --with-build：**含** next build（每个 app ≈57s，可能要提权）"
 
-# ---------------- ⓿ 顺手清理「7 天以上的构建残留」----------------
-# 它们从哪来：`e2e-web-login.py` 在 build / dev 之前会把 `.next` **改名挪走**
-#   —— 因为宿主的删除保护会拦"一次 ≥50 项"的删除，**只能 rename**（见该文件抬头）。
-#   代价就是会越积越多（每个 100~300MB）。
+# ---------------- ⓿ 回收站：**报告 + 只回收单文件** ----------------
 #
-# ⚠️ 三条设计约束（都不是洁癖）：
-#   1. **只清 7 天以上**（`-mtime +7`）：当轮刚挪走的那份可能还要用
-#      （`--keep-db` 调试时要回看"上一次构建是什么样"）。
-#   2. **清了才算数**：`rm -rf` 之后要**回查目录在不在** —— 删除保护可能让它"看起来删了"。
-#   3. **删不掉要大声报，且不影响退出码**：这不是门禁，是卫生。
-#      把它算成"失败"会让"磁盘上有个删不掉的目录"被读成"代码错了"（假红，硬约定 J）；
-#      静默跳过则会让它无限堆积（**没清掉 ≠ 不用清**，硬约定 H）。
-clean_stale_builds() {
-    local cleaned=0 failed=0 scanned=0
-    local base d
-    for base in "$repo"/apps/*/node_modules/.cache "$repo"/apps; do
-        [ -d "$base" ] || continue
-        for d in "$base"/next-stale-* "$base"/.next.stale-*; do
-            [ -d "$d" ] || continue
-            # 只看 7 天以上（`-maxdepth 0` = 只判这个目录本身，不递归）
-            [ -n "$(find "$d" -maxdepth 0 -mtime +7 2>/dev/null)" ] || continue
-            scanned=$((scanned + 1))
-            rm -rf "$d" 2>/dev/null
-            if [ -d "$d" ]; then
-                failed=$((failed + 1))
-                printf '  ⚠️ 清不掉（宿主的删除保护）：%s\n' "${d#"$repo"/}"
-            else
-                cleaned=$((cleaned + 1))
-                printf '  🧹 已清 7 天以上的构建残留：%s\n' "${d#"$repo"/}"
-            fi
-        done
-    done
-    if [ "$scanned" -eq 0 ]; then
-        echo "[preflight] ⓿ 构建残留：无 7 天以上的（next-stale-*）"
-    else
-        echo "[preflight] ⓿ 构建残留：清掉 $cleaned / 待清 $scanned（删不掉 $failed）"
-        [ "$failed" -gt 0 ] && echo "        ↳ 手工清：rm -rf <上面那些目录>（在你自己的终端里跑，不受本工具的保护策略限制）"
+# 它与硬约定 R 的关系（**这两件事必须分清**）：
+#   · **R** 管"**应用怎么删**" —— 会被拦的一律 `rename` 到 `.trash/`（产物从此只会进这里）；
+#   · **⓿** 是"**清残留**"（卫生，不是门禁）—— 它**不做** R 禁止的那种删除。
+#
+# ⚠️ 为什么它不再 `rm -rf`（2026-09-29 改，第三次同族事故之后）：
+#   宿主的删除保护拦的是"**单轮累计 > 50 项**"，而一次 100~300MB 的 `.next` 必然远超
+#   ⇒ **那条 `rm -rf` 从来没有成功过**。它唯一的作用是让"验收测试"在**小探针**上变绿
+#   —— 这正是**假绿**（硬约定 H：验收脚本本身也要被验收）：测试过了，产品能力没变。
+# ⇒ 现在按**形态**分流（判据就是 R 的那一条）：
+#     **单文件**（`.trash/coverage/` 里的 `.coverage.*` 等，每个 1 项）→ 直接回收（远低于阈值）
+#     **目录**（`.trash/next/` 下的旧构建）→ **只统计 + 报一条手工命令**，绝不动手
+#   ⚠️ 顺带一条纪律：**删不掉不影响退出码** —— 这不是门禁。算成"失败"会让
+#     "磁盘上有个删不掉的目录"被读成"代码错了"（假红，硬约定 J）。
+#
+# 回收站的位置与布局，唯一来源 = `tools/local-verify/trash.py`（`--report` 也能看）。
+report_trash() {
+    local base="$repo/.trash"
+    if [ ! -d "$base" ]; then
+        echo "[preflight] ⓿ 回收站 .trash/：还没有（出现构建残留 / 覆盖率旧数据时才会有）"
+        return 0
     fi
+    # ---- 1) 单文件（7 天以上）直接回收 ----
+    # 只看 `-maxdepth 1` 的**直接**文件 ⇒ 每个 1 项，**不可能**撞上"≥50 项"的阈值。
+    # 7 天 = "当轮刚挪走的那份可能还要用"（`--keep-db` 调试时要回看上一次跑是什么样）。
+    local freed=0 f kind
+    for kind in coverage misc chrome next; do
+        [ -d "$base/$kind" ] || continue
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            # trash-ok: 单文件、非递归（`-maxdepth 1 -type f` 保证每个 1 项）
+            if rm -f "$f" 2>/dev/null; then freed=$((freed + 1)); fi
+        done < <(find "$base/$kind" -maxdepth 1 -type f -mtime +7 2>/dev/null)
+    done
+    # ---- 2) 目录：只统计，绝不动手 ----
+    local dirs=0 d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        dirs=$((dirs + 1))
+        printf '  · %s\n' "${d#"$repo"/}"
+    done < <(find "$base" -mindepth 2 -maxdepth 2 -type d 2>/dev/null)
 
-    # 覆盖率回收站：**同一手法**（`rename` 挪走，见 run-local-pipeline.py::_retire）。
-    # 它每次只长 ~150KB，但同样没有别的机会被清 ⇒ 同一条规则管它。
-    local cov="$repo/.coverage-trash"
-    if [ -d "$cov" ] && [ -n "$(find "$cov" -maxdepth 0 -mtime +7 2>/dev/null)" ]; then
-        rm -rf "$cov" 2>/dev/null
-        if [ -d "$cov" ]; then
-            echo "  ⚠️ 清不掉（宿主的删除保护）：.coverage-trash/"
-        else
-            echo "  🧹 已清 7 天以上的覆盖率回收站：.coverage-trash/"
-        fi
+    [ "$freed" -gt 0 ] && echo "[preflight] ⓿ 回收站：已回收 $freed 个 7 天以上的**单文件**"
+    if [ "$dirs" -gt 0 ]; then
+        echo "[preflight] ⓿ 回收站：还有 $dirs 个**目录**（上面那些）—— 本工具**不删目录**（宿主的删除保护会拦）"
+        echo "        ↳ 要真回收，在你自己的终端里跑（不受本工具的保护策略限制）："
+        # trash-ok: 这一行是**打印给用户看的手工命令文本**，不是本脚本执行的删除
+        echo "          rm -rf \"$base\""
+    elif [ "$freed" -eq 0 ]; then
+        echo "[preflight] ⓿ 回收站：空"
     fi
 }
-clean_stale_builds
+report_trash
 
 # ---------------- 逐道跑，并**记下真实状态** ----------------
 # 13 **类**的槽位一次建好；没跑到的保持 skipped。
@@ -257,15 +259,14 @@ fi
 # ⇒ 挪走它 = 让本机的 tsc 看到**与 CI 同一份输入**（差别只剩"没跑构建"）。
 # ⚠️ 只挪 `types/`，**不挪整个 `.next`**：`next dev` 的编译缓存在别处，
 #   内循环不需要为一次 tsc 重新编译整个应用。
-# ⚠️ 挪进 `node_modules/.cache/`（tsc / prettier / eslint 都默认跳过它），
-#   名字用 `next-types-*`，正好被 ⓿ 的"7 天以上清理"一起管。
+# ★ 落点自 2026-09-29 起是仓库根的 `.trash/next/`（项目约定 R 的唯一回收站），
+#   不再挪进 `node_modules/.cache/` —— **一个名字只有一个来源**，⓿ 也只需扫一处。
 prepare_tsc_input() {
     local app="$1"
     local t="$repo/apps/$app/.next/types"
     [ -d "$t" ] || return 0
-    local cache="$repo/apps/$app/node_modules/.cache"
-    mkdir -p "$cache" 2>/dev/null || return 0
-    if mv "$t" "$cache/next-types-$(date +%s)" 2>/dev/null; then
+    mkdir -p "$repo/.trash/next" 2>/dev/null || return 0
+    if mv "$t" "$repo/.trash/next/next-types-$(date +%s)-$$" 2>/dev/null; then
         printf '  （陈旧的 .next/types 已挪走 —— 让本机与 CI 看到同一份输入）\n'
     fi
 }

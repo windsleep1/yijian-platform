@@ -39,9 +39,16 @@ venv/
 coverage.xml
 htmlcov/
 # 旧覆盖率数据的"回收站"：本机宿主的删除保护会拒掉批量 unlink，
-# 所以清场改成 **rename 挪进来**（见 run-local-pipeline.py::_retire）。名字刻意与
-# `.coverage.*` **不匹配**（`-` 不是 `.`），否则下一轮清场又会把它收进来。
+# 所以清场改成 **rename 挪进来**（见 run-local-pipeline.py::_retire）。
+# ⚠️ **历史名字**（2026-09-29 起并入 `.trash/coverage/`，见下）—— 保留这条**只作保险**：
+#    万一将来有谁把落点写回旧名字，它至少不会进版本库。
 .coverage-trash/
+
+# ★ **统一回收站**（2026-09-29，项目约定 R / `docs/25`）：
+# 应用**不删**、只把目录 `rename` 进来，由宿主或人回收。子目录按生产者分：
+#   `.trash/next/`（构建残留）· `.trash/coverage/` · `.trash/chrome/`（CDP profile）· `.trash/misc/`
+# ⇒ 它**必须**被忽略：里面装的全是"本来要被删掉的东西"。
+.trash/
 
 # Node
 node_modules/

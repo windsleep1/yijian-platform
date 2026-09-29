@@ -207,17 +207,31 @@ try {
                     Where-Object { $_.Name -ne ".coveragerc" }
         foreach ($f in $staleCov) {
             Write-Host ("[local-verify] 清场：删除历史覆盖率文件 {0}" -f $f.Name)
+            # trash-ok: 单文件（一个历史覆盖率文件），非递归
             Remove-Item -Path $f.FullName -Force -ErrorAction SilentlyContinue
         }
         # 2) 单个名字 + 派生物（`.gitignore` 里同族的另外两类）
         foreach ($f in @($covDataFile, (Join-Path $repo "coverage.xml"), $covStopFile)) {
+            # trash-ok: 单文件（同上），非递归
             Remove-Item -Path $f -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -Path (Join-Path $repo "htmlcov") -Recurse -Force -ErrorAction SilentlyContinue
+        # ★ `htmlcov/` 是**目录** ⇒ 按项目约定 R **只能 rename**（宿主的删除保护会拦递归删除；
+        #   实测过一次 `htmlcov/` 55 项就把后续的 `coverage combine` 额度吃光了，坑 62）。
+        #   落在 `<repo>/.trash/coverage/`，由宿主或人回收。★ `test-cov-clean.ps1` 断言的是
+        #   "它**不在原处**"（`-not (Test-Path .../htmlcov)`）—— rename 与删除在这条判据上**等价**，
+        #   所以这个改动没有削弱那条测试。
+        $htmlcov = Join-Path $repo "htmlcov"
+        if (Test-Path -LiteralPath $htmlcov) {
+            $trashCov = Join-Path (Join-Path $repo ".trash") "coverage"
+            New-Item -ItemType Directory -Path $trashCov -Force | Out-Null
+            $dst = Join-Path $trashCov ("htmlcov-" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+            Move-Item -LiteralPath $htmlcov -Destination $dst -Force -ErrorAction SilentlyContinue
+        }
 
         # 3) 兜底断言：清场最坏的结果是"把 .coveragerc 也删了"，而那样门禁会**静默失效**
         #    （覆盖率照跑，只是没了门槛）。宁可当场报错，也不要跑出一个"通过"的假象。
         if (-not (Test-Path (Join-Path $repo ".coveragerc"))) {
+            # trash-ok: 这是**错误提示文本**里的字面量，不是删除动作
             Fail "清场把 .coveragerc 删掉了 —— 检查 Remove-Item 的通配符（`.coverage*` 会匹配 `.coveragerc`，要用 `.coverage.*`）"
         }
     }

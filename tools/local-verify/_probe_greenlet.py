@@ -52,6 +52,7 @@ DATA = os.path.join(REPO, f".coverage.r-{MODE}")
 CONC = None if MODE == "thread" else ["greenlet"]
 
 if os.path.exists(DATA):
+    # trash-ok: 单文件、非递归（探针自己写的临时数据，1 项）
     os.remove(DATA)
 
 kw = {"source": ["app"], "data_file": DATA, "config_file": CFG}

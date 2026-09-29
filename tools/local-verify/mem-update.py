@@ -288,12 +288,15 @@ def do_end(budget: int) -> int:
         say(f"✗ 越过注入截断点 {TRUNCATE_AT}！—— 立即从 {BACKUP.name} 恢复")
         if BACKUP.exists():
             shutil.copy2(BACKUP, MEM)
+        # trash-ok: 单文件（批状态 json），非递归
         STATE.unlink(missing_ok=True)
         return 1
     if not ok:
         say("✗ 净增超过预算 —— 减法没做到位。**本批不通过**（内容保留，便于你重做减法）")
         return 1
+    # trash-ok: 单文件（批状态 json），非递归
     STATE.unlink(missing_ok=True)
+    # trash-ok: 单文件（批备份 bak），非递归
     BACKUP.unlink(missing_ok=True)
     say(f"✓ 通过。距截断点余量 = {TRUNCATE_AT - end}")
     return 0
@@ -333,7 +336,9 @@ def main() -> int:
         return 0
 
     if args.force_end:
+        # trash-ok: 单文件（批状态 json），非递归
         STATE.unlink(missing_ok=True)
+        # trash-ok: 单文件（批备份 bak），非递归
         BACKUP.unlink(missing_ok=True)
         say("已放弃本批（内容保留、状态清理）")
         return 0

@@ -49,6 +49,7 @@ if ($Stop) {
             Stop-Process -Id ([int]$apiPid) -Force -ErrorAction SilentlyContinue
             Write-Host "[serve-local] 已停止 API (PID $apiPid)"
         }
+        # trash-ok: 单文件（本脚本自己的 pid file），非递归
         Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "[serve-local] 没有记录 API PID，跳过"
@@ -129,6 +130,7 @@ if (Test-Path $pidFile) {
     if ($old) {
         Stop-Process -Id ([int]$old) -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 400
+        # trash-ok: 单文件（本脚本自己的 pid file），非递归
         Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     }
 }
