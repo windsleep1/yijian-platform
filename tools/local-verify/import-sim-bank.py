@@ -24,7 +24,8 @@ upsert 模式下"丢章节/知识点"= **把库里 6000 道题的章节关系洗
 生成的 JSON 用 upsert 灌库后，除下面三处**可解释的规范化**外，逐字段与 seed 一致：
 
 1. `answer`：`multiple` 题补上 `partial_credit: true` —— 对齐 `docs/03` §5.1 的权威定义
-   （seed 漏了这个键；`single`/`judge`/`case`/`case_sub` 与 seed 完全一致）。
+   （seed 漏了这个键）；★ **`judge` 题要把布尔翻回 `A`/`B`**（存储的规范形式是布尔，
+   导入模板的人写列是标号 —— 见 `_answer_text` 里的注释）；`single`/`case`/`case_sub` 与 seed 一致。
 2. `analysis_points`：整分值写成 `2` 而不是 `2.0`（jsonb 里两者不同值）。
 3. `version +1`、追加 `question_versions` 快照与 `content_change_logs` —— 这是导入的
    正常副作用（回滚依据），`status` 不动（upsert 不覆盖老题状态）。
@@ -69,7 +70,18 @@ def _answer_text(item: dict[str, Any]) -> str:
         # 必须用分隔符：`ACD` 会被当成一个标号，导致"答案不在选项中"
         return "|".join(value or [])
     if qtype == "judge":
-        return (value or [""])[0]
+        # ★ 库 / 种子里的**规范形式**是布尔（`app/schemas/answer.py`），
+        #   而导入模板里的**人写列**是 `A` / `B`（A = 正确）——
+        #   **这一层翻译由本转换器负责**，两个格式各自是对的。
+        # ⚠️ 2026-09-29 改规范时漏了这里，是**测试**抓出来的：
+        #   `test_seed_bank_mapping_matches_existing_rows` 报
+        #   「判断题答案必须是 A 或 B，当前：True」（69 行）。
+        #   ⇒ 判据：改"存储格式"时，**凡是"读旧格式再转成别的格式"的地方都要一起改** ——
+        #     而种子的 JSON 同时是这组导入走查的**输入素材**，这层耦合不看代码是想不到的。
+        first = (value or [None])[0]
+        if isinstance(first, bool):
+            return "A" if first else "B"
+        return "" if first is None else str(first)
     if qtype == "case":
         return value or ""
     # case_sub / fill / essay：单条文本

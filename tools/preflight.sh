@@ -6,6 +6,10 @@
 #   门禁有 **13 类**；CI 里是 **18 道步骤**（前端 5 类 × `apps/admin` + `apps/web`，
 #   权威清单 = `check-invariants.py` 的 `REQUIRED_GATES`）。本地**能跑 12 类**（①~⑫），只差 ⑬ `build`：
 #
+#   ⚠️ 其中 **⑤ pytest / ⑥ 覆盖率 不归本脚本跑**（本脚本不碰数据库）——
+#      它们由 `tools/local-verify/run-local-pipeline.py` 跑，本脚本**引用它的回执**（📋）。
+#      回执与当前代码同源才引用；否则标 ⏭。**📋 与 ✅ 不是一回事**（见下面四种状态）。
+#
 #     ① CI 诊断段自检      ② 不变量自检        ③ ruff check         ④ ruff format --check
 #     ⑤ pytest(真 PG)     ⑥ 覆盖率门禁       ⑦ 反向检查·认证链路   ⑧ 共享包单测
 #     ⑨ npm run lint     ⑩ format:check     ⑪ format:check:shared ⑫ tsc --noEmit
@@ -23,7 +27,8 @@
 #
 # 用法：**三种范围**（选错了会白等 —— 所以关系写在最前面）
 #
-#     bash tools/preflight.sh                    # ①~⑫  全部本地门禁（含后端）≈2.5 分钟 → push 前
+#     bash tools/preflight.sh                    # ①~⑫ ≈2.5 分钟 → push 前
+#                                                #   （⑤⑥ 是 📋 引用回执，不是本脚本跑的）
 #     bash tools/preflight.sh --frontend         # ⑦~⑫  前端 6 类 × **全部**前端 app    ≈55 秒
 #     bash tools/preflight.sh --app web          # ⑦⑧ + 只跑 **web** 的 ⑨~⑫            ≈30 秒 → ★ C 端主循环
 #
@@ -176,14 +181,22 @@ report_trash
 # 13 **类**的槽位一次建好；没跑到的保持 skipped。
 # ⚠️ ⑨~⑬ 是「按 app 实例化」的：**对 $APPS 里每个 app 各跑一遍**，任一红 ⇒ 该类红 ——
 #    所以「本地 12 类」实际覆盖了 CI 的前端 10 道步骤（5 类 × 2 app）。
-declare -a ST=()          # pass / fail / skip
+# 四种状态，**含义不能混**（用户 2026-09-29 点名）：
+#   ✅ pass  本地跑过且通过 ｜ ❌ fail 本地跑过但失败
+#   ⏭ skip  明确跳过（带原因）｜ 📋 proxy **由别的工具跑过、我引用它的结论**
+# ★ 📋 与 ✅ 的区别不是"谁跑的"，而是"**我知道谁跑了、而且它通过了**" ——
+#   所以它必须有据可查（管道回执，见 `tools/local-verify/pipeline_stamp.py`）。
+#   没有回执就老老实实标 ⏭：**宁可说"没跑"，不可说"跑过了"**。
+declare -a ST=()          # pass / fail / skip / proxy
 declare -a SKIP_REASON=()
+declare -a PROXY_REASON=()
 for i in $(seq 1 13); do ST[$i]=skip; done
 
 mark() {
     case "${ST[$1]:-skip}" in
         pass) printf '✅' ;;
         fail) printf '❌' ;;
+        proxy) printf '📋' ;;
         *) printf '⏭' ;;
     esac
 }
@@ -192,6 +205,13 @@ note_skip() {
     ST[$1]=skip
     SKIP_REASON[$1]="$2"
     printf '  ⏭ %s（跳过：%s）\n' "$3" "$2"
+}
+
+note_proxy() {
+    #: 📋 = "由别的工具跑过"。**只在回执与当前代码同源时**才允许调用（见 mark_machine_gates）。
+    ST[$1]=proxy
+    PROXY_REASON[$1]="$2"
+    printf '  📋 %s（由别的工具跑过：%s）\n' "$3" "$2"
 }
 
 run_gate() {
@@ -233,13 +253,41 @@ else
     run_gate 4 "ruff format --check（apps/api）" "$PY" -m ruff format --check apps/api
 fi
 
-# ---- ⑤⑥ 在 run-local-pipeline.py 里跑；本脚本只标注 ----
-# ⚠️ 它们**不是"已查"**，是"由另一个入口查" —— 所以 `--frontend` 模式下要标成跳过。
+# ---- ⑤⑥ 由 run-local-pipeline.py 跑；本脚本**引用它的回执**（📋）----
+#
+# ⚠️ 这里原来写的是 `ST[5]=pass; ST[6]=pass` —— 也就是**标成通过，但从没跑过**。
+#   于是"12/12 全过"里混进了两个假 ✅（用户 2026-09-29 点名为"假绿的新变种"）。
+#   现在改成：**回执与当前代码同源**才标 📋（并把引用的数字打出来）；否则标 ⏭。
+mark_machine_gates() {
+    local out gate state detail k label
+    out=$("$PY" "$repo/tools/local-verify/pipeline_stamp.py" --status 2>/dev/null) || out=""
+    if [ -z "$out" ]; then
+        # 读不到回执（脚本坏了 / python 缺）⇒ ⏭，**不是** 📋
+        note_skip 5 "读不到管道回执（pipeline_stamp.py 没跑起来）" "pytest（真 PG）"
+        note_skip 6 "同上" "覆盖率门禁"
+        return
+    fi
+    while IFS=$'\t' read -r gate state detail; do
+        k=""; label=""
+        case "$gate" in
+            pytest)   k=5; label="pytest（真 PG）" ;;
+            coverage) k=6; label="覆盖率门禁" ;;
+            *) continue ;;
+        esac
+        case "$state" in
+            fresh)  note_proxy "$k" "$detail" "$label" ;;
+            failed) ST[$k]=fail; printf '  ❌ %s：**回执显示上一轮失败了**（%s）\n' "$label" "$detail" ;;
+            *)      note_skip "$k" "没有与当前代码同源的管道回执（$detail）" "$label" ;;
+        esac
+    done <<< "$out"
+}
+
 if [ "$FRONTEND_ONLY" = "1" ]; then
     for k in 5 6; do note_skip "$k" "$MDESC（数据库门禁未查）" "pytest / 覆盖率"; done
+elif [ -z "$PY" ]; then
+    for k in 5 6; do note_skip "$k" "找不到 Python（回执要用它读）" "pytest / 覆盖率"; done
 else
-    ST[5]=pass
-    ST[6]=pass
+    mark_machine_gates
 fi
 
 #: ⑫ 专用：跑 `tsc` 之前，把**上一次构建/开发生成的** `.next/types` 挪走。
@@ -343,13 +391,17 @@ fi
 npass=0
 nfail=0
 nskip=0
+nproxy=0
 for i in $(seq 1 13); do
     case "${ST[$i]}" in
         pass) npass=$((npass + 1)) ;;
         fail) nfail=$((nfail + 1)) ;;
+        proxy) nproxy=$((nproxy + 1)) ;;
         *) nskip=$((nskip + 1)) ;;
     esac
 done
+#: "不是 ❌" 的道数 —— 汇总行要显式区分它由哪几种状态构成（见下面的 note）。
+nnotfail=$((npass + nproxy + nskip))
 ELAPSED=$(( $(date +%s) - T0 ))
 
 cat <<MATRIX
@@ -373,12 +425,25 @@ cat <<MATRIX
   ⑫ tsc --noEmit                                                   $(mark 12)     ✅
   ⑬ npm run build                                                  $(mark 13)     ✅   ← --with-build 才跑
   ─────────────────────────────────────────────────────────────  ────  ────
-  本次：通过 $npass · 失败 $nfail · 跳过 $nskip（**类**数；⑨~⑬ 每类含 $APPS 各一遍）
+  本次：✅ 本地跑过通过 $npass · 📋 由别的工具跑过 $nproxy · ⏭ 明确跳过 $nskip · ❌ 失败 $nfail
+        （**类**数；⑨~⑬ 每类含 $APPS 各一遍）
   CI 侧：18 道步骤（后端 6 + 反向检查 1 + 共享包单测 1 + 前端 5 类 × 2 app）｜ 总耗时 ${ELAPSED}s
 
-  ✅ 通过   ❌ 失败   ⏭ 跳过（**没查**，不等于通过）
+  ⇒ **"不是 ❌" 的有 $nnotfail 道，但它们含义不同**：
+     ✅ = 我跑了、通过 ｜ 📋 = 我知道谁跑了、它通过了（引用结论）｜ ⏭ = **没跑**（不算"过"）
+
+  ✅ 本地跑过通过 · ❌ 本地跑过失败 · 📋 由别的工具跑过（引用回执）· ⏭ 明确跳过（**没查**，不等于通过）
 MATRIX
 
+if [ "$nproxy" -gt 0 ]; then
+    echo ""
+    echo "  📋 引用结论的 $nproxy 道（**别的工具跑的**，回执与当前代码同源）："
+    for i in $(seq 1 13); do
+        [ "${ST[$i]}" = "proxy" ] && echo "     📋 [$i] ${PROXY_REASON[$i]}"
+    done
+    echo "  ⚠️ 想自己跑一遍（比如回执已经过期）：bash tools/preflight.sh 之后跑"
+    echo "     python tools/local-verify/run-local-pipeline.py"
+fi
 if [ "$nskip" -gt 0 ]; then
     echo ""
     echo "  ⚠️ 本**跳过了 $nskip 道**（原因/补救）："
@@ -394,8 +459,8 @@ if [ "$nfail" -gt 0 ]; then
     exit 1
 fi
 if [ "$nskip" -gt 0 ]; then
-    echo "[preflight] ✅ 已跑的 $npass 道全过；但**有 $nskip 道没跑**（见上）—— 别把它读成「全绿」"
+    echo "[preflight] ✅ $npass 道本地跑过通过 · 📋 $nproxy 道引用回执；但**有 $nskip 道没跑**（见上）—— 别读成「全绿」"
     exit 0
 fi
-echo "[preflight] ✅ 本范围全过（范围 = $MDESC）—— 13 类里没跑到的见上"
+echo "[preflight] ✅ 本范围全过（范围 = $MDESC）：✅ $npass 本地跑过 · 📋 $nproxy 引用回执 —— 13 类里没跑到的见上"
 exit 0

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -51,6 +52,7 @@ HERE = Path(__file__).resolve().parent
 REPO_DEFAULT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
+import pipeline_stamp  # noqa: E402  （管道回执 —— 让 preflight 的 📋 有证可查）
 import trash as trash_mod  # noqa: E402  （唯一回收站入口 —— 项目约定 R / `docs/25`）
 
 HOME = Path.home()
@@ -110,6 +112,33 @@ def run(cmd: list[str], cwd: Path, env: dict[str, str], label: str, timeout: int
     return r.returncode
 
 
+def run_capture(
+    cmd: list[str], cwd: Path, env: dict[str, str], label: str, timeout: int = 1800
+) -> tuple[int, str]:
+    """同 `run()`，但**把输出也留下来**（写给"管道回执"用）。
+
+    ⚠️ 仍然**打屏**：把输出吞掉会让"跑过了"与"没跑"看起来一样（硬约定 H 的同族：
+      **没覆盖 ≠ 能过**，而"看不见的输出"等于没覆盖）。
+    """
+    say(f"$ {label}")
+    r = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        timeout=timeout,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for stream in (r.stdout, r.stderr):
+        if stream:
+            print(stream, end="" if stream.endswith("\n") else "\n")
+    say(f"  -> exit={r.returncode}")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
 def preflight(p: Pipeline) -> None:
     """本地门禁预检（`tools/preflight.sh`）：4 道静态门禁，**跑在起 PG 之前**。
 
@@ -141,6 +170,9 @@ class Pipeline:
         self.pg_data = Path(args.pg_data)
         self.psql = self.pg_bin / "psql.exe"
         self.tmp = Path(os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp")
+        #: 回执要引用的两行数字（跑完才有值；pytest 与覆盖率各摘一行）。
+        self.passed_line = ""
+        self.total_line = ""
         self.env = dict(os.environ)
         self.env.update(
             {
@@ -421,7 +453,7 @@ class Pipeline:
         raise SystemExit("API 未在 60s 内就绪")
 
     def pytest(self) -> int:
-        return run(
+        rc, out = run_capture(
             [
                 self.a.python,
                 "-m",
@@ -442,6 +474,11 @@ class Pipeline:
             self.env,
             f"pytest {self.a.pytest_args}",
         )
+        # 摘出 `354 passed, 1 skipped in …` 这一行 —— 回执里要**引用数字**，
+        # 只写"跑过了"等于让人回去翻日志（而日志会被下一次运行覆盖）。
+        hits = re.findall(r"\d+ passed[^\n]*", out)
+        self.passed_line = hits[-1].strip() if hits else ""
+        return rc
 
     def e2e_web(self) -> int:
         """**把 pytest 那一步换成浏览器走查**（`e2e-web.py`）。
@@ -555,6 +592,8 @@ class Pipeline:
         say("---- 逐文件（有缺失的才列出；与 CI 的 `::notice 覆盖率逐文件` 同口径）----")
         for line in out.stdout.rstrip().splitlines():
             say("  " + line)
+        totals = re.findall(r"^TOTAL\s+\d+\s+\d+\s+\d+%.*$", out.stdout, re.MULTILINE)
+        self.total_line = totals[-1].strip() if totals else ""
         say(f"（完整报告：{self.tmp / 'yb-cov-report.txt'}）")
         return out.returncode
 
@@ -677,6 +716,10 @@ def main(argv: list[str] | None = None) -> int:
             rc = p.e2e_web()
             p.stop_api_gracefully()
             say(f"e2e-web exit={rc} ⇒ 本轮 {'通过' if rc == 0 else '未通过'}")
+            # ⚠️ **走查分支不写回执**：它换掉的就是 pytest/覆盖率那一步，
+            #   写一份"通过"的回执会让 preflight 把 ⑤⑥ 标成 📋 ——
+            #   而这两道**本轮根本没跑**。回执只由真正跑了它们的那条路径写。
+            say("（本分支不写管道回执：pytest / 覆盖率这两道本轮没跑）")
             return rc
         p.clean_coverage()
         # ⚠️ **顺序与 CI 对齐**：先 RBAC + 超管，**再**灌题库。
@@ -694,6 +737,15 @@ def main(argv: list[str] | None = None) -> int:
         say(
             f"pytest exit={rc_pytest} / coverage exit={rc_cov} ⇒ 本轮 {'通过' if rc == 0 else '未通过'}"
         )
+        # ★ 写"管道回执"：让 `preflight` 的 📋（由别的工具跑过）**有证可查**。
+        #   失败也写 —— "我知道它跑过、而且知道它失败了"同样是一条结论。
+        stamp = pipeline_stamp.write_stamp(
+            pytest_rc=rc_pytest,
+            cov_rc=rc_cov,
+            passed=p.passed_line,
+            total=p.total_line,
+        )
+        say(f"管道回执已写：{stamp}")
         return rc
     finally:
         p.teardown()

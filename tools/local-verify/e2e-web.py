@@ -804,6 +804,19 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
         )
         await answer(b, nth=0)
         await b.wait_for("document.body.innerText.includes('解析')", timeout=40, label="出现解析")
+        # ★★ 「刷新数据」不许移动「用户的当前位置」（用户 2026-09-29 定的判据）：
+        #   提交后前端会**再 GET 一次 session** 去拿进度 —— 那一趟**只许改进度数字**，
+        #   不许把游标带到下一题。第一版的 bug 正是这样：答完第 1 题页面立刻跳到第 2 题，
+        #   判分结论与解析**一闪而过**（而"显示解析"是本批的验收判据）。
+        #   ⚠️ 这条断言是**显式**的：只断言"解析出现过"是不够的 —— 它可能出现过又立刻被覆盖。
+        where = await b.eval(
+            "(document.body.innerText.match(/第 \\d+ 题 \\/ 共 \\d+ 题/) || [])[0] || ''"
+        )
+        need(
+            isinstance(where, str) and where.startswith("第 1 题"),
+            f"提交后页面停在了 {where!r}（应为「第 1 题」）——"
+            "**「刷新数据」把「用户的当前位置」也带跑了**（进度跟后端走、游标跟用户动作走）",
+        )
         verdict = await b.eval("(document.body.innerText.match(/(答对了|答错了)/) || [])[0] || ''")
         need(verdict in ("答对了", "答错了"), f"没读到判分结论：{verdict!r}")
         right = await b.eval(

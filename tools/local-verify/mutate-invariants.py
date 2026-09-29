@@ -11,10 +11,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 CHECK = REPO / "tools" / "local-verify" / "check-invariants.py"
+
+#: 备份落点：**仓库外**（见下面 `bak =` 处的理由）。
+_BAK_DIR = Path(tempfile.gettempdir()) / "yijian-mutantbak"
 
 MUTANTS: list[tuple[str, Path, str, str]] = [
     (
@@ -55,6 +59,24 @@ MUTANTS: list[tuple[str, Path, str, str]] = [
         # trash-ok: 这是**变异体源码的字符串字面量**（要被注入到别的文件里），不是本文件的删除动作
         "    shutil.rmtree(p)",
     ),
+    (
+        # ★ 不变量 7（2026-09-29 加）：把 `create_session` 的 `await db.commit()` 删掉 ——
+        #   这正是 P2b-1 真实踩过的 bug（`get_db` 不自动提交）。**必须变红。**
+        #   这条尤其重要：它要能抓到"SQL 装在**模块级常量**里"的写法
+        #   （函数体里只有 `db.execute(_INSERT_SESSION, …)`），否则看着在跑、实际抓不到。
+        "[7] 写路径提交：删掉 `practice_service.create_session` 的 `await db.commit()`",
+        REPO / "apps" / "api" / "app" / "services" / "practice_service.py",
+        "    await db.commit()\n    return sid",
+        "    return sid",
+    ),
+    (
+        # ★ 不变量 8（2026-09-29 加）：让导入管道**自己拼** `{"value": ["A"]}`（绕过规范形式）。
+        #   必须变红 —— 否则"答案只有一个构造入口"就是句空话。
+        "[8] 答案单一入口：让 `_build_answer` 绕过 `canonical_doc` 自己拼字典",
+        REPO / "apps" / "api" / "app" / "services" / "import_service.py",
+        '        return canonical_doc("judge", [answer_raw.strip().upper()])',
+        '        return {"value": [answer_raw.strip().upper()]}',
+    ),
 ]
 
 
@@ -79,7 +101,13 @@ def main() -> int:
 
     caught = applied = 0
     for label, path, old, new in MUTANTS:
-        bak = path.with_suffix(path.suffix + ".mutantbak")
+        # ★★ 备份放在**仓库外**（`%TEMP%`），不是 `path.with_suffix(".mutantbak")`。
+        #   2026-09-29 实测：一次运行被中断（SIGTERM）⇒ 仓库里留下了一个
+        #   `import_service.py.mutantbak`，它**不是**版本控制里的东西，会以"意外的未跟踪文件"
+        #   出现在 `git status` 里（收尾纪律 §7 专门盯着这一类）。
+        #   ⇒ 判据：**临时文件不该落在工作树里** —— 崩了也要能自证现场干净。
+        bak = _BAK_DIR / f"{path.name}.bak"
+        _BAK_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, bak)
         try:
             s = path.read_text(encoding="utf-8")
@@ -100,7 +128,7 @@ def main() -> int:
                 print(f"    {f}")
         finally:
             shutil.copy2(bak, path)
-            # trash-ok: 单文件（变异前的备份），非递归
+            # trash-ok: 单文件（变异前的备份，在 %TEMP% 下），非递归
             bak.unlink(missing_ok=True)
 
     rc1, _ = run_check()

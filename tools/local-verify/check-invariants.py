@@ -27,6 +27,7 @@ CLI
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -301,7 +302,11 @@ def _strip_py(text: str) -> str:
 
     ⚠️ 必须抹：`preflight.sh` 的 ⓿ 段里就有一条**打印给用户看的** `rm -rf .trash`
     手工命令（不是它自己执行的删除）。不抹 ⇒ 它变成一个恒红的假红。
-    ⚠️ 只做词法级处理，不 import ast：这个脚本必须**纯标准库 + 零依赖**（硬约定 H）。
+    ⚠️ 只做**词法级**处理（不建 AST）：三引号块与行尾注释靠状态机扫掉就够了，
+    而这一层的目的只是"别把注释里的 SQL 当成真的 SQL"（不变量 6/8 用它）。
+    （不是"不能用 ast" —— 本文件在**不变量 7** 里确实 import 了 `ast` 做结构分析；
+     两处的需求不同：那边要看"哪个函数调了哪个常量"，词法级看不出来。
+     `ast` 是标准库，与"零第三方依赖"不冲突。）
     """
     res: list[str] = []
     i, n = 0, len(text)
@@ -445,14 +450,211 @@ def check_delete_guard() -> None:
             bad("`.gitignore` 缺 `.trash/` ⇒ 回收站里的东西会进版本库")
 
 
+# ------------------------------------------------------------------ 7
+#: 写库的语句长什么样（只认**字面量里的 SQL**）。用 `\b` 卡词边界：
+#: `UPDATE ` 与 `INSERT INTO` / `DELETE FROM` 是三种形态，别的词（如 `UPDATE` 出现在
+#: 描述文本里）不该被算进来 —— 但那属于"字面量不是 SQL"的情况，见下面的 `text(...)` 约束。
+_WRITE_SQL = re.compile(r"\b(INSERT\s+INTO|UPDATE\s|DELETE\s+FROM)\b", re.I)
+
+#: 扫哪些目录。**只扫 service 层**：路由层不该直接写库（那是分层的意义），
+#: 而 `db/seed` / `tools/` 不在请求事务里，规则不同（它们自己管连接）。
+_WRITE_SCAN_ROOT = "apps/api/app/services"
+
+#: 扫到的"写库函数"个数的**下限**。低于它 ⇒ 认为解析器坏了，而不是"代码很干净"。
+#: ★ 这是本文件里第三次用"下限"这个手法（前两次在删除保护与答案格式）：
+#:   **"零发现"最容易被读成"通过"**，而它更可能是"我根本没扫到"（硬约定 H）。
+MIN_WRITE_FUNCS = 25
+
+
+def _text_literal_is_write(node: ast.AST) -> bool:
+    """这个表达式是不是 `text("...写语句...")`（允许外面套 `.bindparams(...)`）？"""
+    while isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id == "text":
+            if node.args:
+                a = node.args[0]
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    return bool(_WRITE_SQL.search(a.value))
+                if isinstance(a, ast.JoinedStr):  # f-string
+                    parts = [
+                        v.value
+                        for v in a.values
+                        if isinstance(v, ast.Constant) and isinstance(v.value, str)
+                    ]
+                    return bool(_WRITE_SQL.search("".join(parts)))
+                return False
+            return False
+        return False
+    return False
+
+
+def _module_write_names(tree: ast.Module) -> set[str]:
+    """模块级常量里那些"装着写语句的 `text(...)`" —— 例如 `_INSERT_SESSION = text("INSERT ...")`。
+
+    ★★ 为什么必须有这一步（不是锦上添花）：`practice_service` 把SQL 放在**模块级常量**里，
+      函数体里只写 `db.execute(_INSERT_SESSION, {...})`。
+      只扫函数体的话，那个**真的漏了 `commit` 的函数会被整个跳过** ——
+      也就是说，这条不变量**本来该抓到 P2b-1 那个 bug，却抓不到**。
+      （判据同硬约定 J：判据本身要先证明"它在该红的场景真的红过"。）
+    """
+    names: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        if value is None or not _text_literal_is_write(value):
+            continue
+        for t in targets:
+            if isinstance(t, ast.Name):
+                names.add(t.id)
+    return names
+
+
+def _calls_db_execute_with(node: ast.AST, names: set[str]) -> bool:
+    """函数体里有没有 `….execute(<写常量>, …)`。"""
+    for n in ast.walk(node):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if not (isinstance(f, ast.Attribute) and f.attr in ("execute", "execute_dml")):
+            continue
+        if not n.args:
+            continue
+        a = n.args[0]
+        if isinstance(a, ast.Name) and a.id in names:
+            return True
+    return False
+
+
+def _has_commit(node: ast.AST) -> bool:
+    for n in ast.walk(node):
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "commit"
+        ):
+            return True
+    return False
+
+
+def check_write_paths_commit() -> None:
+    print("[7] 写路径必须提交（`get_db` 不自动 commit）—— 不变量 7")
+    root = REPO / _WRITE_SCAN_ROOT
+    offenders: list[str] = []
+    public_writes: list[str] = []
+    private_writes = 0
+    files = 0
+    for f in sorted(root.glob("*.py")):
+        files += 1
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except SyntaxError as e:
+            bad(f"{_WRITE_SCAN_ROOT}/{f.name} 语法错误：{e}")
+            continue
+        consts = _module_write_names(tree)
+        for node in tree.body:
+            if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                continue
+            writes = any(_text_literal_is_write(x) for x in ast.walk(node)) or (
+                _calls_db_execute_with(node, consts)
+            )
+            if not writes:
+                continue
+            if node.name.startswith("_"):
+                # 私有 helper **允许**不提交 —— 它由调用方在同一事务里提交（本仓一直如此，
+                # 且 `import_service._write_rows` 的 docstring 明写了这条约定）。
+                private_writes += 1
+                continue
+            public_writes.append(f"{f.name}::{node.name}")
+            if not _has_commit(node):
+                offenders.append(f"{_WRITE_SCAN_ROOT}/{f.name}::{node.name}")
+    total = len(public_writes)
+    if total < MIN_WRITE_FUNCS:
+        bad(
+            f"只扫到 {total} 个「写库的公开 service 函数」（下限 {MIN_WRITE_FUNCS}）"
+            "—— 先确认解析器/路径没写错，再把下限调下来（**别直接调低**）"
+        )
+        return
+    if offenders:
+        bad(f"{len(offenders)} 个**写着库却看不到 `commit()`** 的公开 service 函数：")
+        for o in offenders:
+            print(f"        {o}")
+        print(
+            "      ⇒ `app/db/base.py::get_db` **不自动提交**（只在异常时 rollback）。\n"
+            "         漏了它的症状极有欺骗性：**200 + code=0 + 返回合法 id，数据却被回滚**\n"
+            "         ⇒ 紧接着按 id 查就是 404。**判据：写路径「成功了但查不到」，先查 commit 再查 SQL。**"
+        )
+        return
+    ok(
+        f"{total} 个写库的公开 service 函数**都含 `commit()`**"
+        f"（另有 {private_writes} 个私有 helper 由调用方提交，允许没有）｜扫了 {files} 个 service 文件"
+    )
+
+
+# ------------------------------------------------------------------ 8
+#: `{"value"` 这个字面量**只允许出现在这些文件里**（`answer` 的构造入口）。
+#: 理由必须写在这里（一处可审完），只有"确实是另一个用途"才登记。
+ANSWER_LITERAL_ALLOW = {
+    "apps/api/app/schemas/answer.py": "**规范形式的定义处** —— 唯一允许拼 `answer` 的地方",
+    "apps/api/app/services/practice_service.py": "出参侧（`public_answer` 把答案发给前端），不是写库",
+}
+MIN_ANSWER_SCAN_FILES = 40
+
+#: 判据只认**字典字面量构造**：`{"value": …}`（允许空格/引号变体）。
+#:
+#: ⚠️ 第一版写的是"这一行里出现 `"value"` 就算" —— 一跑就报 **12 处**，而其中绝大多数是**读取**
+#:   （`doc.get("value")` / `answer->'value'` / 另一张表的 `value` 列）。
+#:   那正是"判据写糙给假红"（硬约定 J 的反面）：**一条会误报的守卫，下一步就是被人加豁免、
+#:   或者干脆删掉**。收窄到"`{` 紧接 `"value"`"之后，误报消失，剩下的就都是真构造。
+#: （本检查是**逐行**跑的，所以 `{` 在上一行的多行字面量不会被算进来 —— 那正是收窄能成立的原因。）
+_ANSWER_CONSTRUCT = re.compile(r"""\{\s*["']value["']\s*:""")
+
+
+def check_answer_single_source() -> None:
+    print("[8] 答案只有一个构造入口（规范形式）—— 不变量 8")
+    seen = 0
+    offenders: list[str] = []
+    for rel, lang in _guard_files():
+        if not rel.endswith(".py"):
+            continue
+        if not (rel.startswith("apps/api/app/") or rel.startswith("db/seed/")):
+            continue
+        seen += 1
+        raw = (REPO / rel).read_text(encoding="utf-8")
+        if rel in ANSWER_LITERAL_ALLOW:
+            continue
+        for i, code in enumerate(_strip(raw, lang).split("\n"), 1):
+            if _ANSWER_CONSTRUCT.search(code):
+                offenders.append(f"{rel}:{i}  {code.strip()[:60]}")
+    for rel, why in ANSWER_LITERAL_ALLOW.items():
+        if (REPO / rel).is_file():
+            print(f"  [--] 允许：{rel} —— {why}")
+    if seen < MIN_ANSWER_SCAN_FILES:
+        bad(f"只扫到 {seen} 个文件（下限 {MIN_ANSWER_SCAN_FILES}）—— 路径写错了吗")
+        return
+    if offenders:
+        bad(f'{len(offenders)} 处**自己拼 `{{"value": …}}`**，绕过规范形式：')
+        for o in offenders[:10]:
+            print(f"        {o}")
+        print(
+            "      ⇒ 用 `app.schemas.answer.canonical_doc(qtype, tokens, partial_credit=…)` 一行搞定；\n"
+            "         确实另有用途就登记进 `ANSWER_LITERAL_ALLOW`（带理由）。\n"
+            "         **两种格式都在跑 ⇒ 一定有读取方在处理类型强制**（坑 76）。"
+        )
+        return
+    ok(f"扫 {seen} 个文件 —— 没有绕过 `canonical_doc()` 的 `answer` 构造")
+
+
 def main() -> int:
-    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条；用户 2026-09-27：每批收尾跑一次）===")
+    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8；每批收尾跑一次）===")
     check_gates()
     check_coverage_ratchet()
     check_ephemeral_db()
     check_admin_isolation()
     check_docs()
     check_delete_guard()
+    check_write_paths_commit()
+    check_answer_single_source()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()
