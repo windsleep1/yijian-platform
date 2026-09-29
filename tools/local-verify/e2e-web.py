@@ -1,4 +1,4 @@
-"""C 端**浏览器**端到端走查（两个场景：`--scenario login` / `--scenario p2a`）。
+"""C 端**浏览器**端到端走查（三个场景：`--scenario login` / `p2a` / `p2b1`）。
 
 为什么要单独写一个（而不是塞进 pytest）
 --------------------------------------
@@ -17,6 +17,7 @@
 --------------------------------------------------------------------------------
     --scenario login（默认）  P1 的登录闭环：用**现成账号**（超管）走登录 → 首页 → 登出
     --scenario p2a            P2a：Tab 守卫 / 注册闭环 / 三条 Tab / 引导 / 反向守卫
+    --scenario p2b1           P2b-1：选科目 → 选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对
 
 walkthrough 步骤（每步都**断言**，不是"看一眼"）
 ----------------------------------------------
@@ -99,6 +100,7 @@ REPO_DEFAULT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
 import cdp_browser  # noqa: E402  （同目录的极简 CDP 驱动，与 B 端截图共用）
+import trash  # noqa: E402  （唯一回收站入口 —— 项目约定 R：会被拦的删除一律 rename）
 
 #: 与 `apps/web/src/lib/auth-store.ts` **逐字一致**。
 #: ⚠️ 这里**故意写死**：脚本要断言的正是"存储层用了这些名字"——
@@ -192,18 +194,20 @@ def isolate_next_dir(web_dir: Path) -> Path | None:
       2. 自己 `shutil.rmtree(.next)` ⇒ 被**同一个守卫**拦（同样 count=80）
       3. ✅ **rename** —— 它**不是删除**，不触发守卫，效果等价：只要"目标目录不存在"
 
-    ⚠️ 挪到 `node_modules/.cache/` 而不是留在 app 目录里：prettier / eslint / tsc 默认都跳过
-      `node_modules`，而留在原地会让 `format:check` 去"检查"几万个构建文件并报格式错
+    ⚠️ 挪到**仓库根的 `.trash/next/`**，不留在 app 目录里：prettier / eslint / tsc 都以
+      `apps/<app>` 为 cwd ⇒ 看不见仓库根的 `.trash/`；而留在原地会让 `format:check`
+      去"检查"几万个构建文件并报格式错
       （2026-09-28 实测：`apps/web` 的 ⑩ 就是被 `.next.stale-*/server/**.js` 弄红的）。
+      ★ 顺带把"构建残留"集中到**一个**目录 —— `preflight` ⓿ 因此只需要看一处
+      （老做法挪进 `apps/<app>/node_modules/.cache/`，每个 app 一处，清的时候要扫两遍）。
     """
     next_dir = web_dir / ".next"
     if not next_dir.exists():
         return None
-    cache = web_dir / "node_modules" / ".cache"
-    cache.mkdir(parents=True, exist_ok=True)
-    stale = cache / f"next-stale-{int(time.time())}"
-    next_dir.rename(stale)
-    say(f"旧 .next 已改名挪走：node_modules/.cache/{stale.name}（**改名不是删除**）")
+    stale = trash.trash(next_dir, kind="next", root=web_dir.parents[1])
+    if stale is None:
+        return None
+    say(f"旧 .next 已改名挪走：{stale.name}（在 .trash/next/ 下；**改名不是删除**）")
     return stale
 
 
@@ -627,6 +631,243 @@ def find_tool(name: str) -> str | None:
     return None
 
 
+async def do_login(b: "cdp_browser.Browser", args: argparse.Namespace) -> None:
+    """用**现成账号**登录（`--phone` / `--password`），落在首页。
+
+    ⚠️ 这里只做"能进到已登录态"，不做断言 —— 断言是 `drive_login` 的事。
+      两个场景分开，是因为**登录场景的每一步本身就是判据**（表单受控、跳转、撤销），
+      而 P2b-1 只把登录当成前置条件（它要验的是刷题的数据流）。
+    """
+    await b.goto(f"{args.web_base}/login")
+    await b.wait_hydrated(timeout=args.hydrate_timeout)
+    await b.type_text('input[autocomplete="username"]', args.phone)
+    await b.type_text('input[type="password"]', args.password)
+    await b.click_text("登录", tag="button")
+    await b.wait_for("location.pathname === '/'", timeout=60, label="登录后进首页")
+
+
+#: ★ 为什么要在**页面**里按文案找按钮、而不是"按索引点第 N 个"：正确答案可能是 `"A"`，
+#:   也可能是多选题的 `"A、C、D"`，判断题则是 `"正确"`（后端已把判断题归一到布尔）。
+#:   按文案找，三种都能覆盖。
+#: ⚠️ 匹配只用 `t === w || t.startsWith(w)`，**不要**假设"标号与选项正文之间有换行" ——
+#:   第一版写的是 `startsWith(w + "\n")`，在 flex 布局下匹配不到：
+#:   两个 `<span>` 是 flex 子项，`innerText` 把它们**直接拼起来**（"A选项内容"），
+#:   于是多选题的第 ⑤ 步找不到按钮。**这是猜 DOM 文本形状的代价** ——
+#:   判据：脚本里凡是"猜渲染结果长什么样"的地方，都要有一条**能证伪**的失败路径（这里就是报"找不到按钮"）。
+#: 练习页的「有可练章节」判据 / 第一个可练章节的文案 / 答题页题干。
+#: ⚠️ 题干用 `main p.whitespace-pre-wrap` 取 —— 那个 class 只出现在题干上
+#:   （选项正文用的是 `<span>`）。**结构一改走查就会红**，这正是想要的：
+#:   结构性改动本来就该把走查一起更新。
+_PRACTICE_CHAPTERS_AVAILABLE_JS = (
+    "document.querySelectorAll("
+    "'main section:nth-of-type(2) ul li button:not([disabled])').length > 0"
+)
+_PRACTICE_FIRST_CHAPTER_JS = (
+    "(document.querySelectorAll("
+    "'main section:nth-of-type(2) ul li button:not([disabled])')[0] || {}).innerText || ''"
+)
+_PRACTICE_STEM_JS = "(document.querySelector('main p.whitespace-pre-wrap') || {}).innerText || ''"
+
+_PICK_BY_ANSWER_JS = """(() => {
+  const wants = %s;
+  let hit = 0;
+  for (const w of wants) {
+    const btns = Array.from(document.querySelectorAll('main ul li button'));
+    const b = btns.find((x) => {
+      const t = (x.innerText || '').trim();
+      return t === w || t.startsWith(w);
+    });
+    if (!b) return false;
+    b.click();
+    hit += 1;
+  }
+  return hit > 0;
+})()"""
+
+
+async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
+    """P2b-1 场景：**选科目 → 选章节 → 建练习 → 答题判分 → 刷新仍在**。
+
+    用户给的四条判据 + 我加的**可证伪锚**（没有它们，前面几条都能被"表面通过"骗过）：
+
+    | # | 判据 | 没有它会怎样 |
+    |---|---|---|
+    | ① | 能选科目 → 选章节 → 创建 session → 显示第一题（且**不给答案**） | —— |
+    | ② | ★ 再建一次 ⇒ **抽到同一道题** | 少了它，③ 的"判分测试"没法构造（见下） |
+    | ③ | 选项能选 → 提交 → 判分 → 显示解析 | —— |
+    | ④ | 刷新后**进度还在**（同一条 session），且**下一题不给答案** | 少了后半句，"把整份答案都发给前端"也能过 |
+    | ⑤ | ★★ 用 **A 揭示的正确答案**去答 **B 的同一道题** ⇒ 必须"答对了" | 少了它，**判分恒返回"错"也能通过 ③** |
+
+    ⚠️ ⑤ 为什么要"建两个 session"（第一版想省掉它，结果绕了两轮）：
+      抽题是"**未做过的优先**"，所以在 A 里答完第 1 题之后，
+      再建的 session **第一题就换人了** —— 拿 A 揭示的答案去答新 session 的第一题，
+      匹配的是一道**完全不同的题**（实测就撞在一道判断题上，选项根本不是 A/B/C/D）。
+      ⇒ 正解：**先连建两个**（此刻都还没答过 ⇒ 抽到同一道，② 顺手把它断言掉），
+        再在 A 上作答、在 B 上复答。
+    """
+    report: dict[str, object] = {}
+
+    async def new_session(b: "cdp_browser.Browser") -> str:
+        """走一遍「选科目 → 选章节」，返回新建 session 的 URL。"""
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelectorAll('main button[aria-pressed]').length > 0",
+            timeout=40,
+            label="科目列表加载完成",
+        )
+        await b.click("main button[aria-pressed]", nth=0)
+        try:
+            await b.wait_for(
+                _PRACTICE_CHAPTERS_AVAILABLE_JS,
+                timeout=40,
+                label="章节列表加载完成（有可练的章节）",
+            )
+        except Exception as e:  # noqa: BLE001
+            # ★ 排障出口：**超时只说"没等到"，不说"页面上现在是什么"** ——
+            #   而这两种信息差着一整轮往返（硬约定：能"看到"证据就别"推理"证据）。
+            #   把页面文本一起报出来，"请求失败"与"确实没题"一眼可分。
+            txt = await b.eval("document.body.innerText")
+            raise Failure(f"章节列表没出来（{e}）。此刻页面文本：\n{txt}") from None
+        first_chapter = await b.eval(_PRACTICE_FIRST_CHAPTER_JS)
+        if not report.get("chapter_picked"):
+            report["chapter_picked"] = " ".join(str(first_chapter).split())
+        await b.click("main section:nth-of-type(2) ul li button:not([disabled])", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进答题页"
+        )
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0", timeout=40, label="有选项"
+        )
+        url = await b.eval("location.pathname")
+        need(isinstance(url, str) and url.startswith("/practice/session/"), f"URL 不对：{url!r}")
+        return url
+
+    async def answer(b: "cdp_browser.Browser", *, nth: int) -> None:
+        """点第 `nth` 个选项并提交。**先等"选中"落进 DOM 再点提交** —— 见下面的注释。"""
+        await b.click("main ul li button", nth=nth)
+        # ★★ 必须**先等"选中"这个状态落进 DOM**，再点提交。
+        #    提交按钮的 `disabled` 由同一个 state 派生（`canSubmit`）——
+        #    点完选项立刻点提交会撞上 React 的渲染节拍：那一刻按钮**还是 disabled**，
+        #    `.click()` 静默无效（不报错、也不提交），下一步只能等成超时。
+        #    ⚠️ 硬约定 D 的 E2E 形态：判据不是"我点过了"，而是"**它能点了吗**"。
+        await b.wait_for(
+            "document.querySelector('main ul li button[aria-pressed=\"true\"]') !== null",
+            timeout=20,
+            label="选项已选中（提交按钮此时才可用）",
+        )
+        try:
+            await b.click_text("提交", tag="button")
+            await b.wait_for(
+                "document.body.innerText.includes('正确答案')", timeout=40, label="出现判分结果"
+            )
+        except Exception as e:  # noqa: BLE001
+            txt = await b.eval("document.body.innerText")
+            raise Failure(f"提交后没出现判分结果（{e}）。此刻页面文本：\n{txt}") from None
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        await do_login(b, args)
+
+        # ---------------- ① 建 A：显示第 1 题，且**不给答案** ----------------
+        say("① 选科目 → 选章节 → 建练习 A：应显示第 1 题 + 选项，且**不给答案**")
+        url_a = await new_session(b)
+        await b.wait_for(
+            "document.body.innerText.includes('第 1 题')", timeout=40, label="显示第 1 题"
+        )
+        body0 = str(await b.eval("document.body.innerText"))
+        need(
+            "正确答案" not in body0,
+            "还没提交就看到了「正确答案」—— 后端把答案提前发给前端了",
+        )
+        stem_a = await b.eval(_PRACTICE_STEM_JS)
+        need(isinstance(stem_a, str) and stem_a.strip() != "", "读不到题干")
+        report["session_a"] = url_a
+
+        # ---------------- ② 建 B：必须抽到**同一道题** ----------------
+        say("② 再建一次（B）：此刻两边都还没答过 ⇒ 应抽到同一道题")
+        url_b = await new_session(b)
+        need(url_b != url_a, f"第二次建的 session 与第一次是同一个 id（{url_b!r}）—— 那不是新建")
+        stem_b = await b.eval(_PRACTICE_STEM_JS)
+        need(
+            stem_b == stem_a,
+            "两个 session 抽到的题不一样 —— 抽题**不是确定性的**，"
+            f"那么「用 A 揭示的答案答 B」这个反向锚就不成立。\nA: {stem_a!r}\nB: {stem_b!r}",
+        )
+        report["deterministic_pick"] = "两个新建 session 抽到同一道题（未作答时）"
+
+        # ---------------- ③ 在 A 上作答 → 判分 + 解析 ----------------
+        say("③ 在 A 上选一个选项并提交 ⇒ 应出现判分结论、正确答案、解析")
+        await b.goto_ready(f"{args.web_base}{url_a}")
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0",
+            timeout=40,
+            label="A 有选项",
+        )
+        await answer(b, nth=0)
+        await b.wait_for("document.body.innerText.includes('解析')", timeout=40, label="出现解析")
+        verdict = await b.eval("(document.body.innerText.match(/(答对了|答错了)/) || [])[0] || ''")
+        need(verdict in ("答对了", "答错了"), f"没读到判分结论：{verdict!r}")
+        right = await b.eval(
+            "(document.body.innerText.match(/正确答案：([^\\n]+)/) || [])[1] || ''"
+        )
+        need(isinstance(right, str) and right.strip() != "", "结果面板里没有「正确答案」")
+        report["first_verdict"] = verdict
+        report["revealed_answer"] = right.strip()
+
+        # ---------------- ④ 刷新 A：进度还在，且下一题不给答案 ----------------
+        say("④ 刷新 A：进度还在（同一条 session），且**下一题不给答案**")
+        await b.goto_ready(f"{args.web_base}{url_a}")
+        await b.wait_for(
+            "document.body.innerText.includes('已答 1 /')", timeout=40, label="刷新后进度还在"
+        )
+        url2 = await b.eval("location.pathname")
+        need(url2 == url_a, f"刷新后跑到了别的 session：{url2!r} != {url_a!r}")
+        body2 = str(await b.eval("document.body.innerText"))
+        need("已答 1 /" in body2, f"刷新后进度丢了：\n{body2}")
+        # ★ 与上一条互补：断点恢复会落在**下一道未作答**的题上，
+        #   而它**不许**被上一题的揭示带出来（可见性是**逐题**的）。
+        need(
+            "正确答案" not in body2,
+            "刷新后落在一道**未作答**的题上，却已经能看到「正确答案」—— 可见性漏了",
+        )
+        report["reload_kept_progress"] = "已答 1/N 仍在，且下一题未揭示答案"
+
+        # ---------------- ⑤ 反向锚：用 A 揭示的答案答 B 的同一道题 ----------------
+        say(f"⑤ 反向锚：在 B 上提交页面刚揭示的正确答案「{right.strip()}」⇒ 必须答对")
+        await b.goto_ready(f"{args.web_base}{url_b}")
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0",
+            timeout=40,
+            label="B 有选项",
+        )
+        wants = [x.strip() for x in str(right).split("、") if x.strip()]
+        picked = await b.eval(_PICK_BY_ANSWER_JS % json.dumps(wants, ensure_ascii=False))
+        need(
+            picked is True,
+            f"没能在 B 的选项里找到 {wants!r} 对应的按钮"
+            "（判断题是「正确 / 错误」按钮；多选题要能逐个点中）",
+        )
+        await b.wait_for(
+            "document.querySelector('main ul li button[aria-pressed=\"true\"]') !== null",
+            timeout=20,
+            label="B 的选项已选中",
+        )
+        try:
+            await b.click_text("提交", tag="button")
+            await b.wait_for(
+                "document.body.innerText.includes('正确答案')", timeout=40, label="B 的判分结果"
+            )
+        except Exception as e:  # noqa: BLE001
+            txt = await b.eval("document.body.innerText")
+            raise Failure(f"B 提交后没出现判分结果（{e}）。此刻页面文本：\n{txt}") from None
+        verdict2 = await b.eval("(document.body.innerText.match(/(答对了|答错了)/) || [])[0] || ''")
+        need(
+            verdict2 == "答对了",
+            f"提交的**是页面自己给出的正确答案**，却判成了 {verdict2!r} —— 判分逻辑是错的",
+        )
+        report["grading_proven_by_reanswer"] = f"提交「{right.strip()}」⇒ 答对了"
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="e2e-web.py",
@@ -639,8 +880,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scenario",
         default="login",
-        choices=["login", "p2a"],
-        help="login = P1 登录闭环（用现成账号密码登录）；p2a = Tab + 注册 + 引导",
+        choices=["login", "p2a", "p2b1"],
+        help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；p2b1 = 刷题数据流（选章节 → 答题判分 → 刷新仍在）",
     )
     ap.add_argument("--password", default="Admin@123456")
     ap.add_argument("--node", default="", help="node 可执行文件（默认从 PATH 找）")
@@ -706,7 +947,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             ensure_build(args, web_dir, env)
         proc = start_web(args, web_dir, env)
-        report = asyncio.run(drive_p2a(args) if args.scenario == "p2a" else drive_login(args))
+        drivers = {
+            "login": drive_login,
+            "p2a": drive_p2a,
+            "p2b1": drive_p2b1,
+        }
+        report = asyncio.run(drivers[args.scenario](args))
     except Failure as e:
         say(f"❌ 走查失败：{e}")
         return 1
@@ -734,9 +980,13 @@ def main(argv: list[str] | None = None) -> int:
     for k, v in report.items():
         say(f"  ✅ {k} = {v}")
     say(
-        "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
-        if args.scenario == "login"
-        else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+        "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对）"
+        if args.scenario == "p2b1"
+        else (
+            "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
+            if args.scenario == "login"
+            else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+        )
     )
     return 0
 

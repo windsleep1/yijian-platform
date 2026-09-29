@@ -49,6 +49,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_DEFAULT = HERE.parents[1]
+sys.path.insert(0, str(HERE))
+
+import trash as trash_mod  # noqa: E402  （唯一回收站入口 —— 项目约定 R / `docs/25`）
+
 HOME = Path.home()
 PY_DEFAULT = str(
     HOME / ".workbuddy" / "binaries" / "python" / "envs" / "default" / "Scripts" / "python.exe"
@@ -62,6 +66,16 @@ SMOKE_PREFIX = "yijian_smoke_"
 #: 本地门禁预检（`tools/preflight.sh`）—— **静态检查那 4 道**，不碰数据库。
 #: 跑在起 PG 之前：这几道几十秒就能出结论，**没必要先花 3 分钟建库再发现 ruff 红了**。
 PREFLIGHT = REPO_DEFAULT / "tools" / "preflight.sh"
+
+#: ★ 需要**题库**才能跑的走查场景。
+#:
+#: ⚠️ 加新场景时**必须**在这里登记 —— 否则它跑在"没有题目"的库上，
+#:   而症状是 **"每个章节都显示 0 题 / 暂无题目"** ⇒ 看起来像**产品 bug**
+#:   （比如"选章节页读错了那个没人刷的冗余列"），实际只是种子没灌。
+#:   2026-09-29 实测：P2b-1 场景第一次跑就是这么红的，为它白跑了 3 轮。
+#:   （同族：坑 51「本地/CI 的环境差异让某一步从来不需要 ⇒ 从来没人发现它漏了」。）
+#: ⇒ 判据：**"这个场景要不要题目"必须被显式回答**，而不是"默认不灌、出事了再说"。
+SCENARIOS_NEEDING_QUESTIONS = frozenset({"p2b1"})
 
 
 def say(msg: str) -> None:
@@ -220,6 +234,7 @@ class Pipeline:
                 f"端口 :{self.a.pg_port} 上有东西，但 30s 内 SELECT 1 都不通 —— 不是可用 PG"
             )
         # ③ 确实没人跑 ⇒ 我起，并登记所有权（收尾时才由我停）。
+        # trash-ok: 单文件（PG 的 pid 文件），非递归
         (self.pg_data / "postmaster.pid").unlink(missing_ok=True)
         # ⚠️ 必须当**后台进程**起：`subprocess.Popen` 起的 PG 会被父进程退出带走。
         log = (self.tmp / "yb-pg.log").open("w", encoding="utf-8")  # noqa: SIM115
@@ -304,20 +319,16 @@ class Pipeline:
 
         ⇒ 与 `e2e-web.py::isolate_next_dir` **同一个手法**：**rename 不是删除**，
           不触发守卫，效果等价（清场要的只是"这些旧文件别再被 combine 读到"）。
-        ⚠️ 为什么挪到 `.coverage-trash/` 而不是别处：名字与 `glob(".coverage.*")` **不匹配**
-          （`-` 不是 `.`），所以不会被下一轮又收进来；放在仓库根便于一眼看到、也便于手工清。
-        ⚠️ 代价：会留一份旧数据（每次 ~150KB），随下次 `rm -rf .coverage-trash` 一起清。
+        ★ 落点自 2026-09-29 起统一到 **`.trash/coverage/`**（此前是 `.coverage-trash/`）——
+          唯一入口 = `tools/local-verify/trash.py`，**一个名字只有一个来源**（项目约定 R）。
+        ⚠️ 代价：会留一份旧数据（每次 ~150KB）。它不是"没人管"：`preflight` ⓿ 会报出来，
+          并把 7 天以上的**单文件**回收掉（`docs/25` 说明为什么"目录不删、文件才删"）。
         """
-        if not p.exists():
-            return
-        trash = self.repo / ".coverage-trash"
-        trash.mkdir(exist_ok=True)
-        target = trash / p.name
-        n = 1
-        while target.exists():
-            target = trash / f"{p.name}.{n}"
-            n += 1
-        p.rename(target)
+        try:
+            trash_mod.trash(p, kind="coverage", root=self.repo)
+        except OSError as e:
+            # 挪不动 ≠ 可以删。**报出来**，绝不"退化成删除"（那正是 R 要防的滑坡）。
+            say(f"!! 覆盖率旧文件挪不进回收站（{e}）—— 留在原处，不删")
 
     def clean_coverage(self) -> None:
         """整族清场 —— 只删"自己产生的名字"永远清不掉"上次改了命名方案留下的"那种文件。
@@ -335,7 +346,7 @@ class Pipeline:
             self._retire(self.repo / "htmlcov")
         if not (self.repo / ".coveragerc").is_file():
             raise SystemExit("清场把 .coveragerc 删了 —— 覆盖率门禁会**静默失效**（宁可当场报错）")
-        say("覆盖率清场完成（.coveragerc 仍在；旧的挪进 .coverage-trash/，不删）")
+        say("覆盖率清场完成（.coveragerc 仍在；旧的挪进 .trash/coverage/，不删）")
 
     def cov_file(self, kind: str) -> Path:
         return self.repo / f".coverage.{kind}"
@@ -372,6 +383,7 @@ class Pipeline:
 
     def start_api(self, *, coverage: bool = True) -> None:
         stop_file = self.tmp / "yb-cov-stop"
+        # trash-ok: 单文件（停机哨兵），非递归
         stop_file.unlink(missing_ok=True)
         log = (self.tmp / "yb-api.log").open("w", encoding="utf-8")  # noqa: SIM115
         args = [
@@ -442,8 +454,11 @@ class Pipeline:
         资源的拥有者归属（坑 68）、env 同源（`JWT_SECRET` 不一致就报 40102）。
         ⇒ 差别只有"被测对象"：一个是 httpx 打接口，一个是真浏览器点页面。
 
-        ⚠️ **不灌题库**：登录闭环不需要题目（`subjects` / `chapters` 在 `schema.sql` 里，
-        本来就建好了）。P2b 要选题时再加 —— 现在加只是白等 30 秒。
+        ⚠️ **题库按场景决定灌不灌**（`SCENARIOS_NEEDING_QUESTIONS`）：
+        `login` / `p2a` 用不到题目（`subjects` / `chapters` 在 `schema.sql` 里，本来就建好了），
+        灌一遍白等约 30 秒。但**"要不要"必须显式回答** —— 第一版写的是"不灌题库，
+        P2b 要选题时再加"，于是 P2b-1 第一次跑就撞上"章节全是 0 题"，
+        而那个症状**长得像产品 bug**（参考"选章节读错冗余列"那条），白跑了 3 轮。
         """
         cmd = [
             self.a.python,
@@ -612,8 +627,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--e2e-scenario",
         default="login",
-        choices=["login", "p2a"],
-        help="走查场景：login（P1 登录闭环）/ p2a（Tab + 注册 + 引导）",
+        # ⚠️ 这是**第二份**场景白名单（第一份在 `e2e-web.py` 的 `--scenario`）。
+        #    加场景要改两处 —— 但**两处都必须是白名单**：只在 e2e-web 里加的话，
+        #    从管道传进来会被这里**拒掉**（实测过一次：`invalid choice: 'p2b1'`，
+        #    退出码 2、1 秒结束）。宁可"要改两处"，也不要"传错了静默跑默认场景"。
+        choices=["login", "p2a", "p2b1"],
+        help="走查场景：login（P1 登录闭环）/ p2a（Tab + 注册 + 引导）/ "
+        "p2b1（刷题数据流：选章节 → 答题判分 → 刷新仍在）",
     )
     ap.add_argument(
         "--e2e-phone", default="13800000000", help="走查用的账号（默认 = seed-admin 的）"
@@ -641,9 +661,18 @@ def main(argv: list[str] | None = None) -> int:
         p.start_pg()
         p.provision_db()
         if args.e2e_web:
-            # 浏览器走查分支：只灌 RBAC + 超管（走查要用的账号就是它），**不跑覆盖率门禁**
+            # 浏览器走查分支：灌 RBAC + 超管（走查要用的账号就是它），**不跑覆盖率门禁**
             # —— 它量的是"浏览器交互通不通"，不是覆盖率；混进来只会让门槛无意义地红。
             p.seed_cli()
+            if args.e2e_scenario in SCENARIOS_NEEDING_QUESTIONS:
+                p.seed_questions()
+            else:
+                # ★ 跳过**必须出声**（三态纪律）：否则下一个加场景的人会看到
+                #   "章节全是 0 题"，并去查一个不存在的产品 bug。
+                say(
+                    f"（场景 {args.e2e_scenario} 不在 SCENARIOS_NEEDING_QUESTIONS 里 ⇒ "
+                    "**跳过题库种子**；若新场景要用到题目，请把它登记进去）"
+                )
             p.start_api(coverage=False)
             rc = p.e2e_web()
             p.stop_api_gracefully()
