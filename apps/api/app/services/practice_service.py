@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import bad_request, conflict, not_found
 from app.core.idgen import next_id
+from app.schemas.answer import judge_bool
 from app.schemas.c_end import (
     AnswerResultOut,
     ChapterOut,
@@ -43,6 +44,7 @@ _TYPES_SQL = ", ".join(f"'{t}'" for t in GRADABLE_TYPES)
 #: 是否允许部分分由**题目自己的** `answer.partial_credit` 决定（下面 `grade` 的注释）。
 PARTIAL_CREDIT_RATIO = 0.5
 
+
 # ============================================================ 判断题：库里有两套写法
 #
 # ★★ 这不是"防御性编程"，是**既有的两个事实**（2026-09-29 实测，都在本仓）：
@@ -59,26 +61,6 @@ PARTIAL_CREDIT_RATIO = 0.5
 #
 # ⇒ 判分与出参前**都**走 `_judge_bool`；**这是唯一一处**理解这两套写法的地方。
 # ⚠️ 待办 **BL-20**：统一库内口径（编号/触发条件/检查点见 `docs/21`）。
-_JUDGE_TRUE_TOKENS = frozenset({"A", "T", "TRUE", "Y", "YES", "对", "正确", "√"})
-_JUDGE_FALSE_TOKENS = frozenset({"B", "F", "FALSE", "N", "NO", "错", "错误", "×"})
-
-
-def _judge_bool(x: Any) -> bool | None:
-    """把一个"判断题的答案token"解成布尔；**认不出来返回 `None`**（不猜）。
-
-    ⚠️ 返回 `None` 而不是 `False`：`False` 会把"这题的数据我不认识"伪装成"答案是错"。
-    """
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, str):
-        s = x.strip().upper()
-        if s in _JUDGE_TRUE_TOKENS:
-            return True
-        if s in _JUDGE_FALSE_TOKENS:
-            return False
-    return None
-
-
 def public_answer(qtype: str, correct: list[Any]) -> dict[str, Any]:
     """**出参**用的答案：判断题一律归一到 `[true]` / `[false]`。
 
@@ -87,7 +69,7 @@ def public_answer(qtype: str, correct: list[Any]) -> dict[str, Any]:
     """
     if qtype != "judge":
         return {"value": correct}
-    as_bool = [_judge_bool(x) for x in correct]
+    as_bool = [judge_bool(x) for x in correct]
     if as_bool and all(b is not None for b in as_bool):
         return {"value": [bool(b) for b in as_bool]}
     return {"value": correct}
@@ -116,8 +98,8 @@ def grade(
         # ⚠️ 两边都过 `_judge_bool`：库里可能是 `[true]`，也可能是种子的 `["A"]` / `["B"]`。
         # 认不出来的 token 被丢掉 ⇒ 下面那条共用的 `if not c` 会把它判成"错"。
         # **不能猜** —— 猜错的方向是"把错答判成对"（本批最危险的一类 bug）。
-        c = {b for b in (_judge_bool(x) for x in correct) if b is not None}
-        u = {b for b in (_judge_bool(x) for x in user) if b is not None}
+        c = {b for b in (judge_bool(x) for x in correct) if b is not None}
+        u = {b for b in (judge_bool(x) for x in user) if b is not None}
     else:
         c = {str(x).strip().upper() for x in correct}
         u = {str(x).strip().upper() for x in user}
@@ -143,7 +125,7 @@ def normalize_user_value(qtype: str, raw: list[Any]) -> list[Any]:
     if qtype == "judge":
         if len(raw) != 1:
             raise bad_request("判断题请提交 [true] 或 [false]", 40001)
-        b = _judge_bool(raw[0])
+        b = judge_bool(raw[0])
         if b is None:
             raise bad_request("判断题请提交 [true] 或 [false]", 40001)
         return [b]

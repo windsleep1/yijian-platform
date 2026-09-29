@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import bad_request, conflict, not_found
 from app.core.idgen import next_id, next_ids
+from app.schemas.answer import canonical_doc
 from app.schemas.admin_import import (
     OPTION_COLUMNS,
     ErrorReport,
@@ -314,29 +315,30 @@ def parse_answer_points(raw: str) -> list[dict[str, Any]]:
 
 
 def _build_answer(qtype: str, answer_raw: str, options: list[dict[str, Any]]) -> dict[str, Any]:
-    """按题型组装 `answer` JSONB。
+    """按题型组装 `answer` —— **统一走 `canonical_doc()`**（`app/schemas/answer.py`）。
 
-    刻意与库中**既有数据**保持一致（而不是与 Batch 4 的 API 一致）：
+    ★ 输入仍是**人写的文本列**（判断题填 `A`/`B`、多选填 `A|C`）—— 差异只在这里被消化，
+      存进库的一律是**规范形式**。
 
-    - `single` / `multiple` -> `{"value": ["A","C"]}`（multiple 带 partial_credit）
-    - `judge`               -> `{"value": ["A"|"B"]}`，
-      因为种子里 978 道判断题存的就是 `["A"]`/`["B"]`；Batch 4 的
-      `derive_answer` 存的是布尔值。这个不一致是**已知遗留项**，
-      记在 docs/11 §7，不在本批悄悄改（改了会动到 978 行历史数据）。
-    - `case`                -> `{"value": "<文本>"}`（种子即字符串）
-    - `case_sub`/`fill`/`essay` -> `{"value": ["<文本>"]}`
+    ⚠️ 2026-09-29 之前本函数与 `question_service.derive_answer` **各拼一份 dict**，
+      而两份对 `judge` 的写法不同（这边 `["A"]`、那边 `[true]`）⇒ **同一个库里两种写法并存**，
+      读取方只能靠类型强制去猜 —— 而 `bool("A") == True` 会把**答错的判断题判成对**。
+      当时的注释把这件事记成"已知遗留项，不在本批悄悄改"：现在改了，
+      而且是**显式迁移**（`db/migrations/20260929-01`），不是"读取时顺手改数据"。
     """
     if qtype == "judge":
-        return {"value": [answer_raw.strip().upper()]}
+        # 导入模板里写的是 A / B（A = 正确），**这里**把它翻成布尔
+        return canonical_doc("judge", [answer_raw.strip().upper()])
     if qtype == "single":
-        return {"value": [c for c in answer_raw.replace(" ", "").upper() if c.isalpha()]}
+        letters = [c for c in answer_raw.replace(" ", "").upper() if c.isalpha()]
+        return canonical_doc("single", letters)
     if qtype == "multiple":
         letters = [c for c in re.split(r"[|,，;；\s]+", answer_raw) if c]
         letters = [c.strip().upper() for c in letters if c.strip()]
-        return {"value": letters, "partial_credit": True}
+        return canonical_doc("multiple", letters, partial_credit=True)
     if qtype == "case":
-        return {"value": answer_raw}
-    return {"value": [answer_raw]}
+        return canonical_doc("case", answer_raw)
+    return canonical_doc(qtype, [answer_raw])
 
 
 def _build_payload(

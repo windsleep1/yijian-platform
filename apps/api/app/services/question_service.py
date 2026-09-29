@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import bad_request, conflict, forbidden, not_found
 from app.core.idgen import next_id
+from app.schemas.answer import canonical_doc, judge_bool
 from app.schemas.admin_question import (
     ChapterNode,
     ChapterTreeOut,
@@ -125,7 +126,12 @@ def derive_answer(
     下面那句子集校验留作廉价的不变量断言 —— 真触发了说明代码被改坏了，值得直接报错。
     """
     if qtype == "judge":
-        return {"value": [bool(judge_answer)]}
+        if judge_answer is None:
+            # ⚠️ 这里**故意报错**而不是默默取 `False`：旧的 `bool(judge_answer)` 会把
+            #   "调用方忘了传"变成一个**看起来完全正常的答案「错误」**（静默默认值）。
+            #   schema 已保证 judge 必填，走到这里说明有代码绕过了校验 —— 那就该炸。
+            raise bad_request("判断题必须给出 judge_answer", 40001)
+        return canonical_doc("judge", [judge_answer])
 
     labels = [str(o.label if isinstance(o, dict) else o.label).strip().upper() for o in options]
     correct = [
@@ -136,9 +142,10 @@ def derive_answer(
     if not set(correct).issubset(set(labels)):
         raise bad_request("答案只能来自选项标号本身", 40001)
 
-    if qtype == "single":
-        return {"value": correct}
-    return {"value": correct, "partial_credit": True}
+    # ★ **唯一的构造入口**（`app/schemas/answer.py`）：以前本函数与
+    #   `import_service._build_answer` 各拼一份 dict，而两份对 `judge` 的写法不同
+    #   （这里布尔、那边 `"A"/"B"`）⇒ 同一个库里两种写法并存（2026-09-29 事故）。
+    return canonical_doc(qtype, correct, partial_credit=qtype != "single")
 
 
 def _normalize_options(options: list[QuestionOptionIn]) -> list[tuple[str, str, bool, str | None]]:
@@ -905,7 +912,11 @@ async def update_question(
         judge_answer: bool | None = payload.judge_answer
         if judge_answer is None:
             old_val = (row["answer"] or {}).get("value") or []
-            judge_answer = bool(old_val[0]) if old_val else None
+            # ★★ 必须走 `judge_bool`，**不能** `bool(...)`：
+            #   `bool("A")` 与 `bool("B")` **都是 True** ⇒ 库里的旧写法 `["B"]`（表述错误）
+            #   会被读成"正确"，于是"没传 judge_answer 的更新"会把答案**静默改成对**。
+            #   这正是坑 76 说的"任何依赖类型强制的读取都是定时炸弹"，而这里是真的读取方。
+            judge_answer = judge_bool(old_val[0]) if old_val else None
         # 切换到判断题时，库里可能还挂着旧选项 → 需要清掉
         if final_options_in and payload.options is None:
             final_options_in = []

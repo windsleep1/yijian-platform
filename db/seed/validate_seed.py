@@ -88,19 +88,25 @@ def main() -> int:
             if len(correct_labels) != 1:
                 errors.append(f"[单选答案] 题目 {qid} 正确选项数为 {len(correct_labels)}，应为 1")
             if answer != correct_labels:
-                errors.append(f"[答案不一致] 单选题 {qid} answer={answer} 但选项标记={correct_labels}")
+                errors.append(
+                    f"[答案不一致] 单选题 {qid} answer={answer} 但选项标记={correct_labels}"
+                )
 
         elif qtype == "multiple":
             if len(correct_labels) < 2:
                 errors.append(f"[多选答案] 题目 {qid} 正确选项数为 {len(correct_labels)}，应 >= 2")
             if sorted(answer or []) != sorted(correct_labels):
-                errors.append(f"[答案不一致] 多选题 {qid} answer={answer} 但选项标记={correct_labels}")
+                errors.append(
+                    f"[答案不一致] 多选题 {qid} answer={answer} 但选项标记={correct_labels}"
+                )
 
         elif qtype == "judge":
-            if labels != ["A", "B"]:
-                errors.append(f"[判断选项] 题目 {qid} 选项应为 A/B，实际 {labels}")
-            if answer not in (["A"], ["B"]):
-                errors.append(f"[判断答案] 题目 {qid} answer={answer}，应为 ['A'] 或 ['B']")
+            # ★ 2026-09-29 起判断题的答案规范形式是**布尔**（`app/schemas/answer.py`）。
+            # ⚠️ 原先这里断言"选项应为 A/B" —— 而种子生成器的判断题**根本不写选项**
+            #    （`gen_judge` 传 `options=[]`）⇒ 这条断言一旦真跑，会对每一道判断题报警。
+            #    它从来没报过 ⇒ **这个校验器没有任何调用方**（休眠的契约，见坑 77）。
+            if answer not in ([True], [False]):
+                errors.append(f"[判断答案] 题目 {qid} answer={answer}，应为 [True] 或 [False]")
 
         elif qtype == "case_sub":
             if opts:
@@ -118,7 +124,9 @@ def main() -> int:
         if r.get("source_type") != "self" and not r.get("source_name"):
             errors.append(f"[合规红线] 题目 {qid} 来源为 {r['source_type']} 但缺少 source_name")
         if r.get("exam_year"):
-            warnings.append(f"[合规提示] 题目 {qid} 标注了 exam_year={r['exam_year']}，种子题库应为空")
+            warnings.append(
+                f"[合规提示] 题目 {qid} 标注了 exam_year={r['exam_year']}，种子题库应为空"
+            )
 
         # ---- 内容质量 ----
         if not r.get("analysis"):

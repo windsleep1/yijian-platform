@@ -30,8 +30,8 @@ import json
 import httpx
 import pytest
 
+from app.schemas.answer import judge_bool
 from app.services.practice_service import (
-    _judge_bool,
     _rollup,
     grade,
     normalize_user_value,
@@ -139,7 +139,7 @@ def test_seeded_judge_answers_are_all_understood() -> None:
         tokens = json.loads(r["v"]) if r["v"] else []
         assert tokens, f"判断题的 answer.value 是空的：{r}"
         for t in tokens:
-            assert _judge_bool(t) is not None, (
+            assert judge_bool(t) is not None, (
                 f"种子里出现了我们**不认识**的判断题答案写法：{t!r}。"
                 "要么把它加进 _judge_bool 的 token 表，要么改生成器统一口径（BL-20）"
             )
@@ -343,7 +343,7 @@ def test_answer_wrong_is_recorded_and_idempotent(client: httpx.Client) -> None:
     if first["type"] == "judge":
         # ⚠️ 必须走 `_judge_bool` 再取反：库里可能是 `["B"]`（B = 表述错误），
         #   而 `not bool("B")` 是 **False** —— 那正好是正确答案，用例会变成"提交对的却断言错"。
-        wrong = [not _judge_bool(right["value"][0])]
+        wrong = [not judge_bool(right["value"][0])]
     else:
         labels = [o["label"] for o in first["options"]]
         wrong = [next(lb for lb in labels if lb not in set(right["value"]))]
