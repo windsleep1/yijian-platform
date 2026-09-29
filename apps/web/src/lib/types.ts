@@ -94,3 +94,94 @@ export type ProfileUpdate = {
   target_score?: number;
   daily_goal_min?: number;
 };
+
+/* ============================================================ P2b-1 · 刷题 */
+
+/**
+ * `GET /subjects/{id}/chapters` 的一项（`schemas/c_end.py` 的 `ChapterOut`）。
+ *
+ * ★ `question_count` / `my_answered` / `my_correct` 都是**含子章节**的实时值 ——
+ *   后端**没有**读 `chapters.question_count` 那个冗余列（它写着"定时刷新"、实际没人刷）。
+ *   所以这三个数字可以放心显示，不需要前端再汇总。
+ */
+export type Chapter = {
+  id: string;
+  parent_id: string | null;
+  code: string;
+  name: string;
+  level: number;
+  outline_ref: string | null;
+  weight: number;
+  sort_no: number;
+  question_count: number;
+  my_answered: number;
+  my_correct: number;
+};
+
+/** 题目的一个选项。**不含 `is_correct`** —— 后端不给答案（给了就等于把答案发到浏览器）。 */
+export type QuestionOption = {
+  label: string;
+  content: string;
+  content_html: string | null;
+};
+
+/** 一次练习里的一道题（`schemas/c_end.py` 的 `SessionItemOut`）。 */
+export type SessionItem = {
+  item_id: string;
+  seq: number;
+  question_id: string;
+  /** `single` 单选 / `multiple` 多选 / `judge` 判断。 */
+  type: string;
+  stem: string;
+  stem_html: string | null;
+  options: QuestionOption[];
+  my_value: unknown[] | null;
+  is_correct: boolean | null;
+  score: number | null;
+  answered: boolean;
+  /** ⚠️ **未作答时恒为 null**（后端逐题判断可见性）。不要在前端"兜底"成 `{}`。 */
+  answer: { value: unknown[] } | null;
+  analysis: string | null;
+  analysis_html: string | null;
+};
+
+/** `GET /practice/sessions/{id}`（`schemas/c_end.py` 的 `SessionOut`）。 */
+export type PracticeSession = {
+  id: string;
+  mode: string;
+  /** `doing` = 断点恢复；`finished` = 报告（P2b-2 才有）。 */
+  status: string;
+  subject_id: string | null;
+  subject_name: string | null;
+  chapter_id: string | null;
+  chapter_name: string | null;
+  title: string;
+  /** 第一道**还没作答**的题；全答完 = null。"刷新后还在"就靠它回到原处。 */
+  current_item_id: string | null;
+  total: number;
+  answered: number;
+  correct: number;
+  score: number;
+  items: SessionItem[];
+};
+
+export type SessionProgress = {
+  total: number;
+  answered: number;
+  correct: number;
+  score: number;
+};
+
+/** `POST /practice/sessions/{id}/answer`（`schemas/c_end.py` 的 `AnswerResultOut`）。 */
+export type AnswerResult = {
+  item_id: string;
+  is_correct: boolean;
+  score: number;
+  correct_answer: { value: unknown[] };
+  my_value: unknown[];
+  analysis: string | null;
+  analysis_html: string | null;
+  /** `true` = 这道题**之前已答过**，后端零写入、返回的是既有结果。 */
+  idempotent: boolean;
+  session: SessionProgress;
+};
