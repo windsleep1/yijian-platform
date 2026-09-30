@@ -682,6 +682,58 @@ _SWIPE_X_JS = r"""(() => {
   const m = (el.style.transform || '').match(/translateX\((-?[0-9.]+)px\)/);
   return m ? Math.round(parseFloat(m[1])) : 0;
 })()"""
+#: 答题卡抽屉的 `transform`（**常驻 DOM、靠它显隐**）⇒ "从底部滑出"是个可读的状态。
+#: 当前显示的**题目身份**（`question_id`）。
+#: ★★ 为什么不用题干当身份：**题库里有模板化题干**（`gen_seed_questions.py` 里
+#:   `stem = f"下列选项中，属于「{kp['name']}」这一考点所涵盖内容的有（　　）。"`）
+#:   ⇒ **题干会重复**，拿它当「这道题换没换」的判据会得到**假红**（实测踩到，见坑 83）。
+_QID_JS = (
+    "(() => { const el = document.querySelector('[data-qid]');"
+    " return el ? el.getAttribute('data-qid') : null; })()"
+)
+#: 第 n 个格子里记的 `question_id`（探针：点它之后，显示的**是不是这一道**）。
+_CELL_QID_JS = """(() => {
+  const c = document.querySelectorAll('[data-sheet-grid] button')[%d];
+  return c ? c.getAttribute('data-cell-qid') : null;
+})()"""
+#: 抽屉的**几何**（`top` / 高度 / 视口高 / 原始 transform）。
+#: ★★ 判据是**语义**的："展开" = `top < vh`（有边在视口里）、"收起" = `top >= vh`（整个在视口之下）。
+#: ⚠️ **不要拿 `style.transform` 做字符串相等** —— CSSOM 会**规范化**：
+#:   `translateY(0)` 读回来是 **`translateY(0px)`**（实测：这一条让 ⑧ 第一次跑成 rc=2）。
+#:   猜"渲染结果长什么样"就会踩它（同族：猜 DOM 文本形状 / 方向只判"谁大"）。
+_SHEET_BOX_JS = """(() => {
+  const el = document.querySelector('[data-sheet]');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { top: Math.round(r.top), h: Math.round(r.height),
+           vh: window.innerHeight, transform: el.style.transform };
+})()"""
+#: 网格几何：题数 / 首行列数 / 总行数（"5 列、按题量自适应"的可证伪形式）。
+_SHEET_GRID_JS = """(() => {
+  const cells = Array.from(document.querySelectorAll('[data-sheet-grid] button'));
+  if (!cells.length) return null;
+  const tops = cells.map((c) => Math.round(c.getBoundingClientRect().top));
+  return { total: cells.length, cols: tops.filter((t) => t === tops[0]).length,
+           rows: new Set(tops).size };
+})()"""
+#: 抽屉的可见文字（图例四态在这里；grid 里的题号也在，但没别人）。
+_SHEET_TEXT_JS = (
+    "(() => { const el = document.querySelector('[data-sheet]');"
+    " return el ? el.innerText : ''; })()"
+)
+#: 每格 `{seq, state}` —— ★ 状态是**数据派生**的，不能写死（走查比对的就是它）。
+_SHEET_CELLS_JS = """(() => {
+  const cells = Array.from(document.querySelectorAll('[data-sheet-grid] button'));
+  return cells.map((c) => ({ seq: Number((c.textContent || '').trim()),
+                             state: c.getAttribute('data-cell-state') }));
+})()"""
+#: 抽屉里的按钮账：`grid` = 题号格数、`others` = 其他按钮数。
+#: ★ 这是"**没做设置标记的入口**"的可证伪形式 —— 除题号格外只该有 1 个（关闭）。
+_SHEET_BUTTONS_JS = """(() => {
+  const grid = document.querySelectorAll('[data-sheet-grid] button').length;
+  const all = document.querySelectorAll('[data-sheet] button').length;
+  return { grid: grid, others: all - grid };
+})()"""
 _NAV_DISABLED_JS = """(() => {
   const want = %s;
   const b = Array.from(document.querySelectorAll('button'))
@@ -720,6 +772,7 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
     | ⑤ | ★★ 用 **A 揭示的正确答案**去答 **B 的同一道题** ⇒ 必须"答对了" | 少了它，**判分恒返回"错"也能通过 ③** |
     | ⑥ | 按钮切题：边界 `disabled` / 切题**不改进度** / 答过的题**回来仍有结果** | 少了"不改进度"，把切题写成"顺手再 GET 一次"也能过（那正是 P2b-1 那个 bug 的形状） |
     | ⑦ | **滑动切题**（**真触摸**）：跟手反馈 / 未超阈值**弹回** / 超阈值切题 / **纵向不算切题** | 少了"跟手反馈"，**手势根本没被触发**也能全绿（那是最假的一种绿） |
+    | ⑧ | **答题卡**：底部滑出 / 5 列网格（行数自适应）/ 四态 / 点题号跳题 / 关闭后位置正确 | 少了「抽屉内按钮账」，偷偷加一个「设置标记」入口也能全绿 |
 
     ⚠️ ⑤ 为什么要"建两个 session"（第一版想省掉它，结果绕了两轮）：
       抽题是"**未做过的优先**"，所以在 A 里答完第 1 题之后，
@@ -1046,6 +1099,143 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
             "① 中途跟手 ② 未超阈值弹回且不切题 ③ 超阈值切题且进度不动 "
             "④ 纵向斜滑不算切题 ⑤ 第 1 题右滑越界不切（弹回）"
         )
+        # ---------------- ⑧ 答题卡（P2b-2b）----------------
+        say("⑧ 答题卡：底部滑出 / 5 列网格 / 四态 / 点题号跳题 / 关闭后位置正确")
+
+        async def reach(expr: str, label: str, timeout: float = 20.0) -> None:
+            """等界面到某状态；**超时按断言失败报**（`Failure` ⇒ rc=1）。
+
+            ⚠️ 走查顶部的分类是：`Failure` ⇒ rc=1（断言失败）、**其它异常** ⇒ rc=2（"没跑起来"）。
+              而裸的 `TimeoutError` 会掉进后者 —— 实测：把 `jumpTo` 的 `setCursor` 打掉
+              （**点题号不切题**）时，一个**产品缺陷**被记成了 rc=2，看起来像环境问题。
+              ⇒ 判据：**"界面没到预期状态"是断言性质**，必须自己报成断言失败。
+            """
+            try:
+                await b.wait_for(expr, timeout=timeout, label=label)
+            except TimeoutError:
+                raise Failure(
+                    f"{label}：等了 {timeout:.0f}s 没到该状态（**这是断言失败，不是环境问题**）"
+                ) from None
+
+        pos_card0 = await b.eval(_PRACTICE_POS_JS)
+        qid_before = await b.eval(_QID_JS)
+        need(isinstance(qid_before, str) and qid_before, f"读不到当前题目的身份：{qid_before!r}")
+        # 抽屉**常驻 DOM**，靠 transform 显隐 ⇒ "滑出"这件事可以直接读（不用肉眼）
+        # ⚠️ **不能读一次就下结论**：`style.transform` 是**目标值**、`getBoundingClientRect()`
+        #    是**当前帧**；CSS 过渡（200ms）期间两者不一致 —— 实测：transform 已是 110%，
+        #    而 rect.top 还停在展开位（458）。⇒ **轮询到稳定**（同族：坑 ⑤ 点完选项立刻点提交）。
+        await reach(f"({_SHEET_BOX_JS}).top >= ({_SHEET_BOX_JS}).vh", "答题卡初始收起")
+        box0 = await b.eval(_SHEET_BOX_JS)
+        need(isinstance(box0, dict), f"读不到抽屉几何：{box0!r}")
+
+        await b.click("[data-sheet-open]", nth=0)
+        await reach(
+            f"({_SHEET_BOX_JS}).top < ({_SHEET_BOX_JS}).vh", "答题卡从底部滑出（有边进视口）"
+        )
+        box1 = await b.eval(_SHEET_BOX_JS)
+        report["sheet_slide"] = (
+            f"top：{box0['top']} → {box1['top']}（vh={box1['vh']}）：收起时整个在视口之下、"
+            f"展开后有边进视口 ⇒ 从底部滑出｜transform = {box1['transform']!r}"
+        )
+
+        # ---- 网格：5 列 / 行数自适应 ----
+        grid = await b.eval(_SHEET_GRID_JS)
+        need(isinstance(grid, dict), f"读不到网格：{grid!r}")
+        total = int(grid["total"])
+        need(total >= 6, f"这堂练习只有 {total} 题 —— 下面的「跳到第 5 题」构造不出来")
+        need(grid["cols"] == 5, f"网格每行 {grid['cols']} 列（应为 5）")
+        need(
+            grid["rows"] == -(-total // 5),
+            f"{total} 题应为 {-(-total // 5)} 行，实际 {grid['rows']} 行",
+        )
+        report["sheet_grid"] = f"{total} 题 ⇒ {grid['cols']} 列 × {grid['rows']} 行"
+
+        # ---- 四态：图例齐；★ 但「标记」**不可达**（硬约定 F：可达 ⟺ 有任何接口能写入它）----
+        sheet_text = await b.eval(_SHEET_TEXT_JS)
+        for lab in ("未做", "已做", "当前", "标记"):
+            need(lab in str(sheet_text), f"图例里没有「{lab}」")
+        states = await b.eval(_SHEET_CELLS_JS)
+        need(isinstance(states, list) and len(states) == total, f"格子数不对：{states!r}")
+        seen = {str(s["state"]) for s in states}
+        need(
+            seen <= {"todo", "done", "current", "marked"},
+            f"出现了没定义的状态：{seen!r}",
+        )
+        need(
+            "marked" not in seen,
+            "本批**不给设置标记的入口** ⇒ 不该出现 marked 格 —— 出现了说明有人偷偷写了它",
+        )
+        # ★ 这条是"没做设置入口"的**可证伪**形式：抽屉里除了题号格，只该有 1 个按钮（关闭）。
+        extra = await b.eval(_SHEET_BUTTONS_JS)
+        need(
+            isinstance(extra, dict) and extra["grid"] == total and extra["others"] == 1,
+            f"抽屉里除题号格外应只有「关闭」1 个按钮（否则就是偷偷加了设置入口）：{extra!r}",
+        )
+        cur = [s for s in states if s["state"] == "current"]
+        need(len(cur) == 1 and cur[0]["seq"] == 1, f"当前题标错了：{cur!r}")
+        report["sheet_states"] = (
+            f"图例四态齐｜格子三态可达（当前=1，其余 todo=9）｜**标记 0 格**"
+            f"（无写入路径 ⇒ 不可达，硬约定 F）｜抽屉内按钮 = {total} 格 + 1 关闭"
+        )
+
+        # ---- 点题号跳题：第 1 题 → 第 5 题 ----
+        prog_card0 = await b.eval(_PRACTICE_PROGRESS_JS)
+        want_qid = await b.eval(_CELL_QID_JS % 4)
+        need(isinstance(want_qid, str) and want_qid, f"读不到第 5 格的身份：{want_qid!r}")
+        await b.eval(
+            "(() => { const c = document.querySelectorAll('[data-sheet-grid] button')[4];"
+            " c.scrollIntoView({block:'center'}); c.click(); return true; })()"
+        )
+        await reach(
+            f"({_PRACTICE_POS_JS}).startsWith({json.dumps('第 5 题')})", "点题号跳到第 5 题"
+        )
+        qid_after = await b.eval(_QID_JS)
+        # ★ 判据用**题目身份**，不用题干：题干可以是模板复用的（实测过）。
+        need(
+            qid_after == want_qid,
+            f"点了第 5 格，显示的却是另一道题：qid={qid_after!r} ≠ 格里记的 {want_qid!r}",
+        )
+        need(
+            qid_after != qid_before,
+            f"跳题前后是**同一道题**（qid={qid_after!r}）—— 那说明根本没跳",
+        )
+        await reach(f"({_SHEET_BOX_JS}).top >= ({_SHEET_BOX_JS}).vh", "点题号后抽屉收起")
+        box_jump = await b.eval(_SHEET_BOX_JS)
+        need(isinstance(box_jump, dict), f"读不到抽屉几何：{box_jump!r}")
+        prog_card1 = await b.eval(_PRACTICE_PROGRESS_JS)
+        need(
+            prog_card0 == prog_card1,
+            f"跳题把进度也改了：{prog_card0!r} → {prog_card1!r} —— 点题号只改本地游标（硬约定 S）",
+        )
+        report["sheet_jump"] = (
+            f"点第 5 格 ⇒ {pos_card0!r} → 第 5 题；显示的是**格里记的那道题**"
+            f"（qid {qid_before[:6]}… → {qid_after[:6]}…）；抽屉自动收起；**进度不动**"
+        )
+
+        # ---- 再开一次：状态**仍然正确**（这是"标记持久化"在本批的替代判据 ——
+        #      本批不给设置标记的入口，「持久化」无从谈起；能验的是"状态由数据派生、重开不错乱"）----
+        await b.click("[data-sheet-open]", nth=0)
+        await reach(f"({_SHEET_BOX_JS}).top < ({_SHEET_BOX_JS}).vh", "再开答题卡")
+        states2 = await b.eval(_SHEET_CELLS_JS)
+        by_seq = {int(s["seq"]): str(s["state"]) for s in states2}
+        need(by_seq.get(5) == "current", f"第 5 题应为「当前」，实际 {by_seq.get(5)!r}")
+        need(
+            by_seq.get(1) == "done",
+            f"第 1 题（已作答、已不是当前）应为「已做」，实际 {by_seq.get(1)!r} ——"
+            "状态是**派生**的，不该是写死的",
+        )
+        need(by_seq.get(2) == "todo", f"第 2 题应为「未做」，实际 {by_seq.get(2)!r}")
+        report["sheet_state_again"] = "重开：第 5 题=current、第 1 题=done、第 2 题=todo ✓"
+
+        # ---- 关闭：**位置正确**（关闭不改游标）----
+        await b.click("[data-sheet-close]", nth=0)
+        await reach(f"({_SHEET_BOX_JS}).top >= ({_SHEET_BOX_JS}).vh", "答题卡收起")
+        pos_card2 = await b.eval(_PRACTICE_POS_JS)
+        need(
+            pos_card2.startswith("第 5 题"),
+            f"关抽屉把当前位置也改了：{pos_card2!r}（应为第 5 题）—— 开合抽屉不是切题",
+        )
+        report["sheet_close"] = f"关闭后仍在 {pos_card2}（抽屉开合**不改游标**）"
     return report
 
 
