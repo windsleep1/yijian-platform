@@ -429,6 +429,64 @@ class Browser:
         )
         await self.click_text(label, tag="[role='option']")
 
+    # ---- 触摸（真触摸，走 CDP 输入管线）----
+
+    async def _center_of(self, selector: str, nth: int = 0) -> list[float]:
+        box = await self.eval(
+            f"""(() => {{
+              const el = document.querySelectorAll({json.dumps(selector)})[{nth}];
+              if (!el) return null;
+              el.scrollIntoView({{block:'center'}});
+              const r = el.getBoundingClientRect();
+              return [r.left + r.width/2, r.top + r.height/2];
+            }})()"""
+        )
+        if not box:
+            raise RuntimeError(f"元素不存在：{selector}[{nth}]")
+        return box
+
+    async def swipe(
+        self,
+        selector: str,
+        *,
+        dx: float,
+        dy: float = 0.0,
+        steps: int = 10,
+        nth: int = 0,
+        on_mid: Any = None,
+    ) -> None:
+        """在 `selector` 的**中心**做一次触摸滑动（`Input.dispatchTouchEvent`）。
+
+        ★ 为什么用 CDP 输入管线、而**不是** `Runtime.evaluate` 造一个 `TouchEvent`：
+          后者只测到"我们的处理器被调用了"，测不到**浏览器真的把手指动作变成了触摸事件**。
+          而手势这件事，出错的往往正是这一层（`touch-action` / 被动监听 / 与滚动的竞争）。
+        ⚠️ `touchEnd` 的 `touchPoints` 必须是**空数组** —— 带上点会直接报参数错误（实测）。
+        ⚠️ 依赖 `Emulation.setTouchEmulationEnabled`（`Browser(mobile=True)` 时**已经开了**）。
+        `on_mid`：可选的 async 回调，在**手势进行到一半**时调用 —— 用来断言
+          "滑动中确实有跟手的视觉反馈"（手势结束之后再看就来不及了）。
+        """
+        x0, y0 = await self._center_of(selector, nth)
+        tid = 1
+        await self.send(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [{"x": x0, "y": y0, "id": tid}]},
+        )
+        mid = max(1, steps // 2)
+        for i in range(1, steps + 1):
+            t = i / steps
+            await self.send(
+                "Input.dispatchTouchEvent",
+                {
+                    "type": "touchMove",
+                    "touchPoints": [{"x": x0 + dx * t, "y": y0 + dy * t, "id": tid}],
+                },
+            )
+            await asyncio.sleep(0.02)
+            if on_mid is not None and i == mid:
+                await on_mid()
+        await self.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        await asyncio.sleep(0.35)
+
     # ---- 截图 ----
 
     async def screenshot(self, path: str, *, full: bool = False) -> None:

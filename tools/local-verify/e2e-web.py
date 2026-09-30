@@ -674,6 +674,14 @@ _PRACTICE_PROGRESS_JS = "(document.body.innerText.match(/已答 \\d+ \\/ \\d+/) 
 #: 按文字找一个按钮的 `disabled`（`null` = 页面上没有这个按钮）。
 #: ⚠️ 判据是"**它能点吗**"，不是"我点过了"（硬约定 D 的 E2E 形态）。
 #: ⚠️ 用 `.includes()` 与 `click_text` **保持同一套匹配** —— 否则"找到的"与"点到的"可能是两个元素。
+#: 滑动卡片当前的 `translateX`（px）。★ **跟手反馈的机器可读形式** ——
+#: 手势结束之后它就被重置了，所以只能在**手势中途**读。
+_SWIPE_X_JS = r"""(() => {
+  const el = document.querySelector('[data-swipe-card]');
+  if (!el) return null;
+  const m = (el.style.transform || '').match(/translateX\((-?[0-9.]+)px\)/);
+  return m ? Math.round(parseFloat(m[1])) : 0;
+})()"""
 _NAV_DISABLED_JS = """(() => {
   const want = %s;
   const b = Array.from(document.querySelectorAll('button'))
@@ -711,6 +719,7 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
     | ④ | 刷新后**进度还在**（同一条 session），且**下一题不给答案** | 少了后半句，"把整份答案都发给前端"也能过 |
     | ⑤ | ★★ 用 **A 揭示的正确答案**去答 **B 的同一道题** ⇒ 必须"答对了" | 少了它，**判分恒返回"错"也能通过 ③** |
     | ⑥ | 按钮切题：边界 `disabled` / 切题**不改进度** / 答过的题**回来仍有结果** | 少了"不改进度"，把切题写成"顺手再 GET 一次"也能过（那正是 P2b-1 那个 bug 的形状） |
+    | ⑦ | **滑动切题**（**真触摸**）：跟手反馈 / 未超阈值**弹回** / 超阈值切题 / **纵向不算切题** | 少了"跟手反馈"，**手势根本没被触发**也能全绿（那是最假的一种绿） |
 
     ⚠️ ⑤ 为什么要"建两个 session"（第一版想省掉它，结果绕了两轮）：
       抽题是"**未做过的优先**"，所以在 A 里答完第 1 题之后，
@@ -944,6 +953,98 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
         report["nav_buttons"] = (
             "① 第 1 题「上一题」disabled（可证伪锚：「下一题」可点）"
             "② 切题**不改进度** ③ 答过的题回来结果仍在"
+        )
+        # ---------------- ⑦ 滑动切题（P2b-2a 后半；**真触摸**）----------------
+        say("⑦ 滑动切题：跟手反馈 / 未超阈值弹回 / 超阈值切题 / 纵向不算切题")
+        # ★ 先报"这一轮到底有没有触摸能力" —— 否则 ⑦ 全绿可能只是因为**手势从未被触发**。
+        env_touch = await b.eval(
+            "({coarse: matchMedia('(pointer: coarse)').matches,  touch: 'ontouchstart' in window})"
+        )
+        need(
+            isinstance(env_touch, dict) and (env_touch.get("coarse") or env_touch.get("touch")),
+            f"这个视口既不是 coarse pointer、也没有 ontouchstart ⇒ 手势不会启用：{env_touch!r}",
+        )
+        report["touch_env"] = (
+            f"pointer:coarse={env_touch['coarse']}｜ontouchstart={env_touch['touch']}"
+        )
+        width = await b.eval("window.innerWidth")
+        need(isinstance(width, (int, float)) and width > 0, f"读不到视口宽度：{width!r}")
+        thresh = max(width * 0.25, 80)
+
+        async def swipe_report(dx: float, dy: float = 0.0) -> int | None:
+            """滑一次，并在**手势中途**抓一次跟手位移；返回那个值。"""
+            mid: dict[str, object] = {"x": None}
+
+            async def _on_mid() -> None:
+                v: object = None
+                for _ in range(25):
+                    v = await b.eval(_SWIPE_X_JS)
+                    if isinstance(v, int) and v != 0:
+                        break
+                    await asyncio.sleep(0.02)
+                mid["x"] = v
+
+            await b.swipe("main [data-swipe-card] h1", dx=dx, dy=dy, on_mid=_on_mid)
+            got = mid["x"]
+            return got if isinstance(got, int) else None
+
+        pos0 = await b.eval(_PRACTICE_POS_JS)
+        prog_a = await b.eval(_PRACTICE_PROGRESS_JS)
+
+        # ⑦a 未超阈值（−60 < 阈值）：**中途必须跟手**，松手必须**弹回**且不切题
+        mid_small = await swipe_report(-60.0)
+        need(
+            mid_small is not None and mid_small < 0,
+            f"滑动中题目没有跟手位移（滑到一半读到 translateX = {mid_small!r}）——"
+            "**手势根本没触发**的话，后面几条「没切题」也会全绿（那是最假的一种绿）",
+        )
+        report["swipe_mid_transform"] = f"未超阈值那次，滑到一半 translateX = {mid_small}px（跟手）"
+        x_after = await b.eval(_SWIPE_X_JS)
+        need(x_after == 0, f"未超阈值松手后没有弹回：translateX = {x_after!r}（应为 0）")
+        pos1 = await b.eval(_PRACTICE_POS_JS)
+        need(pos1 == pos0, f"未超阈值却切了题：{pos0!r} → {pos1!r}")
+
+        # ⑦b 超阈值左滑 ⇒ 切到下一题；**进度不动**（与按钮切题同一判据）
+        await swipe_report(-(width * 0.6))
+        await b.wait_for(
+            f"({_PRACTICE_POS_JS}).startsWith({json.dumps('第 2 题')})",
+            timeout=20,
+            label="左滑切到第 2 题",
+        )
+        prog_b = await b.eval(_PRACTICE_PROGRESS_JS)
+        need(
+            prog_a == prog_b,
+            f"滑动切题把进度也改了：{prog_a!r} → {prog_b!r} —— 切题是本地状态（硬约定 S）",
+        )
+
+        # ⑦c 超阈值右滑 ⇒ 回上一题
+        await swipe_report(width * 0.6)
+        await b.wait_for(
+            f"({_PRACTICE_POS_JS}).startsWith({json.dumps('第 1 题')})",
+            timeout=20,
+            label="右滑回到第 1 题",
+        )
+
+        # ⑦d ★ 方向判定：**纵向为主**的斜滑不算切题（用户在滚题目）
+        mid_diag = await swipe_report(60.0, 140.0)
+        need(
+            mid_diag in (0, None),
+            f"纵向为主的斜滑也把题目拖动了（translateX = {mid_diag!r}）——"
+            "方向判据失效，用户滚题目时会误切",
+        )
+        pos_diag = await b.eval(_PRACTICE_POS_JS)
+        need(pos_diag == pos0, f"纵向斜滑切了题：{pos0!r} → {pos_diag!r}")
+
+        # ⑦e 边界：第 1 题上**向右**超阈值滑 ⇒ 没有上一题，必须不切（弹回）
+        await swipe_report(width * 0.6)
+        pos_edge = await b.eval(_PRACTICE_POS_JS)
+        need(pos_edge == pos0, f"第 1 题右滑越界了：{pos0!r} → {pos_edge!r}")
+        x_edge = await b.eval(_SWIPE_X_JS)
+        need(x_edge == 0, f"越界右滑后没有弹回：translateX = {x_edge!r}")
+        report["swipe_gesture"] = (
+            f"阈值 {thresh:.0f}px（屏宽 {width} 的 25% 与 80 取大）｜"
+            "① 中途跟手 ② 未超阈值弹回且不切题 ③ 超阈值切题且进度不动 "
+            "④ 纵向斜滑不算切题 ⑤ 第 1 题右滑越界不切（弹回）"
         )
     return report
 
