@@ -667,6 +667,19 @@ _PRACTICE_FIRST_CHAPTER_JS = (
     "'main section:nth-of-type(2) ul li button:not([disabled])')[0] || {}).innerText || ''"
 )
 _PRACTICE_STEM_JS = "(document.querySelector('main p.whitespace-pre-wrap') || {}).innerText || ''"
+#: 答题页的「第 N 题 / 共 M 题」—— 切题的**可见**证据（游标变了它就该变）。
+_PRACTICE_POS_JS = "(document.body.innerText.match(/第 \\d+ 题 \\/ 共 \\d+ 题/) || [])[0] || ''"
+#: 顶部进度「已答 N / M」—— ★ **只由提交驱动**，切题不许动它（硬约定 S 的 E2E 形式）。
+_PRACTICE_PROGRESS_JS = "(document.body.innerText.match(/已答 \\d+ \\/ \\d+/) || [])[0] || ''"
+#: 按文字找一个按钮的 `disabled`（`null` = 页面上没有这个按钮）。
+#: ⚠️ 判据是"**它能点吗**"，不是"我点过了"（硬约定 D 的 E2E 形态）。
+#: ⚠️ 用 `.includes()` 与 `click_text` **保持同一套匹配** —— 否则"找到的"与"点到的"可能是两个元素。
+_NAV_DISABLED_JS = """(() => {
+  const want = %s;
+  const b = Array.from(document.querySelectorAll('button'))
+    .find((x) => (x.innerText || '').trim().includes(want));
+  return b ? b.disabled === true : null;
+})()"""
 
 _PICK_BY_ANSWER_JS = """(() => {
   const wants = %s;
@@ -697,6 +710,7 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
     | ③ | 选项能选 → 提交 → 判分 → 显示解析 | —— |
     | ④ | 刷新后**进度还在**（同一条 session），且**下一题不给答案** | 少了后半句，"把整份答案都发给前端"也能过 |
     | ⑤ | ★★ 用 **A 揭示的正确答案**去答 **B 的同一道题** ⇒ 必须"答对了" | 少了它，**判分恒返回"错"也能通过 ③** |
+    | ⑥ | 按钮切题：边界 `disabled` / 切题**不改进度** / 答过的题**回来仍有结果** | 少了"不改进度"，把切题写成"顺手再 GET 一次"也能过（那正是 P2b-1 那个 bug 的形状） |
 
     ⚠️ ⑤ 为什么要"建两个 session"（第一版想省掉它，结果绕了两轮）：
       抽题是"**未做过的优先**"，所以在 A 里答完第 1 题之后，
@@ -878,13 +892,67 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
             f"提交的**是页面自己给出的正确答案**，却判成了 {verdict2!r} —— 判分逻辑是错的",
         )
         report["grading_proven_by_reanswer"] = f"提交「{right.strip()}」⇒ 答对了"
+
+        # ---------------- ⑥ 按钮切题（P2b-2a）----------------
+        say("⑥ 按钮切题：第 1 题「上一题」应**不可点** / 切题**不改进度** / 回来看答过的题仍有结果")
+        at0 = await b.eval(_PRACTICE_POS_JS)
+        need(
+            isinstance(at0, str) and at0.startswith("第 1 题"),
+            f"进 ⑥ 时应停在 B 的第 1 题，实际 {at0!r}",
+        )
+        prev_dis = await b.eval(_NAV_DISABLED_JS % json.dumps("上一题"))
+        need(
+            prev_dis is True,
+            f"第 1 题上「上一题」的 disabled = {prev_dis!r}（应为 True）——"
+            "边界没做成**显式不可点**，在用户那里就成了「点了没反应」",
+        )
+        # ★ 可证伪锚：**先证明这个按钮本来能点** —— 否则"永远 disabled"也能过上面那条。
+        next_dis = await b.eval(_NAV_DISABLED_JS % json.dumps("下一题"))
+        need(next_dis is False, f"第 1 题上「下一题」的 disabled = {next_dis!r}（应为 False）")
+
+        prog0 = await b.eval(_PRACTICE_PROGRESS_JS)
+        await b.click_text("下一题", tag="button")
+        await b.wait_for(
+            f"({_PRACTICE_POS_JS}).startsWith({json.dumps('第 2 题')})",
+            timeout=20,
+            label="切到第 2 题",
+        )
+        body_next = str(await b.eval("document.body.innerText"))
+        need(
+            "正确答案" not in body_next,
+            "切到第 2 题后看到了「正确答案」—— 那是一道**未作答**的题，可见性漏了",
+        )
+        prog1 = await b.eval(_PRACTICE_PROGRESS_JS)
+        need(
+            prog0 == prog1,
+            f"切题把进度也改了：{prog0!r} → {prog1!r} ——"
+            "**切题是本地状态，不该发请求、更不该改进度**（硬约定 S）",
+        )
+        # 回到第 1 题：**答过的题，结果还在**（否则"回去复习"看到的是空的）
+        prev_dis2 = await b.eval(_NAV_DISABLED_JS % json.dumps("上一题"))
+        need(prev_dis2 is False, f"第 2 题上「上一题」应可点，实际 disabled = {prev_dis2!r}")
+        await b.click_text("上一题", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('正确答案')", timeout=20, label="回到第 1 题仍有结果"
+        )
+        at1 = await b.eval(_PRACTICE_POS_JS)
+        need(
+            isinstance(at1, str) and at1.startswith("第 1 题"), f"「上一题」没回到第 1 题：{at1!r}"
+        )
+        stem_back = await b.eval(_PRACTICE_STEM_JS)
+        need(stem_back == stem_b, f"回来看到的不是同一道题：{stem_back!r} != {stem_b!r}")
+        report["nav_buttons"] = (
+            "① 第 1 题「上一题」disabled（可证伪锚：「下一题」可点）"
+            "② 切题**不改进度** ③ 答过的题回来结果仍在"
+        )
     return report
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="e2e-web.py",
-        description="C 端浏览器端到端走查（CDP 移动视口 375×667）：login = 登录闭环 / p2a = Tab + 注册 + 引导",
+        description="C 端浏览器端到端走查（CDP 移动视口 375×667）："
+        "login = 登录闭环 / p2a = Tab + 注册 + 引导 / p2b1 = 刷题数据流 + 按钮切题",
     )
     ap.add_argument("--repo", default=str(REPO_DEFAULT))
     ap.add_argument("--api-base", default="http://127.0.0.1:8123/api/v1")
@@ -894,7 +962,8 @@ def main(argv: list[str] | None = None) -> int:
         "--scenario",
         default="login",
         choices=["login", "p2a", "p2b1"],
-        help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；p2b1 = 刷题数据流（选章节 → 答题判分 → 刷新仍在）",
+        help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；"
+        "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）",
     )
     ap.add_argument("--password", default="Admin@123456")
     ap.add_argument("--node", default="", help="node 可执行文件（默认从 PATH 找）")
@@ -993,7 +1062,8 @@ def main(argv: list[str] | None = None) -> int:
     for k, v in report.items():
         say(f"  ✅ {k} = {v}")
     say(
-        "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对）"
+        "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对"
+        " → 按钮切题）"
         if args.scenario == "p2b1"
         else (
             "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"

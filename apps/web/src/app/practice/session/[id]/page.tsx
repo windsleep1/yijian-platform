@@ -8,15 +8,20 @@ import { ApiError, request } from "@/lib/api";
 import type { AnswerResult, PracticeSession, SessionItem } from "@/lib/types";
 
 /**
- * 答题页（**P2b-1：显示当前题 → 选择 → 提交判分 → 显示解析**）。
+ * 答题页（**P2b-1：显示当前题 → 选择 → 提交判分 → 显示解析**；
+ * **P2b-2a：上一题 / 下一题 按钮切题**）。
  *
  * 路由在 `(tabs)` **之外**：答题应该是整屏的，底下挂一条 Tab 栏只会让人误点走
  * （而且走了之后"当前进度"的语义就含混了）。这与 `/onboarding` 的处理一致。
  *
  * ★★ **"刷新后还在"是怎么成立的**（验收判据之一）：
  *   页面 id 在 URL 里（`/practice/session/<id>`），刷新只会重新 `GET` 一次同一条记录；
- *   而"当前该答哪一题"由后端的 `current_item_id` 决定 —— 前端**不自己存游标**。
- *   判据：把 localStorage 清干净再刷新，仍然停在同一题（游标不在前端）。
+ *   而"落点"由后端的 `current_item_id` 决定 —— 前端**不自己存游标**。
+ *   判据：把 localStorage 清干净再刷新，仍然落在同一题（游标不在前端）。
+ *
+ *   切题之后**刷新会回到服务端的落点**（不是你看的那一题）—— 这是**有意的**：
+ *   落点 = "第一道还没答的题"，是**断点恢复**的语义；而你看哪一题是**会话内的临时状态**，
+ *   它不该被持久化（否则"复习某道旧题"会把断点也带走）。
  *
  * ★ **幂等与"重复提交"**：如果这一题**已经答过**（`item.answered`），
  *   页面直接渲染既有结果，**不提供再次提交** —— 后端也拦（幂等分支零写入），
@@ -122,6 +127,29 @@ export default function PracticeSessionPage() {
     // current 是由 cursor + sess 派生的；用 cursor 当依赖才不会每次 refresh 都重置
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cursor, sess?.id]);
+
+  /**
+   * ★ **切题（P2b-2a）** —— 游标只由**用户动作**改。三个刻意的选择：
+   *
+   * ① **不发请求**：切题是本地状态变化，改的只是"用户在看哪一题"；
+   *    进度（已答 N/M）仍然只由**提交**驱动 ⇒ 两者独立更新（硬约定 S）。
+   *    判据：点几次上一题/下一题，"已答 N/M"**一个数字都不该动**。
+   * ② 边界**不循环**：第 1 题的「上一题」、最后一题的「下一题」**显式 disabled** ——
+   *    在用户那里，"点了没反应"与"这个按钮不能点"是两件不同的事。
+   * ③ `busy` 期间**禁掉**：否则请求还在飞、游标已经走了，回来会把结果挂到**另一题**下面。
+   */
+  const idx =
+    sess === null || cursor === null ? -1 : sess.items.findIndex((it) => it.item_id === cursor);
+  const canPrev = idx > 0 && !busy;
+  const canNext = sess !== null && idx >= 0 && idx < sess.items.length - 1 && !busy;
+  const go = useCallback(
+    (delta: number) => {
+      if (sess === null || idx < 0) return;
+      const next = sess.items[idx + delta];
+      if (next) setCursor(next.item_id);
+    },
+    [sess, idx],
+  );
 
   const toggle = useCallback(
     (label: string) => {
@@ -303,8 +331,29 @@ export default function PracticeSessionPage() {
             </section>
           )}
 
+          {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              disabled={!canPrev}
+              onClick={() => go(-1)}
+              className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
+            >
+              ← 上一题
+            </button>
+            <button
+              type="button"
+              disabled={!canNext}
+              onClick={() => go(1)}
+              className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
+            >
+              下一题 →
+            </button>
+          </div>
+
           <p className="mt-5 rounded-xl border border-dashed border-line p-3 text-xs text-sub">
-            下一题 / 答题卡 / 交卷报告在 P2b-2。想接着练这章，回上一步再建一次。
+            答题卡 / 长按标记在 P2b-2b；交卷报告 / 历史 /
+            错题本随后。想接着练这章，回上一步再建一次。
           </p>
         </>
       )}
