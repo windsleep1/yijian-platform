@@ -145,6 +145,45 @@ export type SessionItem = {
   analysis_html: string | null;
 };
 
+/** 结果页的一个知识点条（`schemas/c_end.py` 的 `KpStatOut`）。 */
+export type KpStat = {
+  knowledge_point_id: string | null;
+  name: string;
+  total: number;
+  correct: number;
+  /** ⚠️ 可空 —— 后端「零分母返 null」。前端必须显示「—」而不是「0%」。 */
+  accuracy: number | null;
+};
+
+/**
+ * `GET /practice/sessions/{id}/report`（`schemas/c_end.py` 的 `SessionReportOut`）。
+ *
+ * ★ 与 `PracticeSession` 的关键区别：**不返 `items`** —— 报告要的是「这次练得怎么样」（聚合），
+ *   不是「每道题的解析」（那是 `PracticeSession` 的事）。
+ */
+export type SessionReport = {
+  id: string;
+  mode: string;
+  /** `doing` / `finished`。★ 报告在 `doing` 时也看得到（读路径不设更严的准入）。 */
+  status: string;
+  title: string;
+  subject_id: string | null;
+  subject_name: string | null;
+  chapter_id: string | null;
+  chapter_name: string | null;
+  total: number;
+  answered: number;
+  correct: number;
+  score: number;
+  /** ⚠️ **可空**：一道题都没答时后端返 null（0/0 不是 0%）。 */
+  accuracy: number | null;
+  duration_sec: number;
+  started_at: string | null;
+  finished_at: string | null;
+  /** 按正确率**升序**（最弱的在前）—— 后端已排好，前端不要重排。 */
+  by_kp: KpStat[];
+};
+
 /** `GET /practice/sessions/{id}`（`schemas/c_end.py` 的 `SessionOut`）。 */
 export type PracticeSession = {
   id: string;

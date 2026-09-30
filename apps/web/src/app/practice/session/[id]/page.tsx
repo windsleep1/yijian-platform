@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, request } from "@/lib/api";
@@ -107,6 +107,11 @@ export default function PracticeSessionPage() {
   const [picked, setPicked] = useState<string[]>([]);
   const [judge, setJudge] = useState<boolean | null>(null);
   const [revealed, setRevealed] = useState<Revealed | null>(null);
+  // ★ 交卷**不可逆**（交完不能再改答案）⇒ 用**页面内**的二次确认，不用 window.confirm：
+  //   它会阻塞主线程、在无头浏览器里还要额外处理对话框事件；
+  //   而「确认」这一步本身是可以被断言的**状态**（`data-confirm` 就是给走查的锚）。
+  const [confirming, setConfirming] = useState(false);
+  const router = useRouter();
   /**
    * ★★ **当前题由它定，不由 `sess.current_item_id` 现算** —— 这是本轮修掉的一个真 bug。
    *
@@ -268,6 +273,22 @@ export default function PracticeSessionPage() {
     setCursor(itemId);
     setSheetOpen(false);
   }, []);
+
+  /** 交卷：`POST .../finish` ⇒ 跳结果页。**用时由服务端算**，前端不传任何时间。 */
+  const finish = useCallback(async () => {
+    if (!id) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await request<{ id: string }>(`/practice/sessions/${id}/finish`, { method: "POST" });
+      router.push(`/practice/session/${id}/report`);
+    } catch (e) {
+      setErr(errText(e));
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  }, [id, router]);
 
   const toggle = useCallback(
     (label: string) => {
@@ -465,6 +486,46 @@ export default function PracticeSessionPage() {
                   </p>
                 </section>
               )}
+
+              {/* ★ 交卷（P2c-1）：本页唯一的**不可逆**动作 ⇒ 二次确认
+                  （硬约定 D：状态落在**按钮属性**上，不是写在 onClick 里）。 */}
+              <div className="mt-6 border-t border-line pt-4">
+                {confirming ? (
+                  <div data-confirm="finish" className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void finish()}
+                      className="min-h-touch flex-1 rounded-xl bg-brand text-center text-sm font-medium text-white disabled:opacity-45"
+                    >
+                      {busy ? "交卷中…" : "确认交卷"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setConfirming(false)}
+                      className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-45"
+                    >
+                      再练一会儿
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setConfirming(true)}
+                    className="min-h-touch w-full rounded-xl border border-line text-sm text-sub disabled:opacity-45"
+                  >
+                    交卷（交卷后不能再改答案）
+                  </button>
+                )}
+                {confirming && (
+                  <p className="mt-2 text-xs text-sub">
+                    已答 {sess.answered} / {sess.total}
+                    。交卷后这次练习就结束了，没答的题按未作答计入。
+                  </p>
+                )}
+              </div>
 
               {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}
               <div className="mt-4 flex items-center gap-3">
