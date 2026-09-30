@@ -19,11 +19,22 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 
     python tools/local-verify/mem-update.py --status       # 只报数（当前字节 / 余量 / 批状态）
 
+    # ★ 逐对打印**字节差**（"别估、量"的可观测形式）
+    python tools/local-verify/mem-update.py --measure \
+        --sink "…"=>"…" --add "…"=>"…"
+
+★ **「下沉」与「删掉」不是同一件事**：**单段** `--sink` 删掉 ≥ 200 字节时，**必须**声明
+  这段内容去哪了 ——
+  这段内容去哪了 ——
+    · `--sink-to "<短语>"`：该短语**既**是被删原文的子串、**又**出现在 `MEMORY-detail.md` 里；
+    · `--sink-inplace "<理由>"`：本批**不是下沉**（就地收紧 / 订正过期信息），理由会留痕。
+  判据：**只过「主文件变小」叫删除，两条都过才叫下沉**（坑 79）。
+
 也可以**一次做完** —— **有 `--sink` / `--add` 时，脚本会先应用、再收口**：
 
     python tools/local-verify/mem-update.py --sink "…"=>"…" --add "…"=>"…" --end --budget 0
 
-## 五条硬约束（前四条都会**回滚**）
+## 七条约束（**本工具自己的编号** —— 与仓库的「不变量 1~8」是**两套**；违反任一条都拒绝/回滚）
 
 1. **`--sink` 必须真的匹配上**：锚点找不到 → 整次操作回滚并非 0 退出
    （否则"我以为减了"会变成一个安静的假账）。
@@ -47,6 +58,13 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
    > 判据：锚点结尾要么是 `\n`、要么是文末；否则**拒绝**（不替你"补到行尾" —— 那只是
    > 把一种静默换成另一种静默）。`--self-test` 里有正例/反例各一条。
 
+7. ★ **「下沉」必须有两个断言**（2026-09-29 加，见 `verify_sink_destinations`；坑 79）：
+   ① 主文件变小（原本就有）；② **被删掉的内容真的出现在 `MEMORY-detail.md` 里**（新增）。
+   **只过 ① 叫「删除」，不叫「下沉」** —— 上一批实测踩到：4 条规则被 `--sink` 拿掉、
+   却从没写进 detail，而当时的判据**管量不管去处**，全程没响。
+   > 判据：`--sink` 是**承诺**，承诺要被**机械检查**兑现 —— 不能靠"我记得写了"。
+   > 与所有「机械对账」同族（`mem-update.py` 执行 Q、`check-invariants` 执行 §8 / 不变量 6~8）。
+
 ## 能力边界（写在 `--help` 里，不靠用的人记住）
 
 - 它只会做「**锚点恰好匹配 1 次**的字符串替换 / 追加」，**不理解 Markdown 结构**
@@ -58,6 +76,11 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 - **自动恢复只在两种情况下发生**：`--end` 时越过截断点，或本次变更被约束拒绝。
   其它情况（例如你事后觉得改错了）**需要人工**：备份在 `.workbuddy/memory/.mem-batch.bak`。
 - 它**不会**替你决定"该下沉哪一条"—— 那正是硬约定 Q 的第一步，属于判断，不属于机械。
+- **`--sink-to` 只回答"我声明的那个短语在不在 detail 里"** —— 它**不判断**"这段内容是不是
+  被完整搬走了"。短语是你自己挑的，挑个没有代表性的短语仍能过 ⇒ 它是**留痕**，不是**审计**。
+- **`--sink-inplace "<理由>"` 不做任何验证**（工具无法判断"压缩后内容还在不在"）：它只是一个
+  **留痕的声明** —— 所以**必须写理由**（空理由被拒），脚本会**大声打印**出来，
+  让人一眼看见"这批减法没走 detail"。
 - ★ `--self-test`：**证明上面这些判据自己会响**（正例 + 反例 + 边界各一条）。
   > 依据：硬约定 J —— **判据本身也要能被证伪**；不能构造出"它应该报相反结果"的场景，它就不是判据。
 
@@ -88,6 +111,14 @@ TRUNCATE_AT = 15396  # 实测的注入截断点（超过它 = 内容会被吃掉
 DUP_MIN_LEN = (
     12  # 判重只看"整行 strip 后相同、且长度 ≥ 12"的行（`---` / `> ` / `|` 这类短行不参与）
 )
+
+
+DETAIL = MEM.parent / "MEMORY-detail.md"
+#: ★ **单段** `--sink` 删掉 ≥ 这么多字节 ⇒ 那是「删掉了一段内容」（≈ 一条规则 / 一段判据
+#:   的量级），不是「换个说法」⇒ 必须用 `--sink-to` 声明它去了 detail 的哪里
+#:   （或用 `--sink-inplace "<理由>"` 明确声明这批不是下沉）。
+SINK_VERIFY_MIN = 200
+SINK_TO_MIN_LEN = 6
 
 
 def line_dups(text: str) -> dict[str, int]:
@@ -143,6 +174,92 @@ def add_after_line(text: str, anchor: str) -> int:
             "      ⇒ 把锚点写成**到行尾为止**的整段文本（或干脆整行）。"
         )
     return end
+
+
+def _detail_body() -> str:
+    return DETAIL.read_text(encoding="utf-8") if DETAIL.exists() else ""
+
+
+def verify_sink_destinations(
+    sunk_items: list[tuple[str, int]],
+    phrases: list[str],
+    inplace: str | None,
+    detail_body: str,
+) -> str | None:
+    """★ 硬约束 7：**「下沉」与「删掉」不是同一件事**（返回 `None` = 通过，否则是拒绝原因）。
+
+    上一批实测踩到：用 `--sink` 从 `MEMORY.md` 拿掉 4 条规则、**从没写进 `MEMORY-detail.md`** ——
+    那不是下沉，是**删除**。而当时的判据只保证「主文件变小 + 无重复行」⇒ **管量不管去处**。
+
+    ⇒ **「下沉」= 两个断言都过**：
+      ① 主文件变小（原本就有）；
+      ② **被删掉的内容出现在 detail 里**（新增）。
+
+    **怎么"机械地"回答 ②**（本工具不理解 Markdown，也不判断语义）：
+      调用方用 `--sink-to <短语>` 声明"这段内容去了 detail 的这句"；脚本断言该短语
+      **既**是被删原文的子串、**又**出现在 `detail_body` 里 —— 两条同时成立，
+      才说明"这一段真的搬过去了"，而不是"我口头记得搬了"。
+      ⚠️ 为什么要求"是被删原文的子串"：否则 `--sink-to "的"` 之类能轻易骗过它。
+      ⚠️ 短语必须够长（`SINK_TO_MIN_LEN`）：短串在任何文档里都能匹配 ⇒ 等于没查。
+      ⚠️ 阈值是**逐段**的（`SINK_VERIFY_MIN`）：**单段**不足阈值 ⇒ 换个说法，无需声明；
+        **只要声明了就一定验证**（声明是承诺，承诺要兑现）。
+      ⚠️ `--sink-inplace "<理由>"` = 明确声明"这批不是下沉：就地收紧 / 订正过期信息"。
+        它**没有机械验证**（工具判断不了"压缩后内容还在不在"），所以**必须写理由**，
+        而且会**大声打印** —— 它是一条**留痕的判断**，不是一个安静的口子。
+    """
+    if inplace is not None and not inplace.strip():
+        return (
+            "`--sink-inplace` **必须写理由**（空理由 = 一个安静的口子）。\n"
+            '      例：`--sink-inplace "订正过期的『共 19 条』行 + 就地收紧几条长句"`'
+        )
+
+    # ★ 声明了就一定验证（无论这一段删了多少）—— 否则"声明"会退化成客套话
+    if phrases:
+        for p in phrases:
+            if len(p.strip()) < SINK_TO_MIN_LEN:
+                return (
+                    f"--sink-to 短语太短（{len(p.strip())} < {SINK_TO_MIN_LEN}）：{p!r}\n"
+                    "      ⇒ 短串在任何文档里都能匹配，等于没查。换一个**有代表性的短语**。"
+                )
+            if not any(p in t for t, _ in sunk_items):
+                return (
+                    f"--sink-to 短语**不是任何一段被删原文的子串**：{p!r}\n"
+                    "      ⇒ 它没被删掉，就谈不上「下沉」。短语要从**被删原文里原样摘**。"
+                )
+            if p not in detail_body:
+                return (
+                    f"--sink-to 短语在被删原文里，但**不在** `{DETAIL.name}` 里：{p!r}\n"
+                    "      ⇒ 这**不是下沉，是删除**（坑 79）。\n"
+                    "      先把内容写进 detail，**再**回来 sink —— 顺序反了就没人回头补。"
+                )
+        if inplace is not None:
+            say(f"  ⚖️ 另有就地处理：{inplace.strip()}（**无机械验证**，留痕）")
+        return None
+
+    offenders = [(t, d) for t, d in sunk_items if d >= SINK_VERIFY_MIN]
+    if not offenders:
+        if inplace is not None:
+            say(
+                "  ⚖️ 就地处理（**非下沉**，最长一段只删 "
+                f"{max((d for _, d in sunk_items), default=0)} 字节）：{inplace.strip()}"
+            )
+        return None
+    if inplace is not None:
+        say(
+            f"  ⚖️ 就地处理（**非下沉**，其中 {len(offenders)} 段 ≥{SINK_VERIFY_MIN} 字节）："
+            f"{inplace.strip()} —— **无机械验证**，此声明被留痕"
+        )
+        return None
+    big_t, big_d = max(offenders, key=lambda kv: kv[1])
+    return (
+        f"本次有 {len(offenders)} 段 `--sink` **单段删掉 ≥{SINK_VERIFY_MIN} 字节**"
+        f"（最大一段 {big_d} 字节：{big_t[:48]!r}…）\n"
+        "      ⇒ 这是「删掉了一段内容」，不是「换个说法」。必须二选一声明它去哪了：\n"
+        '        · `--sink-to "<短语>"`：该短语**既**是被删原文的子串、**又**出现在 '
+        f"`{DETAIL.name}` 里\n"
+        '        · `--sink-inplace "<理由>"`：这批**不是下沉**（就地收紧 / 订正过期信息），留痕\n'
+        "      判据：**只过「主文件变小」叫删除，两条都过才叫下沉**（坑 79）。"
+    )
 
 
 def self_test() -> int:
@@ -205,6 +322,90 @@ def self_test() -> int:
         ),
     ]
     for name, got, want in extra:
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
+        bad += 0 if ok else 1
+
+    # ★ 约束 7（2026-09-29 补）：**「下沉」必须两个断言都过**（主文件变小 + 内容到了 detail）。
+    #   反例里最关键的一条是"删了一大段却说不出它去哪了"—— 那正是上一批真实踩到的形状。
+    #   用例 8 还抓出我自己写错的测试数据：短语必须是**被删原文的子串**，我第一版写
+    #   `「守卫分两种」` 而原文是 `「守卫分两种，别混」` ⇒ 它按设计拒了我。
+    fake_detail = "…这里记着「守卫分两种，别混」的完整判据…\n另一句只出现在 detail 里的话。\n"
+    sunk_text = "### 「守卫分两种，别混」\n- 覆盖率只说有没有跑到；契约守卫才拦回归。\n" * 4
+    sink_cases: list[tuple[str, bool, bool]] = [
+        (
+            "8) 单段删 900 + 声明了去处（短语在原文里、也在 detail 里）→ 通过",
+            verify_sink_destinations(
+                [(sunk_text, 900)], ["「守卫分两种，别混」"], None, fake_detail
+            )
+            is None,
+            True,
+        ),
+        (
+            "9) 单段删 900 + **没声明** → 拒绝（上一批踩到的形状）",
+            verify_sink_destinations([(sunk_text, 900)], [], None, fake_detail) is not None,
+            True,
+        ),
+        (
+            "10) 声明了但短语**不在 detail** → 拒绝（= 删除，不是下沉）",
+            verify_sink_destinations(
+                [(sunk_text, 900)], ["「守卫分两种，别混」"], None, "无关正文\n"
+            )
+            is not None,
+            True,
+        ),
+        (
+            "11) 声明了但短语**不是被删原文的子串** → 拒绝（否则挑个无关短语就能骗过它）",
+            verify_sink_destinations(
+                [(sunk_text, 900)], ["另一句只出现在 detail 里的话"], None, fake_detail
+            )
+            is not None,
+            True,
+        ),
+        (
+            "12) 单段删 100（< 阈值 200）→ 换个说法，无需声明",
+            verify_sink_destinations([(sunk_text, 100)], [], None, fake_detail) is None,
+            True,
+        ),
+        (
+            "13) 声明 --sink-inplace + 写了理由 → 通过（**无机械验证**，只留痕）",
+            verify_sink_destinations([(sunk_text, 900)], [], "订正过期行", fake_detail) is None,
+            True,
+        ),
+        (
+            "14) 短语太短 → 拒绝（短串等于没查）",
+            verify_sink_destinations([(sunk_text, 900)], ["守卫"], None, fake_detail) is not None,
+            True,
+        ),
+        (
+            "15) --sink-inplace 但**理由为空** → 拒绝（空开关 = 安静的口子）",
+            verify_sink_destinations([(sunk_text, 900)], [], "", fake_detail) is not None,
+            True,
+        ),
+        (
+            "16) ★ 逐段判据：一批里最大的一段只删 100 → 不触发",
+            verify_sink_destinations(
+                [(sunk_text, 100), (sunk_text, 90), (sunk_text, 80)], [], None, fake_detail
+            )
+            is None,
+            True,
+        ),
+        (
+            "17) ★ 逐段判据：同批里只要有一段删 900 → 触发",
+            verify_sink_destinations(
+                [(sunk_text, 900), (sunk_text, 30), (sunk_text, 20)], [], None, fake_detail
+            )
+            is not None,
+            True,
+        ),
+        (
+            "18) ★ 声明在小段上也必须被验证（声明是承诺，不能'小段就算了'）",
+            verify_sink_destinations([(sunk_text, 50)], ["「守卫分两种，别混」"], None, "无关\n")
+            is not None,
+            True,
+        ),
+    ]
+    for name, got, want in sink_cases:
         ok = got == want
         print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
         bad += 0 if ok else 1
@@ -308,10 +509,28 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--sink", action="append", default=[], metavar="OLD=>NEW")
+    ap.add_argument(
+        "--sink-to",
+        action="append",
+        default=[],
+        metavar="PHRASE",
+        help="声明被删内容去了 detail 的哪一句（须**既**是被删原文的子串、**又**在 detail 里）",
+    )
+    ap.add_argument(
+        "--sink-inplace",
+        default=None,
+        metavar="REASON",
+        help="声明本批减法**不是下沉**（就地收紧 / 订正过期信息）+ 写清理由 —— **无机械验证**，留痕",
+    )
     ap.add_argument("--add", action="append", default=[], metavar="ANCHOR=>TEXT")
     ap.add_argument("--budget", type=int, default=0, help="批内允许的净增字节（默认 0）")
     ap.add_argument("--end", action="store_true", help="收口本批：断言 + 清理")
     ap.add_argument("--status", action="store_true", help="只报数")
+    ap.add_argument(
+        "--measure",
+        action="store_true",
+        help="逐对打印**字节差**（别估、量）—— 与 --dry-run 一样不写文件",
+    )
     ap.add_argument(
         "--dry-run",
         action="store_true",
@@ -365,16 +584,23 @@ def main() -> int:
     # ⚠️ 为什么需要它：锚点写错时脚本**只报第一个**就整批回滚，于是"到底哪几个锚点不对"
     #    要一轮一轮试（2026-09-26 实测浪费了 5 轮往返）。⇒ 预演**一次把全部锚点的匹配数报出来**，
     #    并且把"新块里有重复行"这类问题也一并列出。
-    if args.dry_run:
+    if args.dry_run or args.measure:
         probe = MEM.read_bytes().decode("utf-8")
         bad = 0
+        sunk_old: list[tuple[str, int]] = []
+        net_removed = 0
         for spec in args.sink:
             old, new = parse_pair(spec, "--sink")
             n = probe.count(old)
+            delta = len(old.encode()) - len(new.encode())
             say(f"  [{'ok' if n == 1 else 'BAD'}] --sink 匹配 {n} 次：{old[:52]!r}")
+            if args.measure:
+                say(f"        Δ {delta:+d} 字节（{len(old.encode())} → {len(new.encode())}）")
             bad += 0 if n == 1 else 1
             if n == 1:
                 probe = probe.replace(old, new, 1)
+                sunk_old.append((old, max(0, delta)))
+                net_removed += max(0, delta)
         for spec in args.add:
             anchor, block = parse_pair(spec, "--add")
             dup = block_conflicts(block, existing_lines(probe))
@@ -393,8 +619,25 @@ def main() -> int:
                 f"{'、'.join(problems) if problems else 'ok'}（锚点：{anchor[:44]!r}）"
             )
             bad += 1 if problems else 0
+            if args.measure and pos is not None and not problems:
+                say(f"        Δ {len(block.encode()):+d} 字节（新增）")
             if pos is not None and not problems:
                 probe = probe[:pos] + "\n" + block + probe[pos:]
+        why = verify_sink_destinations(sunk_old, args.sink_to, args.sink_inplace, _detail_body())
+        if why:
+            say(f"  [BAD] 下沉去处未声明/未验证（净删 {net_removed} 字节）—— 真跑时会被拒绝+回滚：")
+            for ln in why.splitlines():
+                say("      " + ln)
+            bad += 1
+        elif args.sink:
+            say(
+                f"  [ok] 下沉去处：净删 {net_removed} 字节"
+                + (
+                    f"（就地处理：{args.sink_inplace.strip()}）"
+                    if args.sink_inplace is not None
+                    else f"，声明了 {len(args.sink_to)} 个短语"
+                )
+            )
         print(
             f"[mem] 预演结束：{bad} 条 BAD（**文件未改**）；全部 ok 时正文将变为 "
             f"{len(probe.encode('utf-8'))} 字节",
@@ -409,6 +652,8 @@ def main() -> int:
     sunk = added = 0
 
     try:
+        sunk_old: list[tuple[str, int]] = []
+        net_removed = 0
         for spec in args.sink:
             old, new = parse_pair(spec, "--sink")
             if text.count(old) != 1:
@@ -418,7 +663,14 @@ def main() -> int:
             text = text.replace(old, new, 1)
             delta = len(old.encode()) - len(new.encode())
             sunk += delta
+            sunk_old.append((old, max(0, delta)))
+            net_removed += max(0, delta)
             say(f"  下沉 {delta:+d} 字节：{old[:48]!r}…")
+
+        # ★ 硬约束 7：净删够多 ⇒ **必须**声明它去了哪（否则拒绝 + 回滚）。见 verify_sink_destinations。
+        why = verify_sink_destinations(sunk_old, args.sink_to, args.sink_inplace, _detail_body())
+        if why:
+            raise SystemExit(why)
 
         for spec in args.add:
             anchor, block = parse_pair(spec, "--add")
