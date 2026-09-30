@@ -93,13 +93,11 @@ const CELL_LABEL: Record<CellKind, string> = {
  * 但**全仓没有任何接口读它或写它**（`grep -rn marked` 只命中 schema 与一条测试的 INSERT 列名）。
  *
  * ⇒ 本批（P2b-2b）只做**显示通路**、**不做设置入口**；
- *   而且**不许把"显示得出来"说成"功能已实现"**（走查里那条断言就是钉这个的）。
- * ★ **BL-21**（个人 PWA 时）接手：把这一处换成 `item.marked === true`、出参补上该字段即可 ——
- *   全站**唯一一处**接线点。
+ *   而且**不许把"显示得出来"说成"功能已实现"**（走查里那条"抽屉内按钮 = N 格 + 1 关闭"
+ *   就是钉这个的）。
+ * ★ **BL-21 的接线点**：`cellKind()` 里那一行 `if (it.marked === true) return "marked"` ——
+ *   **全站唯一一处**。（同时要在 C 端出参补上 `marked` 字段。）
  */
-function isMarked(_item: SessionItem): boolean {
-  return false;
-}
 
 export default function PracticeSessionPage() {
   const { id } = useParams<{ id: string }>();
@@ -261,7 +259,9 @@ export default function PracticeSessionPage() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const cellKind = (it: SessionItem): CellKind => {
     if (it.item_id === cursor) return "current";
-    if (isMarked(it)) return "marked";
+    // ★★ **BL-21 接线点（全站唯一一处）**：将来在这里加
+    //    `if (it.marked === true) return "marked";`（并在 C 端出参补上 `marked`）。
+    //    本批**不加** —— `practice_items.marked` 没有读取接口，加了是死分支（硬约定 F）。
     return it.answered ? "done" : "todo";
   };
   const jumpTo = useCallback((itemId: string) => {
