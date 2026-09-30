@@ -24,10 +24,12 @@ from app.schemas.answer import judge_bool
 from app.schemas.c_end import (
     AnswerResultOut,
     ChapterOut,
+    KpStatOut,
     QuestionOptionOut,
     SessionItemOut,
     SessionOut,
     SessionProgressOut,
+    SessionReportOut,
     parse_answer_doc,
     parse_answer_value,
 )
@@ -429,6 +431,7 @@ _SELECT_SESSION = text(
     """
     SELECT s.id, s.mode, s.status, s.subject_id, s.chapter_id, s.title,
            s.total, s.answered, s.correct, s.score,
+           s.duration_sec, s.started_at, s.finished_at,
            sub.name AS subject_name, ch.name AS chapter_name
       FROM practice_sessions s
       LEFT JOIN subjects sub ON sub.id = s.subject_id
@@ -538,6 +541,146 @@ async def get_session(db: AsyncSession, *, user_id: int, session_id: int) -> Ses
         score=float(head["score"]),
         items=items,
     )
+
+
+# ============================================================ 交卷（#7）+ 报告（#2）
+
+
+#: ★ 交卷：**一次性写三个字段**，且**只在 `doing` 上生效**。
+#:   `duration_sec` 用**服务端时间**算（`now() - started_at`）—— 不让前端传：
+#:   前端传 = 可伪造 + 要处理时区 + 客户端时钟可能不准（三条里任何一条都够否掉它）。
+#:   `GREATEST(0, …)`：时钟回拨 / 造数时 `finished_at < started_at` ⇒ 别写负数进去。
+_FINISH_SESSION = text(
+    """
+    UPDATE practice_sessions
+       SET status       = 'finished',
+           finished_at  = COALESCE(finished_at, now()),
+           duration_sec = GREATEST(
+                            0,
+                            EXTRACT(EPOCH FROM (now() - started_at))::int
+                          ),
+           updated_at   = now()
+     WHERE id = :sid AND user_id = :uid AND status = 'doing'
+    """
+).bindparams(bindparam("sid", type_=BigInteger), bindparam("uid", type_=BigInteger))
+
+#: 知识点分布：**按已作答的题聚**。
+#: ⚠️ 为什么只聚已作答的：没答的题不构成"表现" —— 把它们算进去，
+#:    "知识点分布"就退化成"这次抽了多少题"，与结果页的目的（找弱项）相反。
+_SELECT_KP_STATS = text(
+    """
+    SELECT q.knowledge_point_id                       AS kp_id,
+           COALESCE(kp.name, '未归类')                 AS name,
+           count(*)                                   AS total,
+           count(*) FILTER (WHERE i.is_correct)        AS correct
+      FROM practice_items i
+      JOIN questions q       ON q.id  = i.question_id
+      LEFT JOIN knowledge_points kp ON kp.id = q.knowledge_point_id
+     WHERE i.session_id = :sid AND i.answered_at IS NOT NULL
+     GROUP BY 1, 2
+     ORDER BY 1
+    """
+).bindparams(bindparam("sid", type_=BigInteger))
+
+
+def _report_of(head: Any, by_kp: list[KpStatOut]) -> SessionReportOut:
+    answered = int(head["answered"])
+    correct = int(head["correct"])
+    return SessionReportOut(
+        id=head["id"],
+        mode=str(head["mode"]),
+        status=str(head["status"]),
+        title=str(head["title"]),
+        subject_id=head["subject_id"],
+        subject_name=head["subject_name"],
+        chapter_id=head["chapter_id"],
+        chapter_name=head["chapter_name"],
+        total=int(head["total"]),
+        answered=answered,
+        correct=correct,
+        score=float(head["score"]),
+        # ★★ 红线：**零分母返 `null`**。
+        #    写成 `correct / answered if answered else 0` 是错的 ——
+        #    "一道没答"和"全答错了"在界面上会长得一样（都是 0%），而那两件事完全不同。
+        accuracy=(round(correct / answered, 4) if answered else None),
+        duration_sec=int(head["duration_sec"] or 0),
+        started_at=head["started_at"],
+        finished_at=head["finished_at"],
+        by_kp=by_kp,
+    )
+
+
+async def _kp_stats(db: AsyncSession, session_id: int) -> list[KpStatOut]:
+    rows = (await db.execute(_SELECT_KP_STATS, {"sid": session_id})).mappings().all()
+    out: list[KpStatOut] = []
+    for r in rows:
+        total = int(r["total"])
+        correct = int(r["correct"])
+        out.append(
+            KpStatOut(
+                knowledge_point_id=r["kp_id"],
+                name=str(r["name"]),
+                total=total,
+                correct=correct,
+                accuracy=(round(correct / total, 4) if total else None),
+            )
+        )
+    # ★ 按**正确率升序**（最弱在前）。`accuracy is None` 的排最后
+    #   （理论上到不了这里，但排序里不能有"未定义行为"）。
+    out.sort(key=lambda k: (k.accuracy is None, k.accuracy if k.accuracy is not None else 0.0))
+    return out
+
+
+async def get_report(db: AsyncSession, *, user_id: int, session_id: int) -> SessionReportOut:
+    """取练习报告（P2c-1 结果页）。
+
+    ⚠️ **不要求 `status='finished'`** —— 判据 = 硬约定 **A**（读路径不得夹带比读接口更严的准入）。
+       "能不能看统计"与"练没练完"是两件事；前端在 `doing` 时不放入口，
+       但接口不设这道门（否则将来"中途看统计"会撞一堵没必要的墙）。
+
+    ⚠️ 归属判断只有一处：所有 SQL 都带 `user_id` —— 查不到 ⇒ `40401`
+       （**不是 403**：403 等于告诉对方"这个 id 存在但你没权限"）。
+    """
+    head = (
+        (await db.execute(_SELECT_SESSION, {"sid": session_id, "uid": user_id})).mappings().first()
+    )
+    if head is None:
+        raise not_found("练习不存在", 40401)
+    return _report_of(head, await _kp_stats(db, session_id))
+
+
+async def finish_session(db: AsyncSession, *, user_id: int, session_id: int) -> SessionReportOut:
+    """交卷（#7）：把这次练习收尾，并返回报告。
+
+    ★★ **幂等判据 = "目标状态已达成"**（硬约定 C）：已经 `finished` ⇒
+       **零写入**、直接返回同一份报告。守卫**不写成**"这次请求带没带某个参数"——
+       用户连点两次「交卷」是**同一个**目标状态。
+
+    ⚠️ **允许交白卷**（一道都没答）：`accuracy` 会是 `null`。
+       拦下它反而是错的 —— "我不想做了"也是一个正当的结束方式，
+       而 `abandoned` 状态留给**系统**判定（超时未继续），不是用户手动选。
+    """
+    head = (
+        (await db.execute(_SELECT_SESSION, {"sid": session_id, "uid": user_id})).mappings().first()
+    )
+    if head is None:
+        raise not_found("练习不存在", 40401)
+
+    if str(head["status"]) == "doing":
+        res = await db.execute(_FINISH_SESSION, {"sid": session_id, "uid": user_id})
+        if res.rowcount == 0:
+            # 并发下被另一个请求先收了尾 ⇒ 回到幂等分支（和 `submit_answer` 同一形状）。
+            pass
+        # 写路径必须自己 commit（`get_db` 不自动提交）——
+        # 症状极易误判：接口 200 + code=0，紧接着按 id 查就是 40401（坑 75）。
+        await db.commit()
+        head = (
+            (await db.execute(_SELECT_SESSION, {"sid": session_id, "uid": user_id}))
+            .mappings()
+            .first()
+        )
+
+    return _report_of(head, await _kp_stats(db, session_id))
 
 
 # ============================================================ 提交判分（#6）
@@ -775,6 +918,8 @@ __all__ = [
     "GRADABLE_TYPES",
     "PARTIAL_CREDIT_RATIO",
     "create_session",
+    "finish_session",
+    "get_report",
     "get_session",
     "grade",
     "list_chapters",

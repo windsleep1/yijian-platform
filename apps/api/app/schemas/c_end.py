@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -168,6 +169,56 @@ class SessionOut(BaseModel):
     correct: int
     score: float
     items: list[SessionItemOut] = []
+
+
+class KpStatOut(BaseModel):
+    """**结果页的一个知识点条**（按已作答的题聚合）。
+
+    ⚠️ `accuracy` 是可以为 `None` 的 —— 虽然这里 `total` 恒 ≥ 1（只统计有作答的题），
+       但"零分母返 null"是本项目**红线**，宁可留一个永远不会为 null 的可空类型，
+       也不要留一个"看起来不会 null 所以没人防"的类型。
+    """
+
+    knowledge_point_id: BigIntStr | None = None
+    #: `questions.knowledge_point_id` 是**可空**的 ⇒ 没归类的题聚成一条，名字给「未归类」
+    #: （留空字符串会让前端显示成一条没有标题的条 —— 那比"未归类"更让人困惑）。
+    name: str
+    total: int
+    correct: int
+    accuracy: float | None = None
+
+
+class SessionReportOut(BaseModel):
+    """一次练习的**报告**（P2c-1 结果页）。
+
+    ★ 与 `SessionOut` 的区别：**不返 `items`**。结果页要的是"这次练得怎么样"（聚合），
+      不是"每道题的解析"（那是 `GET /practice/sessions/{id}` 的事）——
+      一个 100 题的 session 把逐题解析塞进报告，只会让首屏多等几百 KB。
+    """
+
+    id: BigIntStr
+    mode: str
+    status: str
+    title: str
+    subject_id: BigIntStr | None = None
+    subject_name: str | None = None
+    chapter_id: BigIntStr | None = None
+    chapter_name: str | None = None
+
+    total: int
+    answered: int
+    correct: int
+    score: float
+    #: ★★ **零分母返 `null`**（红线）：一道题都没答时 `0/0` 不是 0%，是"没有数据"。
+    #:    前端因此必须显示「—」而不是「0%」——后者会让用户以为"我全错了"。
+    accuracy: float | None = None
+    duration_sec: int
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    #: 按正确率**升序**（最弱的在前）—— 结果页的用处是"知道该补哪儿"，
+    #: 而不是"看我多强"。所以最差的排第一。
+    by_kp: list[KpStatOut] = []
 
 
 class AnswerIn(BaseModel):

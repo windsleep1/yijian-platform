@@ -1,8 +1,10 @@
 """C 端 · 刷题（P2b-1）：选章节 → 建 session → 取 session → 提交判分。
 
     POST /practice/sessions                 建一次章节练习
-    GET  /practice/sessions/{id}            取练习（`doing` = 断点恢复；`finished` = 报告）
+    GET  /practice/sessions/{id}            取练习（`doing` = 断点恢复；`finished` = 全可见）
     POST /practice/sessions/{id}/answer     提交一道题并判分
+    POST /practice/sessions/{id}/finish     交卷（#7，P2c-1）
+    GET  /practice/sessions/{id}/report     报告：总分 / 正确率 / 用时 / 知识点分布（P2c-1）
 
 ⚠️ **本批只做"数据流跑通"**（用户 2026-09-29 的原话）：先证明后端到前端的完整往返，
    再堆交互。**切题 / 答题卡 / 长按标记 / 交卷（#7）** 都留给 P2b-2。
@@ -19,7 +21,13 @@ from fastapi import APIRouter, Path
 
 from app.core.deps import CurrentUserDep, DbSession
 from app.core.response import Envelope, ok
-from app.schemas.c_end import AnswerIn, AnswerResultOut, SessionCreateIn, SessionOut
+from app.schemas.c_end import (
+    AnswerIn,
+    AnswerResultOut,
+    SessionCreateIn,
+    SessionOut,
+    SessionReportOut,
+)
 from app.services import practice_service
 
 router = APIRouter(prefix="/practice", tags=["C 端 · 刷题"])
@@ -67,6 +75,49 @@ async def get_session(
     session_id: int = Path(description="练习 id"),
 ) -> dict:
     data = await practice_service.get_session(db, user_id=me.id, session_id=session_id)
+    return ok(data.model_dump())
+
+
+@router.post(
+    "/sessions/{session_id}/finish",
+    response_model=Envelope[SessionReportOut],
+    summary="交卷（结束这次练习）并返回报告",
+    description=(
+        "把这次练习收尾：写 `status='finished'` / `finished_at` / `duration_sec`，并返回报告。\n\n"
+        '- **幂等**：已经结束 ⇒ **零写入**，返回同一份报告（判据 = "目标状态已达成"）；\n'
+        "- **用时由服务端算**（`now() - started_at`），不接受前端传 —— 可伪造 + 时区 + 时钟不准；\n"
+        "- **允许交白卷**（一道没答 ⇒ `accuracy = null`）。\n\n"
+        "★ 为什么它和报告是两个接口：交卷是**写**（有副作用、有幂等语义），报告是**读**。\n"
+        '把它们合成一个 `POST` 会让"只想看看统计"也产生一次写。'
+    ),
+)
+async def finish_session(
+    db: DbSession,
+    me: CurrentUserDep,
+    session_id: int = Path(description="练习 id"),
+) -> dict:
+    data = await practice_service.finish_session(db, user_id=me.id, session_id=session_id)
+    return ok(data.model_dump())
+
+
+@router.get(
+    "/sessions/{session_id}/report",
+    response_model=Envelope[SessionReportOut],
+    summary="取练习报告（总分 / 正确率 / 用时 / 知识点分布）",
+    description=(
+        "结果页要的四个数一次给全。**不返逐题解析**（那是 `GET /practice/sessions/{id}`）。\n\n"
+        "- ⚠️ **零分母返 `null`**：一道题都没答时 `accuracy = null`，"
+        "前端要显示「—」而不是「0%」（0% 会让用户以为自己全错了）；\n"
+        '- `by_kp` 按正确率**升序**（**最弱的在前**）—— 结果页的用处是"知道该补哪儿"；\n'
+        "- ★ **不要求 `status='finished'`**：读路径不夹带比读接口更严的准入（`doing` 时也能看统计）。"
+    ),
+)
+async def get_report(
+    db: DbSession,
+    me: CurrentUserDep,
+    session_id: int = Path(description="练习 id"),
+) -> dict:
+    data = await practice_service.get_report(db, user_id=me.id, session_id=session_id)
     return ok(data.model_dump())
 
 
