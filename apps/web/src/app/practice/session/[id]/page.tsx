@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, request } from "@/lib/api";
 import type { AnswerResult, PracticeSession, SessionItem } from "@/lib/types";
@@ -151,6 +151,77 @@ export default function PracticeSessionPage() {
     [sess, idx],
   );
 
+  /* ==================== 滑动切题（P2b-2a 后半）====================
+   * 与按钮切题**同一个语义**：只改本地游标，**不发请求、不动进度**（硬约定 S）。
+   *
+   * 四条判据（都在下面的代码里有对应处）：
+   * ① **阈值**：`max(屏宽 25%, 80px)`。太小 ⇒ 误触；太大 ⇒ 用户以为没反应。
+   * ② **方向判定**：`|dx| > |dy| * 1.5` 才算切题；否则那是用户在**滚题目**。
+   *    ⚠️ 只判"谁大"不够 —— 斜着滑时 `|dx|` 常常只大一点点，那种情况该判成滚动。
+   * ③ **视觉反馈**：滑动中 `translateX` **跟着手指走**；松手超阈值 ⇒ 滑出并切题，
+   *    未超 ⇒ 弹回。**没有反馈，用户不知道生效了没**。
+   * ④ **只对触摸设备启用**：桌面**不**把鼠标拖动当切题（只保留按钮）。
+   */
+  const [touchable, setTouchable] = useState(false);
+  const [dragX, setDragX] = useState(0);
+  const [animating, setAnimating] = useState(false);
+  const touch = useRef<{ x0: number; y0: number; axis: "?" | "x" | "y"; dx: number } | null>(null);
+
+  useEffect(() => {
+    setTouchable(window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window);
+  }, []);
+
+  const swipeThreshold = () => Math.max(window.innerWidth * 0.25, 80);
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (!touchable || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    touch.current = { x0: t.clientX, y0: t.clientY, axis: "?", dx: 0 };
+    setAnimating(false);
+    setDragX(0);
+  };
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    const st = touch.current;
+    if (!st || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const dx = t.clientX - st.x0;
+    const dy = t.clientY - st.y0;
+    if (st.axis === "?") {
+      if (Math.abs(dx) > Math.abs(dy) * 1.5 && Math.abs(dx) > 10) st.axis = "x";
+      else if (Math.abs(dy) > 10) st.axis = "y";
+      else return; // 还没走够，先不定方向
+    }
+    if (st.axis !== "x") return; // 纵向 ⇒ 让浏览器滚页面，我们不管
+    st.dx = dx;
+    setDragX(dx);
+  };
+
+  const onTouchEnd = () => {
+    const st = touch.current;
+    touch.current = null;
+    if (!st || st.axis !== "x") return;
+    const w = window.innerWidth;
+    const thresh = swipeThreshold();
+    const out = Math.round(w * 0.45);
+    setAnimating(true);
+    if (st.dx <= -thresh && canNext) {
+      setDragX(-out);
+      window.setTimeout(() => {
+        go(1);
+        setDragX(0);
+      }, 160);
+    } else if (st.dx >= thresh && canPrev) {
+      setDragX(out);
+      window.setTimeout(() => {
+        go(-1);
+        setDragX(0);
+      }, 160);
+    } else {
+      setDragX(0); // 未超阈值 ⇒ **弹回**
+    }
+  };
+
   const toggle = useCallback(
     (label: string) => {
       if (revealed || busy) return;
@@ -222,133 +293,149 @@ export default function PracticeSessionPage() {
 
       {sess && current && (
         <>
-          <h1 className="mt-4 text-lg font-semibold">
-            {sess.chapter_name ?? sess.subject_name ?? "练习"}
-          </h1>
-          <p className="mt-1 text-xs text-sub">
-            第 {current.seq} 题 / 共 {sess.total} 题 ·{" "}
-            {current.type === "single"
-              ? "单选"
-              : current.type === "multiple"
-                ? "多选"
-                : current.type === "judge"
-                  ? "判断"
-                  : current.type}
-          </p>
-
-          <p className="mt-5 whitespace-pre-wrap text-base leading-relaxed">{current.stem}</p>
-
-          {!supported && (
-            <p className="mt-4 rounded-lg border border-dashed border-line p-3 text-sm text-sub">
-              这类题（{current.type}）暂不支持在线判分。
+          {/* ★ 滑动切题：**整块题目**跟着手指位移。`touch-action: pan-y` 让纵向仍可滚动，
+              横向归我们 —— 这样不必 `preventDefault`（被动监听里叫不动它）。 */}
+          <div
+            data-swipe-card
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+            style={{
+              transform: `translateX(${dragX}px)`,
+              transition: animating ? "transform 160ms ease-out" : "none",
+              touchAction: "pan-y",
+            }}
+          >
+            <h1 className="mt-4 text-lg font-semibold">
+              {sess.chapter_name ?? sess.subject_name ?? "练习"}
+            </h1>
+            <p className="mt-1 text-xs text-sub">
+              第 {current.seq} 题 / 共 {sess.total} 题 ·{" "}
+              {current.type === "single"
+                ? "单选"
+                : current.type === "multiple"
+                  ? "多选"
+                  : current.type === "judge"
+                    ? "判断"
+                    : current.type}
             </p>
-          )}
 
-          {supported && (
-            <ul className="mt-5 space-y-2">
-              {current.type === "judge"
-                ? [
-                    { label: "正确", value: true },
-                    { label: "错误", value: false },
-                  ].map((o) => {
-                    const active = judge === o.value;
-                    return (
-                      <li key={o.label}>
-                        <button
-                          type="button"
-                          disabled={busy || revealed !== null}
-                          aria-pressed={active}
-                          onClick={() => setJudge(o.value)}
-                          className={`min-h-touch w-full rounded-xl border px-4 text-left text-sm disabled:opacity-60 ${
-                            active ? "border-brand bg-brand/10 text-brand" : "border-line"
-                          }`}
-                        >
-                          {o.label}
-                        </button>
-                      </li>
-                    );
-                  })
-                : current.options.map((o) => {
-                    const active = picked.includes(o.label);
-                    // 判完分之后把"我选的"和"正确答案"分别标出来 —— 只标对错
-                    // 而不给正确答案，用户还得自己回头数标号（体验 + 判据都不合格）。
-                    const isRight =
-                      revealed !== null && revealed.answer.some((x) => show(x) === o.label);
-                    const isMine = revealed !== null && picked.includes(o.label);
-                    return (
-                      <li key={o.label}>
-                        <button
-                          type="button"
-                          disabled={busy || revealed !== null}
-                          aria-pressed={active}
-                          onClick={() => toggle(o.label)}
-                          className={`flex min-h-touch w-full items-start gap-3 rounded-xl border px-3 py-2 text-left text-sm disabled:opacity-60 ${
-                            active && revealed === null ? "border-brand bg-brand/10" : "border-line"
-                          } ${isRight ? "border-green-500" : ""}`}
-                        >
-                          <span className="mt-0.5 shrink-0 font-medium">{o.label}</span>
-                          <span className="flex-1 whitespace-pre-wrap">{o.content}</span>
-                          {revealed !== null && (
-                            <span className="shrink-0 text-xs text-sub">
-                              {isRight ? "正确答案" : isMine ? "我选的" : ""}
-                            </span>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-            </ul>
-          )}
+            <p className="mt-5 whitespace-pre-wrap text-base leading-relaxed">{current.stem}</p>
 
-          {revealed === null ? (
-            <button
-              type="button"
-              disabled={!canSubmit}
-              onClick={() => void submit()}
-              className="mt-6 min-h-touch w-full rounded-xl bg-brand text-center font-medium text-white disabled:opacity-45"
-            >
-              {busy ? "提交中…" : "提交"}
-            </button>
-          ) : (
-            <section className="mt-6 rounded-xl border border-line p-4">
-              <p
-                className={`font-medium ${revealed.is_correct ? "text-green-600" : "text-red-600"}`}
+            {!supported && (
+              <p className="mt-4 rounded-lg border border-dashed border-line p-3 text-sm text-sub">
+                这类题（{current.type}）暂不支持在线判分。
+              </p>
+            )}
+
+            {supported && (
+              <ul className="mt-5 space-y-2">
+                {current.type === "judge"
+                  ? [
+                      { label: "正确", value: true },
+                      { label: "错误", value: false },
+                    ].map((o) => {
+                      const active = judge === o.value;
+                      return (
+                        <li key={o.label}>
+                          <button
+                            type="button"
+                            disabled={busy || revealed !== null}
+                            aria-pressed={active}
+                            onClick={() => setJudge(o.value)}
+                            className={`min-h-touch w-full rounded-xl border px-4 text-left text-sm disabled:opacity-60 ${
+                              active ? "border-brand bg-brand/10 text-brand" : "border-line"
+                            }`}
+                          >
+                            {o.label}
+                          </button>
+                        </li>
+                      );
+                    })
+                  : current.options.map((o) => {
+                      const active = picked.includes(o.label);
+                      // 判完分之后把"我选的"和"正确答案"分别标出来 —— 只标对错
+                      // 而不给正确答案，用户还得自己回头数标号（体验 + 判据都不合格）。
+                      const isRight =
+                        revealed !== null && revealed.answer.some((x) => show(x) === o.label);
+                      const isMine = revealed !== null && picked.includes(o.label);
+                      return (
+                        <li key={o.label}>
+                          <button
+                            type="button"
+                            disabled={busy || revealed !== null}
+                            aria-pressed={active}
+                            onClick={() => toggle(o.label)}
+                            className={`flex min-h-touch w-full items-start gap-3 rounded-xl border px-3 py-2 text-left text-sm disabled:opacity-60 ${
+                              active && revealed === null
+                                ? "border-brand bg-brand/10"
+                                : "border-line"
+                            } ${isRight ? "border-green-500" : ""}`}
+                          >
+                            <span className="mt-0.5 shrink-0 font-medium">{o.label}</span>
+                            <span className="flex-1 whitespace-pre-wrap">{o.content}</span>
+                            {revealed !== null && (
+                              <span className="shrink-0 text-xs text-sub">
+                                {isRight ? "正确答案" : isMine ? "我选的" : ""}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+              </ul>
+            )}
+
+            {revealed === null ? (
+              <button
+                type="button"
+                disabled={!canSubmit}
+                onClick={() => void submit()}
+                className="mt-6 min-h-touch w-full rounded-xl bg-brand text-center font-medium text-white disabled:opacity-45"
               >
-                {revealed.is_correct ? "答对了" : "答错了"}
-                <span className="ml-2 text-xs font-normal text-sub">
-                  得分 {revealed.score}
-                  {revealed.idempotent ? " · 这题之前已经答过（已按既有结果返回）" : ""}
-                </span>
-              </p>
-              <p className="mt-3 text-sm">
-                <span className="text-sub">正确答案：</span>
-                {revealed.answer.map(show).join("、")}
-              </p>
-              <p className="mt-3 whitespace-pre-wrap text-sm">
-                <span className="text-sub">解析：</span>
-                {revealed.analysis ?? "（这道题没有解析）"}
-              </p>
-            </section>
-          )}
+                {busy ? "提交中…" : "提交"}
+              </button>
+            ) : (
+              <section className="mt-6 rounded-xl border border-line p-4">
+                <p
+                  className={`font-medium ${revealed.is_correct ? "text-green-600" : "text-red-600"}`}
+                >
+                  {revealed.is_correct ? "答对了" : "答错了"}
+                  <span className="ml-2 text-xs font-normal text-sub">
+                    得分 {revealed.score}
+                    {revealed.idempotent ? " · 这题之前已经答过（已按既有结果返回）" : ""}
+                  </span>
+                </p>
+                <p className="mt-3 text-sm">
+                  <span className="text-sub">正确答案：</span>
+                  {revealed.answer.map(show).join("、")}
+                </p>
+                <p className="mt-3 whitespace-pre-wrap text-sm">
+                  <span className="text-sub">解析：</span>
+                  {revealed.analysis ?? "（这道题没有解析）"}
+                </p>
+              </section>
+            )}
 
-          {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}
-          <div className="mt-4 flex items-center gap-3">
-            <button
-              type="button"
-              disabled={!canPrev}
-              onClick={() => go(-1)}
-              className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
-            >
-              ← 上一题
-            </button>
-            <button
-              type="button"
-              disabled={!canNext}
-              onClick={() => go(1)}
-              className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
-            >
-              下一题 →
-            </button>
+            {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                type="button"
+                disabled={!canPrev}
+                onClick={() => go(-1)}
+                className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
+              >
+                ← 上一题
+              </button>
+              <button
+                type="button"
+                disabled={!canNext}
+                onClick={() => go(1)}
+                className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
+              >
+                下一题 →
+              </button>
+            </div>
           </div>
 
           <p className="mt-5 rounded-xl border border-dashed border-line p-3 text-xs text-sub">
