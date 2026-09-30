@@ -1,4 +1,4 @@
-"""C 端**浏览器**端到端走查（三个场景：`--scenario login` / `p2a` / `p2b1`）。
+"""C 端**浏览器**端到端走查（四个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1`）。
 
 为什么要单独写一个（而不是塞进 pytest）
 --------------------------------------
@@ -1239,6 +1239,221 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
     return report
 
 
+async def drive_p2c1(args: argparse.Namespace) -> dict[str, object]:
+    """P2c-1 场景：**答 2 题 → 交卷 → 结果页**，再用**空卷**把"零分母"钉死。
+
+    | # | 判据 | 没有它会怎样 |
+    |---|---|---|
+    | ① | 交卷的**二次确认落在 DOM 上**（`[data-confirm=finish]`） | 少了它，"点了交卷什么都没发生"也算过 |
+    | ② | 交卷 ⇒ 跳到 `/report` | —— |
+    | ③ | 结果页**四样数**都在：总分 / 正确率 / 用时 / 知识点分布 | 少了任一样，"接口返了但我没用"也能过 |
+    | ④ | ★ 正确率那页的「已答 N/M」与结果页的**对得上** | 少了它，结果页自己编一个数也能过 |
+    | ⑤ | ★★ **空卷交卷 ⇒ 正确率显示「—」**（不是 0%） | 少了它，前端 `?? 0` 那种写法全绿 —— 而那正是"零分母返 null"要防的**显示事故** |
+    | ⑥ | 已交卷 ⇒ **不显示**"还没交卷"横幅 | 少了它，横幅写死也能过 |
+
+    ★★ ③ 与 ⑤ 必须**一起**看：
+      · 只验 ③（有数据显示百分比）⇒ 一个"永远显示 0%"的实现在 ⑤ 之外全绿；
+      · 只验 ⑤（无数据显示「—」）⇒ 一个"永远显示 —"的实现全绿。
+      **一对才构成判据**（硬约定 J：每个新判据至少有一个"应该红"的场景）。
+    """
+    report: dict[str, object] = {}
+
+    async def new_session(b: "cdp_browser.Browser") -> str:
+        """走一遍「选科目 → 选章节」，返回新建 session 的 URL。"""
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelectorAll('main button[aria-pressed]').length > 0",
+            timeout=40,
+            label="科目列表加载完成",
+        )
+        await b.click("main button[aria-pressed]", nth=0)
+        try:
+            await b.wait_for(
+                _PRACTICE_CHAPTERS_AVAILABLE_JS,
+                timeout=40,
+                label="章节列表加载完成（有可练的章节）",
+            )
+        except Exception as e:  # noqa: BLE001
+            txt = await b.eval("document.body.innerText")
+            raise Failure(f"章节列表没出来（{e}）。此刻页面文本：\n{txt}") from None
+        first_chapter = await b.eval(_PRACTICE_FIRST_CHAPTER_JS)
+        if not report.get("chapter_picked"):
+            report["chapter_picked"] = " ".join(str(first_chapter).split())
+        await b.click("main section:nth-of-type(2) ul li button:not([disabled])", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进答题页"
+        )
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0", timeout=40, label="有选项"
+        )
+        url = await b.eval("location.pathname")
+        need(isinstance(url, str) and url.startswith("/practice/session/"), f"URL 不对：{url!r}")
+        return url
+
+    async def answer_here(b: "cdp_browser.Browser") -> None:
+        """在**当前题**上选第一个选项并提交。
+
+        ⚠️ 必须先等"选中"落进 DOM 再点提交 —— 提交按钮的 `disabled` 由同一个 state 派生，
+           点完选项立刻点提交会撞 React 的渲染节拍（那一刻按钮还是 disabled，
+           `.click()` 静默无效）。硬约定 D 的 E2E 形态：判据是"**它能点了吗**"。
+        """
+        await b.click("main ul li button", nth=0)
+        await b.wait_for(
+            "document.querySelector('main ul li button[aria-pressed=\"true\"]') !== null",
+            timeout=20,
+            label="选项已选中（提交按钮此时才可用）",
+        )
+        await b.click_text("提交", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('正确答案')", timeout=40, label="出现判分结果"
+        )
+
+    async def do_finish(b: "cdp_browser.Browser") -> None:
+        """交卷：★ 先证明"确认态真的落进了 DOM"，再点确认。"""
+        await b.click_text("交卷（交卷后不能再改答案）", tag="button")
+        await b.wait_for(
+            "document.querySelector('[data-confirm=\"finish\"]') !== null",
+            timeout=20,
+            label="交卷的二次确认出现（确认态落在 DOM 上）",
+        )
+        await b.click_text("确认交卷", tag="button")
+        await b.wait_for("location.pathname.endsWith('/report')", timeout=60, label="跳到结果页")
+        # ★★ 还要等**内容**渲染出来 —— 只等 URL 会读到「加载中…」那一刻的空页面。
+        #    `read_report()` 用 `|| {}` 兜底 ⇒ 元素不存在时它不报错、只给空串，
+        #    症状会变成「后端没返数据」（而实际是前端还没渲染）。
+        await b.wait_for(
+            "!!(document.querySelector('[data-report-score]')"
+            "   || document.querySelector('[data-report-error]'))",
+            timeout=40,
+            label="结果页渲染完成（有数字，或明确报错）",
+        )
+        bad = await b.eval("(document.querySelector('[data-report-error]') || {}).innerText || ''")
+        if bad:
+            raise Failure(f"结果页报了错：{bad}")
+
+    async def read_report(b: "cdp_browser.Browser") -> dict[str, str]:
+        """读结果页的四个数。
+
+        ⚠️ 调用前**必须**已经等过 `[data-report-score]` —— 否则读到的是「加载中」
+        那一刻的空串（`|| {}` 兜底让「没找到」与「值为空」长得一样，这是第一版失败的原因）。
+        """
+        txt: dict[str, str] = {}
+        for key in ("score", "accuracy", "duration", "answered"):
+            found = await b.eval(f"!!document.querySelector('[data-report-{key}]')")
+            need(found is True, f"结果页缺少 `data-report-{key}` 这个探针")
+            v = await b.eval(
+                f"(document.querySelector('[data-report-{key}]') || {{}}).innerText || ''"
+            )
+            txt[key] = " ".join(str(v).split())
+        txt["kp_rows"] = str(
+            await b.eval("document.querySelectorAll('[data-report-kp=\"list\"] li').length")
+        )
+        txt["kp_empty"] = str(
+            await b.eval("document.querySelector('[data-report-kp=\"empty\"]') !== null")
+        )
+        txt["banner"] = str(
+            await b.eval("document.querySelector('[data-report-banner=\"doing\"]') !== null")
+        )
+        return txt
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        await do_login(b, args)
+
+        # ---------------- ① 建练习 → 答 2 题 ----------------
+        say("① 建练习 → 答 2 题（第 1 题提交后点「下一题」再答第 2 题）")
+        await new_session(b)
+        await answer_here(b)
+        await b.click_text("下一题", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('第 2 题')", timeout=30, label="切到第 2 题"
+        )
+        await answer_here(b)
+        prog = await b.eval(_PRACTICE_PROGRESS_JS)
+        prog_norm = "".join(str(prog).replace("已答", "").split())
+        need(prog_norm.startswith("2/"), f"答完 2 题后进度应显示 2 / N，实际 {prog!r}")
+        report["answer_page_progress"] = prog_norm
+        say(f"    答题页进度：{prog_norm}")
+
+        # ---------------- ② 交卷（二次确认） ----------------
+        say("② 交卷：先出现二次确认，再点「确认交卷」⇒ 跳结果页")
+        await do_finish(b)
+        url = await b.eval("location.pathname")
+        need(
+            isinstance(url, str) and url.endswith("/report"),
+            f"交卷后应停在结果页，实际 {url!r}",
+        )
+
+        # ---------------- ③④ 结果页四样数 ----------------
+        say("③ 结果页四样数：总分 / 正确率 / 用时 / 知识点分布")
+        r1 = await read_report(b)
+        score_txt = r1["score"].replace("分", "").strip()
+        try:
+            float(score_txt)
+        except ValueError:
+            raise Failure(f"结果页的总分应是数字：{r1['score']!r}") from None
+        need(
+            r1["accuracy"].endswith("%"),
+            f"★ 答过题之后正确率必须是百分比（不是「—」）：{r1['accuracy']!r}",
+        )
+        need(
+            ":" in r1["duration"],
+            f"用时应该是 mm:ss 形状（服务端算出来的）：{r1['duration']!r}",
+        )
+        need(
+            int(r1["kp_rows"]) >= 1,
+            f"答过题之后知识点分布不该是空的：{r1!r}",
+        )
+        # ★ ④ 跨页对账：结果页的「已答」必须与答题页刚显示的「已答 N/M」一致
+        need(
+            r1["answered"] == prog_norm,
+            f"结果页的「已答」与答题页对不上：{r1['answered']!r} vs {prog_norm!r}",
+        )
+        # ★ ⑥ 已交卷 ⇒ 不该出现"还没交卷"横幅
+        need(
+            r1["banner"] == "False",
+            "已经交卷了，结果页不该再显示「还没交卷」横幅",
+        )
+        report["report_filled"] = (
+            f"总分 {r1['score']}｜正确率 {r1['accuracy']}｜用时 {r1['duration']}"
+            f"｜已答 {r1['answered']}｜知识点 {r1['kp_rows']} 条｜无「没交卷」横幅"
+        )
+        say(f"    {report['report_filled']}")
+
+        # ---------------- ⑤ 空卷：正确率必须显示「—」 ----------------
+        say("⑤ ★★ 点「再练一遍」建一份**空**练习 → 直接交卷 ⇒ 正确率必须显示「—」")
+        await b.click_text("再练一遍", tag="button")
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/') && !location.pathname.endsWith('/report')",
+            timeout=60,
+            label="进新的答题页",
+        )
+        await do_finish(b)
+        r2 = await read_report(b)
+        need(
+            r2["accuracy"] == "—",
+            f"★★ 零分母必须显示「—」（不是 0%）：{r2['accuracy']!r}",
+        )
+        need(
+            r2["kp_empty"] == "True",
+            f"一道没答 ⇒ 知识点分布应显示空提示：{r2!r}",
+        )
+        need(
+            r2["answered"].startswith("0/"),
+            f"空卷的「已答」应该是 0/N：{r2['answered']!r}",
+        )
+        need(
+            r2["banner"] == "False",
+            "空卷交卷之后也是已交卷 ⇒ 同样不该有「还没交卷」横幅",
+        )
+        report["blank_report"] = (
+            f"正确率 {r2['accuracy']}｜已答 {r2['answered']}｜知识点空提示 {r2['kp_empty']}"
+            " —— 与 ③ 的百分比**成对**（这才证明 null 不是「永远显示 —」）"
+        )
+        say(f"    {report['blank_report']}")
+
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="e2e-web.py",
@@ -1252,9 +1467,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scenario",
         default="login",
-        choices=["login", "p2a", "p2b1"],
+        choices=["login", "p2a", "p2b1", "p2c1"],
         help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；"
-        "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）",
+        "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）；"
+        "p2c1 = 交卷 → 结果页（总分/正确率/用时/知识点）+ 空卷必须显示「—」",
     )
     ap.add_argument("--password", default="Admin@123456")
     ap.add_argument("--node", default="", help="node 可执行文件（默认从 PATH 找）")
@@ -1324,6 +1540,7 @@ def main(argv: list[str] | None = None) -> int:
             "login": drive_login,
             "p2a": drive_p2a,
             "p2b1": drive_p2b1,
+            "p2c1": drive_p2c1,
         }
         report = asyncio.run(drivers[args.scenario](args))
     except Failure as e:
@@ -1353,13 +1570,17 @@ def main(argv: list[str] | None = None) -> int:
     for k, v in report.items():
         say(f"  ✅ {k} = {v}")
     say(
-        "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对"
-        " → 按钮切题）"
-        if args.scenario == "p2b1"
+        "✅ 走查全部通过（场景 p2c1：答 2 题 → 交卷 → 结果页四样数 + 空卷显示「—」）"
+        if args.scenario == "p2c1"
         else (
-            "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
-            if args.scenario == "login"
-            else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+            "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对"
+            " → 按钮切题）"
+            if args.scenario == "p2b1"
+            else (
+                "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
+                if args.scenario == "login"
+                else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+            )
         )
     )
     return 0

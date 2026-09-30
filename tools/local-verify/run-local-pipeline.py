@@ -77,7 +77,10 @@ PREFLIGHT = REPO_DEFAULT / "tools" / "preflight.sh"
 #:   2026-09-29 实测：P2b-1 场景第一次跑就是这么红的，为它白跑了 3 轮。
 #:   （同族：坑 51「本地/CI 的环境差异让某一步从来不需要 ⇒ 从来没人发现它漏了」。）
 #: ⇒ 判据：**"这个场景要不要题目"必须被显式回答**，而不是"默认不灌、出事了再说"。
-SCENARIOS_NEEDING_QUESTIONS = frozenset({"p2b1"})
+#: ★ **哪些场景需要题库**：必须**显式登记** —— 第一版写的是"不灌题库"（登录闭环不需要题目），
+#:   于是 P2b-1 第一次跑就撞上"章节全是 0 题"，而那个症状**长得像产品 bug**，白跑 3 轮。
+#:   ⇒ 新场景若要用题，**忘了登记就会红**（而不是安静地跳过）。
+SCENARIOS_NEEDING_QUESTIONS = frozenset({"p2b1", "p2c1"})
 
 
 def say(msg: str) -> None:
@@ -670,9 +673,10 @@ def main(argv: list[str] | None = None) -> int:
         #    加场景要改两处 —— 但**两处都必须是白名单**：只在 e2e-web 里加的话，
         #    从管道传进来会被这里**拒掉**（实测过一次：`invalid choice: 'p2b1'`，
         #    退出码 2、1 秒结束）。宁可"要改两处"，也不要"传错了静默跑默认场景"。
-        choices=["login", "p2a", "p2b1"],
+        choices=["login", "p2a", "p2b1", "p2c1"],
         help="走查场景：login（P1 登录闭环）/ p2a（Tab + 注册 + 引导）/ "
-        "p2b1（刷题数据流：选章节 → 答题判分 → 刷新仍在）",
+        "p2b1（刷题数据流：选章节 → 答题判分 → 刷新仍在）/ "
+        "p2c1（交卷 → 结果页 + 空卷显示「—」）",
     )
     ap.add_argument(
         "--e2e-phone", default="13800000000", help="走查用的账号（默认 = seed-admin 的）"

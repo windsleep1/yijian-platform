@@ -20,6 +20,7 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
     python tools/local-verify/mem-update.py --status       # 只报数（当前字节 / 余量 / 批状态）
 
     # ★ 逐对打印**字节差**（"别估、量"的可观测形式）
+    # ★★ **约束 8：有 --add 的批必须先跑这一步**（它会写下回执）；没量过就不许写盘。
     python tools/local-verify/mem-update.py --measure \
         --sink "…"=>"…" --add "…"=>"…"
 
@@ -34,7 +35,7 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 
     python tools/local-verify/mem-update.py --sink "…"=>"…" --add "…"=>"…" --end --budget 0
 
-## 七条约束（**本工具自己的编号** —— 与仓库的「不变量 1~8」是**两套**；违反任一条都拒绝/回滚）
+## 八条约束（**本工具自己的编号** —— 与仓库的「不变量 1~8」是**两套**；违反任一条都拒绝/回滚）
 
 1. **`--sink` 必须真的匹配上**：锚点找不到 → 整次操作回滚并非 0 退出
    （否则"我以为减了"会变成一个安静的假账）。
@@ -65,6 +66,13 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
    > 判据：`--sink` 是**承诺**，承诺要被**机械检查**兑现 —— 不能靠"我记得写了"。
    > 与所有「机械对账」同族（`mem-update.py` 执行 Q、`check-invariants` 执行 §8 / 不变量 6~8）。
 
+8. ★ **有 `--add` ⇒ 必须已经量过这一批**（2026-09-30 加，见 `require_measured` / 约束 8）：
+   写盘前必须有**同指纹**的 `--measure` 回执（`.mem-measure.json`），否则**拒绝**。
+   为什么加：估了**四次**都错（+1249 / −1175 / +143 / +1010），而每次**量**出来的数都对
+   ⇒ 错的不是算术，是「**让估进入了流程**」。
+   > 判据：**在追加内容之前，强制跑一次 `--measure`** —— 不让「估」进入流程。
+   > 这条比「估完要量」更强：它**取消「估」这个动作本身**。
+
 ## 能力边界（写在 `--help` 里，不靠用的人记住）
 
 - 它只会做「**锚点恰好匹配 1 次**的字符串替换 / 追加」，**不理解 Markdown 结构**
@@ -76,6 +84,8 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 - **自动恢复只在两种情况下发生**：`--end` 时越过截断点，或本次变更被约束拒绝。
   其它情况（例如你事后觉得改错了）**需要人工**：备份在 `.workbuddy/memory/.mem-batch.bak`。
 - 它**不会**替你决定"该下沉哪一条"—— 那正是硬约定 Q 的第一步，属于判断，不属于机械。
+- ★ `--measure` 的**回执只认内容指纹**：改了 sink/add 里的**一个字**，回执就失效、必须重量
+  （这是刻意的："量的是这一批"是那条约束的全部意义）。
 - **`--sink-to` 只回答"我声明的那个短语在不在 detail 里"** —— 它**不判断**"这段内容是不是
   被完整搬走了"。短语是你自己挑的，挑个没有代表性的短语仍能过 ⇒ 它是**留痕**，不是**审计**。
 - **`--sink-inplace "<理由>"` 不做任何验证**（工具无法判断"压缩后内容还在不在"）：它只是一个
@@ -97,6 +107,7 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -107,6 +118,9 @@ from typing import Callable
 MEM = Path(__file__).resolve().parents[2].parent / ".workbuddy" / "memory" / "MEMORY.md"
 STATE = MEM.parent / ".mem-batch.json"
 BACKUP = MEM.parent / ".mem-batch.bak"
+#: ★ **约束 8** 的回执：上一次 `--measure` 量的是**哪一批内容**、量出来多少字节。
+#:   有 `--add` 时若指纹对不上（或压根没有回执）⇒ **拒绝写盘**。
+MEASURE_RECEIPT = MEM.parent / ".mem-measure.json"
 TRUNCATE_AT = 15396  # 实测的注入截断点（超过它 = 内容会被吃掉）
 DUP_MIN_LEN = (
     12  # 判重只看"整行 strip 后相同、且长度 ≥ 12"的行（`---` / `> ` / `|` 这类短行不参与）
@@ -262,6 +276,66 @@ def verify_sink_destinations(
     )
 
 
+def batch_fingerprint(sinks: list[str], adds: list[str]) -> str:
+    """这一批**内容**的指纹（只看内容集合，不看顺序）—— "量的是不是这一批"的判据。"""
+    payload = json.dumps({"sink": sorted(sinks), "add": sorted(adds)}, ensure_ascii=False)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def write_measure_receipt(
+    sinks: list[str], adds: list[str], predicted: int, net: int
+) -> dict[str, object]:
+    rec: dict[str, object] = {
+        "fingerprint": batch_fingerprint(sinks, adds),
+        "predicted": predicted,
+        "net": net,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    MEASURE_RECEIPT.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    return rec
+
+
+def read_measure_receipt() -> dict[str, object] | None:
+    if not MEASURE_RECEIPT.exists():
+        return None
+    try:
+        d = json.loads(MEASURE_RECEIPT.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def require_measured(
+    sinks: list[str], adds: list[str], receipt: dict[str, object] | None
+) -> str | None:
+    """**约束 8**：有 `--add` ⇒ 这一批**必须已经被量过**；否则返回拒绝理由（None = 放行）。
+
+    ★ 这条要治的不是"量得准不准"，是**取消「估」这个动作本身**：
+      你不需要说"我估 +540"，你只需要先跑一次 `--measure`，把**实读**的 Δ 拿去汇报。
+      2026-09-25 ~ 09-30 连续 **四次**估错（+1249/−1175/+143/+1010），
+      而每次"量"出来的数都对 ⇒ 错的从来不是算术，是**让估进入了流程**。
+    """
+    fp = batch_fingerprint(sinks, adds)
+    if receipt is None:
+        return (
+            "有 --add，但**这一批还没量过** —— 先跑一次 `--measure`（硬约定 Q 的机械形式）。\n"
+            "      ★ 判据：**不让「估」进入流程** —— 你连「大概加多少」都不必说，先量。"
+        )
+    if receipt.get("fingerprint") != fp:
+        return (
+            "有 --add，但**上一次 `--measure` 量的是另一批内容**（指纹对不上）——\n"
+            "      上一次量的是 "
+            + str(receipt.get("fingerprint"))
+            + "，这一批是 "
+            + fp
+            + " ⇒ 先重新量这一批。"
+        )
+    predicted = int(str(receipt.get("predicted", 0)))
+    if predicted > TRUNCATE_AT:
+        return f"这一批量出来正文会到 {predicted} 字节，**越过注入截断点 {TRUNCATE_AT}** —— 拒绝。"
+    return None
+
+
 def self_test() -> int:
     """证明这些判据**自己会响**：正例 / 反例 / 边界各一条（硬约定 J）。"""
     base = (
@@ -410,6 +484,53 @@ def self_test() -> int:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
         bad += 0 if ok else 1
 
+    # ★ 约束 8（2026-09-30 补）：有 --add ⇒ **必须已经量过这一批**。
+    #   ★ 反例 21 就是这条要治的形状：「没量就写」—— 而它过去**四次**都真的发生了。
+    sink_a = ["--sink", "X=>Y"]
+    add_a = ["--add", "A=>B"]
+    add_b = ["--add", "A=>C"]
+    fp_a = batch_fingerprint(sink_a, add_a)
+    measure_cases: list[tuple[str, bool, bool]] = [
+        (
+            "19) 同内容不同顺序 ⇒ 同一指纹（判据只看「量的是不是这一批」）",
+            batch_fingerprint(["a", "b"], ["c"]) == batch_fingerprint(["b", "a"], ["c"]),
+            True,
+        ),
+        (
+            "20) 换了一段内容 ⇒ 指纹必须变",
+            batch_fingerprint(sink_a, add_a) != batch_fingerprint(sink_a, add_b),
+            True,
+        ),
+        (
+            "21) 有 --add 但**没量过** ⇒ 拒绝（这条要治的就是它）",
+            require_measured(sink_a, add_a, None) is not None,
+            True,
+        ),
+        (
+            "22) 量的是**这一批**、且没越截断点 ⇒ 放行",
+            require_measured(sink_a, add_a, {"fingerprint": fp_a, "predicted": 14000}) is None,
+            True,
+        ),
+        (
+            "23) 量的是**另一批**（指纹对不上）⇒ 拒绝（不能拿旧回执签新批）",
+            require_measured(
+                sink_a, add_a, {"fingerprint": batch_fingerprint(sink_a, add_b), "predicted": 14000}
+            )
+            is not None,
+            True,
+        ),
+        (
+            "24) 量过但**越截断点** ⇒ 拒绝",
+            require_measured(sink_a, add_a, {"fingerprint": fp_a, "predicted": TRUNCATE_AT + 1})
+            is not None,
+            True,
+        ),
+    ]
+    for name, got, want in measure_cases:
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
+        bad += 0 if ok else 1
+
     print(f"[mem-update --self-test] {'ALL PASSED' if bad == 0 else f'{bad} CHECK(S) FAILED'}")
     return 0 if bad == 0 else 1
 
@@ -499,6 +620,8 @@ def do_end(budget: int) -> int:
     STATE.unlink(missing_ok=True)
     # trash-ok: 单文件（批备份 bak），非递归
     BACKUP.unlink(missing_ok=True)
+    # trash-ok: 单文件（measure 回执），非递归 —— 批已收口，回执不该跨批存活
+    MEASURE_RECEIPT.unlink(missing_ok=True)
     say(f"✓ 通过。距截断点余量 = {TRUNCATE_AT - end}")
     return 0
 
@@ -559,6 +682,8 @@ def main() -> int:
         STATE.unlink(missing_ok=True)
         # trash-ok: 单文件（批备份 bak），非递归
         BACKUP.unlink(missing_ok=True)
+        # trash-ok: 单文件（measure 回执），非递归
+        MEASURE_RECEIPT.unlink(missing_ok=True)
         say("已放弃本批（内容保留、状态清理）")
         return 0
 
@@ -580,12 +705,23 @@ def main() -> int:
         say("✗ 有 --add 但一个 --sink 都没有 —— 拒绝「只加不减」（硬约定 Q 的机械形式）")
         return 1
 
+    # ★ 约束 8（2026-09-30 加）：有 --add ⇒ **必须已经量过这一批**。
+    #   为什么：估了**四次**都错（+1249 / −1175 / +143 / +1010），而每次量出来的数都对
+    #   ⇒ 错的不是算术，是**让估进入了流程**。这条门禁把「先量」变成**不可跳过**的一步。
+    #   ⚠️ `--dry-run` / `--measure` 自己当然不要求回执 —— 它们就是**产生**回执的那一步。
+    if args.add and not (args.dry_run or args.measure):
+        why = require_measured(args.sink, args.add, read_measure_receipt())
+        if why:
+            say(f"✗ {why}")
+            return 1
+
     # ---------- 预演（只校验、不写） ----------
     # ⚠️ 为什么需要它：锚点写错时脚本**只报第一个**就整批回滚，于是"到底哪几个锚点不对"
     #    要一轮一轮试（2026-09-26 实测浪费了 5 轮往返）。⇒ 预演**一次把全部锚点的匹配数报出来**，
     #    并且把"新块里有重复行"这类问题也一并列出。
     if args.dry_run or args.measure:
         probe = MEM.read_bytes().decode("utf-8")
+        base_size = len(probe.encode("utf-8"))
         bad = 0
         sunk_old: list[tuple[str, int]] = []
         net_removed = 0
@@ -638,9 +774,16 @@ def main() -> int:
                     else f"，声明了 {len(args.sink_to)} 个短语"
                 )
             )
+        predicted = len(probe.encode("utf-8"))
+        if not bad:
+            # ★ 约束 8 的回执：**只有全部 ok 才算「量过这一批」**（有 BAD 的批不配当量过的批）。
+            rec = write_measure_receipt(args.sink, args.add, predicted, predicted - base_size)
+            say(
+                f"  [量] 这一批：{base_size} → {predicted} 字节（净 {predicted - base_size:+d}）；回执 {rec['fingerprint']}"
+            )
         print(
             f"[mem] 预演结束：{bad} 条 BAD（**文件未改**）；全部 ok 时正文将变为 "
-            f"{len(probe.encode('utf-8'))} 字节",
+            f"{predicted} 字节 ｜ 余量 {TRUNCATE_AT - predicted}",
             flush=True,
         )
         return 1 if bad else 0
