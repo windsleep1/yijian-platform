@@ -87,6 +87,16 @@ export default function PracticePage() {
     <main className="mx-auto max-w-md px-6 py-8">
       <h1 className="text-2xl font-semibold">练习</h1>
       <p className="mt-1 text-sm text-sub">选一门科目，再选章节，开始刷题</p>
+      {/* ★ 错题本（P2c-2）：入口放在**科目列表之上** —— 它的位置比「再选一次科目」
+          更靠前，因为"回看我错过的题"比"再刷一批新题"更常用。 */}
+      <Link
+        href="/practice/wrong"
+        data-entry="wrong-book"
+        className="mt-4 flex min-h-touch items-center justify-between rounded-xl border border-line px-4 text-sm"
+      >
+        <span>错题本</span>
+        <span className="text-sub">看我错过的题 →</span>
+      </Link>
 
       {err && (
         <p className="mt-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
@@ -176,7 +186,8 @@ export default function PracticePage() {
       <p className="mt-8 rounded-xl border border-dashed border-line p-4 text-xs text-sub">
         本批（P2b-1）只做到「建好练习 + 答第一题」。
         <br />
-        切题 / 答题卡 / 长按标记 / 交卷报告 / 错题本 —— 排在 P2b-2。
+        切题 / 答题卡 / 交卷报告 / 错题本**已落地**（P2b-2a·2b / P2c-1 / P2c-2）； 长按标记 / 收藏 /
+        笔记 见 **BL-21**（个人 PWA 时）。
       </p>
 
       <Link href="/" className="mt-6 block text-center text-sm text-brand">

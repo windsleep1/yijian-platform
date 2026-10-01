@@ -184,6 +184,63 @@ export type SessionReport = {
   by_kp: KpStat[];
 };
 
+/** 错题本的科目分面（**带条数**，且是**当前筛选口径下**的分布）。 */
+export type WrongSubject = {
+  subject_id: string;
+  name: string;
+  count: number;
+};
+
+/** 错题本的一行（`schemas/c_end.py` 的 `WrongItemOut`）。**不含选项与正确答案**。 */
+export type WrongItem = {
+  question_id: string;
+  subject_id: string | null;
+  subject_name: string | null;
+  chapter_name: string | null;
+  type: string;
+  stem: string;
+  /** 错了几次（每次都 +1）。 */
+  wrong_count: number;
+  /** 之后又答对过几次。 */
+  retry_correct: number;
+  mastered_level: number;
+  last_wrong_at: string | null;
+};
+
+/** `GET /practice/wrong-questions`（`schemas/c_end.py` 的 `WrongListOut`）。 */
+export type WrongList = {
+  total: number;
+  page: number;
+  page_size: number;
+  subjects: WrongSubject[];
+  items: WrongItem[];
+};
+
+/**
+ * `GET /practice/wrong-questions/{qid}`（`schemas/c_end.py` 的 `WrongDetailOut`）。
+ *
+ * ★ 与列表的关键区别：**含正确答案与解析**。理由是"你已经和这道题交过手了"——
+ *   而这个能力的**前提**是后端那道"必须真的错过"的门（没错过的题返回 404）。
+ */
+export type WrongDetail = {
+  question_id: string;
+  subject_id: string | null;
+  subject_name: string | null;
+  chapter_name: string | null;
+  type: string;
+  stem: string;
+  stem_html: string | null;
+  options: QuestionOption[];
+  answer: { value: unknown[] };
+  analysis: string | null;
+  analysis_html: string | null;
+  wrong_count: number;
+  retry_correct: number;
+  mastered_level: number;
+  reason_tag: string | null;
+  last_wrong_at: string | null;
+};
+
 /** `GET /practice/sessions/{id}`（`schemas/c_end.py` 的 `SessionOut`）。 */
 export type PracticeSession = {
   id: string;
