@@ -3,6 +3,11 @@
 第 6 条（2026-09-29 加）：**宿主删除保护** —— 会被拦的删除一律 `rename` 到 `.trash/`；
 未登记的"直接删"必须变红。判据来源 = 项目约定 **R**，方案 `docs/25-宿主删除保护.md`。
 
+第 9 条（2026-10-01 加）：**公开路由必须有站内入口** —— `middleware.ts::PUBLIC_PREFIXES`
+里声明的每个公开路由，都要有人能**点**进去；否则它只能手敲 URL 才到得了。
+（真缺陷：`/register` 页做出来了，登录页却按 P1 的计划**刻意没放入口**，
+而那个 TODO 的触发条件"P2 加 `/register` 时"早就成立了 —— 见坑 94。）
+
 为什么要有它（用户 2026-09-27）：
     不变量**不是"开工前确认一次"**，而是"**每次 push 后跑一次**" ——
     P0→P3 每推一次都可能把它们破掉。写成可执行文件才能每批收尾自动跑。
@@ -645,8 +650,114 @@ def check_answer_single_source() -> None:
     ok(f"扫 {seen} 个文件 —— 没有绕过 `canonical_doc()` 的 `answer` 构造")
 
 
+# ------------------------------------------------------------------ 9
+
+#: `apps/*/src/middleware.ts` 里公开路由的声明处。
+_PUBLIC_PREFIXES_RE = re.compile(r"const\s+PUBLIC_PREFIXES\s*=\s*\[(?P<body>[^\]]*)\]")
+_QUOTED_PATH_RE = re.compile(r"""["'`](/[^"'`]*)["'`]""")
+
+#: 「站内入口」的判据：**别处有人引用过这个路径字面量**（引号包着的 `/xxx`）。
+#:
+#: ★★ 为什么绑在**字面量**上、而不是"文本里出现过这个路径"（2026-10-01 真缺陷的形状）：
+#:    登录页里有一段注释写着 "P2 加 `/register` 时，把入口补在这里。"，
+#:    而 `/register` 页**早就做出来了、却没有任何入口** —— 只能手敲 URL 才能到，
+#:    用户按 `docs/27` §3.5 走"点**注册**"时看到的是一扇**没有门的墙**。
+#:    按"出现过"来扫，**那段注释会让它假绿** —— 假绿比漏报更坏（硬约定 J）。
+#:
+#: ★★ 又为什么是**弱判据**（只看"有人引用"，不看"引用得对不对"）：
+#:    第一版要求匹配 `href="/x"` / `router.push("/x")` 这种**入口写法**，
+#:    当场在 `admin /forbidden` 上**假红** —— 它是被
+#:    `login/page.tsx` 里 `router.replace(sp.get("next") || … || "/forbidden")`
+#:    引用的，**目标是算出来的**，任何"写法级"正则都看不见它。
+#:    ⇒ 判据：**宁可弱，不许假红**。一条会误报的守卫，下一步就是被人加豁免或删掉
+#:      （同族：`ADMIN_API_LITERAL` 收窄的理由）。
+#:    ⚠️ 边界（如实写明）：它保证"**有人引用**该路径"，**不**保证"点得到"。
+#:      ⇒ 它仍然能抓住本次这类缺陷（"页做出来了、但**没有任何地方**引用它"）。
+_QUOTED_PATH_RE = re.compile(r"""["'`](/[^"'`]*)["'`]""")
+
+#: 扫到的文件数下限。**"扫了 0 个文件"≠"通过"** —— 那是"量错了对象"，必须显式失败。
+MIN_WEB_SCAN_FILES = 5
+
+
+def _strip_js_comments(text: str) -> str:
+    """先抹 `/* … */` 块注释，再抹 `//` 行注释（保留换行，行号仍对齐）。
+
+    ⚠️ 为什么要抹**块**注释：JSX 里的注释写作 `{/* … */}`，而 `_strip()` 那套
+    只处理 `//` —— 登录页那段"把入口补在这里"的注释**正好是 `{/* */}`**，
+    不抹它，本检查就白写了（那段注释里就有 `` `/register` ``）。
+    ⚠️ 边界：块注释**中间的行**不含 `/*`，抹不掉；但那些行也不会是唯一引用。
+    """
+    text = re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), text, flags=re.S)
+    return _strip_eol(text, ("//",))
+
+
+def check_public_route_entrypoints() -> None:
+    print("[9] 公开路由必须在**别处被引用**（否则只能手敲 URL 才到得了）—— 不变量 9")
+
+    targets: list[tuple[str, list[str]]] = []
+    for app_dir in sorted(p for p in (REPO / "apps").iterdir() if p.is_dir()):
+        rel = f"apps/{app_dir.name}/src/middleware.ts"
+        if not (REPO / rel).is_file():
+            continue
+        m = _PUBLIC_PREFIXES_RE.search((REPO / rel).read_text(encoding="utf-8"))
+        if m is None:
+            bad(f"{rel} 里读不到 `PUBLIC_PREFIXES` —— 本检查会静默变成假绿，故直接失败")
+            continue
+        targets.append((app_dir.name, _QUOTED_PATH_RE.findall(m.group("body"))))
+
+    if not targets:
+        bad("`apps/*/src/middleware.ts` 一个都没读到 —— 目录结构变了？")
+        return
+
+    scanned = 0
+    owners: dict[str, set[str]] = {}  # 路径字面量 -> 出现过它的文件
+    for rel, lang in _guard_files():
+        if lang != "js" or not (rel.startswith("apps/") and "/src/" in rel):
+            continue
+        # ⚠️ `middleware.ts` **自己不算入口** —— 它是公开路由的**声明处**，
+        #    把它算进去 ⇒ 每个公开路由都"有引用" ⇒ 这条检查恒绿。
+        if rel.endswith("/middleware.ts"):
+            continue
+        scanned += 1
+        code = _strip_js_comments((REPO / rel).read_text(encoding="utf-8"))
+        for mm in _QUOTED_PATH_RE.finditer(code):
+            owners.setdefault(mm.group(1), set()).add(rel)
+
+    if scanned < MIN_WEB_SCAN_FILES:
+        bad(f"只扫到 {scanned} 个前端文件（下限 {MIN_WEB_SCAN_FILES}）—— 路径写错了吗")
+        return
+
+    missing: list[str] = []
+    for app, prefixes in targets:
+        for prefix in prefixes:
+            # 引用必须来自**别的目录**：`src/app/register/page.tsx` 里引用自己不算入口
+            own_dir = f"apps/{app}/src/app{prefix}"
+            hit = {
+                rel
+                for path, rels in owners.items()
+                if (path == prefix or path.startswith(prefix + "/"))
+                for rel in rels
+                if not rel.startswith(own_dir)
+            }
+            if not hit:
+                missing.append(f"{app} {prefix}")
+
+    if missing:
+        bad(f"{len(missing)} 个公开路由**没有任何地方引用**：{' / '.join(missing)}")
+        print(
+            "      ⇒ 加一个跳转入口（`<Link href=\"/xxx\">` 或 `router.push(\"/xxx\")`）。\n"
+            "         公开路由的声明处 = `middleware.ts::PUBLIC_PREFIXES`（那本身就是提醒：\n"
+            "         新加公开页时**必须同时加入口**，否则它只能手敲 URL 才能到 ——\n"
+            "         而『手敲得到』在验收时**看不出来**（照文档点不到，只会以为是自己点错了）。"
+        )
+        return
+
+    total = sum(len(p) for _, p in targets)
+    ok(f"扫 {scanned} 个前端文件 —— {total} 个公开路由都有人在别处引用")
+
+
 def main() -> int:
-    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8；每批收尾跑一次）===")
+    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9；每批收尾跑一次）===")
     check_gates()
     check_coverage_ratchet()
     check_ephemeral_db()
@@ -655,6 +766,7 @@ def main() -> int:
     check_delete_guard()
     check_write_paths_commit()
     check_answer_single_source()
+    check_public_route_entrypoints()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()

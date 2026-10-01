@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -113,10 +114,21 @@ export default function LoginPage() {
         </button>
       </form>
 
-      {/* ⚠️ P1 只做**登录闭环**：注册页（`/register`）是 P2 ——
-          这里**刻意不放"去注册"的链接**：指向一个还不存在的路由会 404，
-          而"页面能点进去"是 C 端最基本的体验底线（比少一个入口严重）。
-          P2 加 `/register` 时，把入口补在这里。 */}
+      {/* ★★ 这段注释曾经是"P1 刻意不放'去注册'的链接，等 P2 加 `/register` 时补在这里"，
+          而 P2 早就把 `/register` 做出来了 —— **没人回来补**。
+          后果：注册页**做完了却没有任何入口**，只有手敲 URL 才到得了；
+          而 `docs/27` §3.5 还写着"点**注册**"，用户照着点只会以为是自己点错了。
+          ⇒ 现在补上了；不变量 9（`tools/local-verify/check-invariants.py`）钉住它：
+            `middleware.ts::PUBLIC_PREFIXES` 里的每个公开路由，都必须在**别处被引用**，
+            否则门禁变红。
+          ★ 一般化的判据：**"以后再做"写进代码注释里，是没有触发器的** ——
+            写在 `docs/21` 里才有检查点（硬约定 P）。这条注释活了整整两个批次。 */}
+      <p className="mt-8 text-center text-sm text-sub">
+        还没有账号？
+        <Link href="/register" className="ml-1 text-brand">
+          去注册
+        </Link>
+      </p>
     </main>
   );
 }
