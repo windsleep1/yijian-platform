@@ -34,7 +34,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.idgen import next_id, to_inet
 from app.core.security import hash_password
-from app.db.base import raw_asyncpg_connection
+from app.db.base import asyncpg_connect_args, raw_asyncpg_connection
 
 # ---------------------------------------------------------------- 工具
 
@@ -79,7 +79,7 @@ async def _wait_db(timeout: int) -> int:
     last_err: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            conn = await asyncpg.connect(settings.dsn, timeout=5)
+            conn = await asyncpg.connect(settings.dsn, timeout=5, **asyncpg_connect_args())
             await conn.close()
             _log("PostgreSQL ready")
             return 0

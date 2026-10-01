@@ -26,8 +26,17 @@ USER appuser
 
 EXPOSE 8000
 
+# ⚠️ 探活地址读 `${PORT}`：托管平台（Render / Railway / Fly）会**注入 PORT**
+#    并要求应用监听它。写死 8000 会让 Docker 自检一直失败（而应用其实活着）。
+#    本地 docker compose 不设 PORT ⇒ 回落到 8000，行为与以前一致。
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-  CMD curl -fsS http://localhost:8000/api/v1/health || exit 1
+  CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/api/v1/health" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# ★★ 这里**必须**是 shell 形式（`sh -c`），不能是 JSON 数组形式。
+#    判据：**JSON 数组形式的 CMD 不做变量展开** —— 写成
+#    `CMD ["uvicorn", ..., "--port", "${PORT:-8000}"]` 会把 `${PORT:-8000}`
+#    当成**字面量端口**传给 uvicorn，然后报 `Invalid value for '--port'`。
+#    这是"看起来对、跑起来才发现"的那一类，所以把理由钉在它旁边。
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
