@@ -1,4 +1,4 @@
-"""C 端**浏览器**端到端走查（四个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1`）。
+"""C 端**浏览器**端到端走查（五个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1` / `p2c2`）。
 
 为什么要单独写一个（而不是塞进 pytest）
 --------------------------------------
@@ -1454,6 +1454,235 @@ async def drive_p2c1(args: argparse.Namespace) -> dict[str, object]:
     return report
 
 
+async def drive_p2c2(args: argparse.Namespace) -> dict[str, object]:
+    """P2c-2 场景：**错题本（收窄版）= 列出所有错题 / 按科目筛选 / 点一题进详情**。
+
+    | # | 判据 | 没有它会怎样 |
+    |---|---|---|
+    | ① | 练习页的「错题本」入口能进列表 | 入口没接上也全绿（直接输 URL 就行了） |
+    | ② | 列表**条数 = 真答错的题数**（两门科目各错 1~2 道） | 少了它，"列表恒空"也能过 |
+    | ③ | ★ **chip 上的条数 == 筛过去之后的列表条数** | 分面与列表**不同源**时，chip 写 3、列表 1 条 —— 而那是用户最容易被骗的地方 |
+    | ④ | 详情含**正确答案 / 解析 / 这道题的记录** | 少了它，"详情页只有题干"也能过 |
+    | ⑤ | ★★ **没答错过的题**访问详情 ⇒ 显示「不在你的错题本里」 | 少了它，**用题号遍历题库拿答案的后门**在浏览器侧全绿（这是本批最要紧的一条） |
+
+    ★★ ⑤ 的做法：**先断言那个题号不在列表里**，再断言详情页给"不在错题本"——
+      两步缺一不可。只做第二步的话，"恰好抽到一道错过的题"会被读成"门坏了"（假红），
+      而只做第一步则完全没验到那道门。
+    """
+    report: dict[str, object] = {}
+
+    async def new_session(b: "cdp_browser.Browser", subject_nth: int = 0) -> str:
+        """走一遍「选第 `subject_nth` 门科目 → 选第一个章节」，返回答题页 URL。"""
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelectorAll('main button[aria-pressed]').length > 0",
+            timeout=40,
+            label="科目列表加载完成",
+        )
+        await b.click("main button[aria-pressed]", nth=subject_nth)
+        await b.wait_for(
+            _PRACTICE_CHAPTERS_AVAILABLE_JS,
+            timeout=40,
+            label="章节列表加载完成（有可练的章节）",
+        )
+        await b.click("main section:nth-of-type(2) ul li button:not([disabled])", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进答题页"
+        )
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0", timeout=40, label="有选项"
+        )
+        url = await b.eval("location.pathname")
+        need(isinstance(url, str) and url.startswith("/practice/session/"), f"URL 不对：{url!r}")
+        return url
+
+    async def answer_first_option(b: "cdp_browser.Browser") -> None:
+        """选第一个选项并提交 —— **故意不求答对**（错题本要的就是错）。
+
+        ⚠️ 先等"选中"落进 DOM 再点提交（提交按钮的 disabled 由同一个 state 派生）。
+        """
+        await b.click("main ul li button", nth=0)
+        await b.wait_for(
+            "document.querySelector('main ul li button[aria-pressed=\"true\"]') !== null",
+            timeout=20,
+            label="选项已选中（提交按钮此时才可用）",
+        )
+        await b.click_text("提交", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('正确答案')", timeout=40, label="出现判分结果"
+        )
+
+    async def read_wrong(b: "cdp_browser.Browser") -> dict[str, object]:
+        """读错题本页：总数文字 / 每行的题号 / 每个 chip 的文字与条数。"""
+        out: dict[str, object] = {}
+        out["total_text"] = " ".join(
+            str(
+                await b.eval("(document.querySelector('[data-wrong-total]') || {}).innerText || ''")
+            ).split()
+        )
+        out["rows"] = await b.eval(
+            "Array.from(document.querySelectorAll('[data-wrong-list] [data-wrong-row]'))"
+            ".map((a) => a.getAttribute('data-wrong-row'))"
+        )
+        out["facets"] = await b.eval(
+            "Array.from(document.querySelectorAll('[data-wrong-facets] button'))"
+            ".map((x) => ({ label: (x.innerText || '').trim(),"
+            "              sid: x.getAttribute('data-facet'),"
+            "              on: x.getAttribute('aria-pressed') === 'true' }))"
+        )
+        out["empty"] = await b.eval("!!document.querySelector('[data-wrong-empty]')")
+        return out
+
+    async def open_wrong_book(b: "cdp_browser.Browser") -> None:
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelector('[data-entry=\"wrong-book\"]') !== null",
+            timeout=40,
+            label="练习页上的错题本入口",
+        )
+        await b.click('[data-entry="wrong-book"]')
+        await b.wait_for("location.pathname === '/practice/wrong'", timeout=40, label="进错题本")
+        await b.wait_for(
+            "document.querySelector('[data-wrong-total]') !== null"
+            " || document.querySelector('[data-wrong-empty]') !== null",
+            timeout=40,
+            label="错题本渲染完成（有数据或明确空态）",
+        )
+
+    async def total_count(b: "cdp_browser.Browser") -> int:
+        txt = str(
+            await b.eval("(document.querySelector('[data-wrong-total]') || {}).innerText || ''")
+        )
+        digits = "".join(ch for ch in txt if ch.isdigit())
+        need(bool(digits), f"读不出错题总数：{txt!r}")
+        return int(digits)
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        await do_login(b, args)
+
+        # ---------------- ① 造错题：两门科目各错一点 ----------------
+        say("① 科目 A 答错 2 题、科目 B 答错 1 题（这样「按科目筛选」才有东西可筛）")
+        await new_session(b, 0)
+        await answer_first_option(b)
+        await b.click_text("下一题", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('第 2 题')", timeout=30, label="切到第 2 题"
+        )
+        await answer_first_option(b)
+        await new_session(b, 1)
+        await answer_first_option(b)
+
+        # ---------------- ② 入口 + 列表 ----------------
+        say("② 从练习页点「错题本」入口 ⇒ 列表：条数应等于真答错的题数")
+        await open_wrong_book(b)
+        r0 = await read_wrong(b)
+        n0 = await total_count(b)
+        rows0 = list(r0["rows"] or [])
+        need(n0 == 3, f"答错 3 道题，错题本应显示 3 道，实际 {n0}（{r0['total_text']!r}）")
+        need(len(rows0) == 3, f"列表行数应等于总数（一页够放）：{r0}")
+        need(len(set(rows0)) == 3, f"列表不该有重复题：{rows0}")
+        facets0 = list(r0["facets"] or [])
+        subject_chips = [f for f in facets0 if f["sid"] != "all"]
+        need(len(subject_chips) == 2, f"两门科目各错了题 ⇒ 应有 2 个科目 chip：{facets0}")
+        need(
+            sum(int(str(f["label"]).split()[-1]) for f in subject_chips) == n0,
+            f"chip 上的条数之和应等于总数：{facets0} vs {n0}",
+        )
+        report["wrong_list"] = (
+            f"总数 {n0} 道（两门科目 chip："
+            + "、".join(str(f["label"]) for f in subject_chips)
+            + "）"
+        )
+        say(f"    {report['wrong_list']}")
+
+        # ---------------- ③ 按科目筛选：chip 的数字必须与列表条数一致 ----------------
+        say("③ ★ 逐个点科目 chip ⇒ 筛出来的条数必须**等于 chip 上写的那个数**")
+        checked: list[str] = []
+        for f in subject_chips:
+            want = int(str(f["label"]).split()[-1])
+            await b.click(f'[data-facet="{f["sid"]}"]')
+            await b.wait_for(
+                f"((document.querySelector('[data-wrong-total]') || {{}}).innerText || '')"
+                f".includes('{want}')",
+                timeout=30,
+                label=f"筛到科目 {f['label']} 后总数变成 {want}",
+            )
+            got = await total_count(b)
+            need(
+                got == want,
+                f"★ chip 写「{f['label']}」但筛出来的列表是 {got} 条 —— 分面与列表**不同源**",
+            )
+            rows = list((await read_wrong(b))["rows"] or [])
+            need(len(rows) == want, f"筛 {f['label']} 后行数应为 {want}：{rows}")
+            checked.append(f"{f['label']}={got}")
+        await b.click('[data-facet="all"]')
+        await b.wait_for(
+            "((document.querySelector('[data-wrong-total]') || {}).innerText || '')"
+            f".includes('{n0}')",
+            timeout=30,
+            label="切回「全部」恢复总数",
+        )
+        need(await total_count(b) == n0, "切回「全部」后总数应恢复")
+        report["wrong_filter"] = "chip 与列表逐一对账通过：" + "、".join(checked) + f"｜全部={n0}"
+
+        # ---------------- ④ 详情 ----------------
+        say("④ 点一行进详情 ⇒ 必须有正确答案 / 解析 / 这道题的记录")
+        first_qid = str(rows0[0])
+        await b.click(f'[data-wrong-row="{first_qid}"]')
+        await b.wait_for(
+            f"location.pathname === '/practice/wrong/{first_qid}'", timeout=40, label="进详情页"
+        )
+        await b.wait_for(
+            "document.querySelector('[data-wrong-answer]') !== null", timeout=40, label="详情渲染"
+        )
+        body = " ".join(str(await b.eval("document.body.innerText")).split())
+        need("正确答案" in body, f"详情页没有「正确答案」：{body[:200]}")
+        need("解析" in body, f"详情页没有「解析」：{body[:200]}")
+        need(
+            await b.eval("!!document.querySelector('[data-wrong-record]')") is True,
+            "详情页没有「这道题的记录」",
+        )
+        marked = await b.eval("document.querySelectorAll('[data-option-right=\"1\"]').length")
+        if await b.eval("document.querySelectorAll('[data-option]').length") > 0:
+            need(int(marked or 0) >= 1, "选择题详情里应有至少一个选项被标成「正确答案」")
+        report["wrong_detail"] = (
+            f"详情页 {first_qid}：有正确答案 / 解析 / 记录（标出 {marked} 个正确选项）"
+        )
+
+        # ---------------- ⑤ ★★ 那扇门：没答错过的题不许给答案 ----------------
+        say("⑤ ★★ 拿一道**没答错过的题**直接访问详情 ⇒ 必须显示「不在你的错题本里」")
+        await new_session(b, 0)
+        unseen = await b.eval(_QID_JS)
+        need(isinstance(unseen, str) and unseen, f"读不到当前题的 id：{unseen!r}")
+        # ★ 先断言它**真的**不在错题本里 —— 少了这一步，"恰好抽到错过的题"会被读成"门坏了"。
+        need(
+            unseen not in set(rows0),
+            f"抽到的 {unseen} 恰好是错过的题 ⇒ 这条判据会被误读，重跑一次（不是产品问题）",
+        )
+        await b.goto_ready(f"{args.web_base}/practice/wrong/{unseen}")
+        try:
+            await b.wait_for(
+                "document.querySelector('[data-wrong-missing]') !== null",
+                timeout=40,
+                label="显示「不在你的错题本里」",
+            )
+        except Exception as e:  # noqa: BLE001
+            txt = await b.eval("document.body.innerText")
+            raise Failure(
+                f"没答错过的题竟然看到了详情页（{e}）—— "
+                f"**这道门一旦漏了，就是「用题号遍历题库拿答案的后门」**。"
+                f"此刻页面文本：\n{txt}"
+            ) from None
+        body2 = " ".join(str(await b.eval("document.body.innerText")).split())
+        need(
+            "答案" not in body2 or "不在你的错题本里" in body2,
+            f"拒绝页不该出现答案相关内容：{body2[:200]}",
+        )
+        report["wrong_door"] = f"未错过的题 {unseen} ⇒ 详情被拒（「不在你的错题本里」），未泄露答案"
+
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="e2e-web.py",
@@ -1467,10 +1696,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scenario",
         default="login",
-        choices=["login", "p2a", "p2b1", "p2c1"],
+        choices=["login", "p2a", "p2b1", "p2c1", "p2c2"],
         help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；"
         "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）；"
-        "p2c1 = 交卷 → 结果页（总分/正确率/用时/知识点）+ 空卷必须显示「—」",
+        "p2c1 = 交卷 → 结果页（总分/正确率/用时/知识点）+ 空卷必须显示「—」；"
+        "p2c2 = 错题本（列表/按科目筛选/详情）+ 没错过的题不许给答案",
     )
     ap.add_argument("--password", default="Admin@123456")
     ap.add_argument("--node", default="", help="node 可执行文件（默认从 PATH 找）")
@@ -1541,6 +1771,7 @@ def main(argv: list[str] | None = None) -> int:
             "p2a": drive_p2a,
             "p2b1": drive_p2b1,
             "p2c1": drive_p2c1,
+            "p2c2": drive_p2c2,
         }
         report = asyncio.run(drivers[args.scenario](args))
     except Failure as e:
@@ -1570,16 +1801,20 @@ def main(argv: list[str] | None = None) -> int:
     for k, v in report.items():
         say(f"  ✅ {k} = {v}")
     say(
-        "✅ 走查全部通过（场景 p2c1：答 2 题 → 交卷 → 结果页四样数 + 空卷显示「—」）"
-        if args.scenario == "p2c1"
+        "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
+        if args.scenario == "p2c2"
         else (
-            "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在 → 重答证明判分对"
-            " → 按钮切题）"
-            if args.scenario == "p2b1"
+            "✅ 走查全部通过（场景 p2c1：答 2 题 → 交卷 → 结果页四样数 + 空卷显示「—」）"
+            if args.scenario == "p2c1"
             else (
-                "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
-                if args.scenario == "login"
-                else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+                "✅ 走查全部通过（场景 p2b1：选章节 → 建练习 → 答题判分 → 刷新仍在"
+                " → 重答证明判分对 → 按钮切题）"
+                if args.scenario == "p2b1"
+                else (
+                    "✅ 走查全部通过（场景 login：登录 → 首页 → 我的 → 登出 → 会话撤销）"
+                    if args.scenario == "login"
+                    else "✅ 走查全部通过（场景 p2a：Tab 守卫 → 注册 → 三 Tab → 引导 → 反向守卫）"
+                )
             )
         )
     )
