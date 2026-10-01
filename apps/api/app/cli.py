@@ -30,6 +30,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.core.config import settings
 from app.core.idgen import next_id, to_inet
@@ -41,6 +42,30 @@ from app.db.base import asyncpg_connect_args, raw_asyncpg_connection
 
 def _log(msg: str) -> None:
     print(f"[cli] {msg}", flush=True)
+
+
+def _db_target() -> str:
+    """给日志用的**连接目标**描述（host / port / db / ssl）—— **绝不含凭据**。
+
+    ★★ 为什么要打这一行（2026-10-01 Render 第二次真故障）：
+
+      那次日志里，前两行说 `PostgreSQL ready`，几秒后引擎却报
+      `socket.gaierror: Name or service not known`。而**日志里没有任何一处**
+      能看出这两次连接的目标是不是同一个 —— 排查只能靠猜，于是我先猜错了两次
+      （先猜密码里的 `@`，再猜 asyncpg 版本差异）。
+
+      真因是：**同一个连接串被两个解析器读**（`urllib` 一族 vs SQLAlchemy 的正则），
+      折行粘贴留下的 `\\n` 只污染了后者解出的主机名。
+
+      ⇒ 判据：**凡是"同一个配置被两条路读"的地方，日志里就要能把目标打出来。**
+        这样"两边是不是同一个目标"从"推理"变成"看见"——
+        而这件事本来只需要一行日志。
+    """
+    u = urlsplit(settings.dsn)
+    return (
+        f"host={u.hostname or '?'} port={u.port or 5432} "
+        f"db={(u.path or '/').lstrip('/') or '?'} ssl={settings.db_ssl_require}"
+    )
 
 
 def _ancestor(level: int) -> Path | None:
@@ -133,7 +158,7 @@ async def _wait_db(timeout: int) -> int:
         try:
             conn = await asyncpg.connect(settings.dsn, timeout=5, **asyncpg_connect_args())
             await conn.close()
-            _log("PostgreSQL ready")
+            _log(f"PostgreSQL ready ({_db_target()})")
             return 0
         except Exception as exc:  # noqa: BLE001
             last_err = exc
@@ -331,39 +356,52 @@ async def _seed_admin() -> int:
     from app.db.models import User, UserProfile
     from app.services import rbac_service
 
-    async with SessionLocal() as db:
-        role = await rbac_service.get_role_by_code(db, "super_admin")
-        if role is None:
-            _log("no super_admin role in table; run init-db first")
-            return 1
+    # ⚠️ 这里**刻意不加重试**（别顺手加）：
+    #    ① "依赖还没起来"这一种情况已经由**前面的 `wait-db`** 吸收掉了 ——
+    #       能走到这里就说明几秒前它是通的；
+    #    ② 加重试只会让**确定性**的失败**晚**出现，而不会让它更好查
+    #       （本次真故障就是确定性的：重试三次还是同一行）。
+    #    ⇒ 该做的是**把目标打进日志**，不是把失败往后拖。
+    try:
+        async with SessionLocal() as db:
+            role = await rbac_service.get_role_by_code(db, "super_admin")
+            if role is None:
+                _log("no super_admin role in table; run init-db first")
+                return 1
 
-        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one_or_none()
+            user = (await db.execute(select(User).where(User.phone == phone))).scalar_one_or_none()
 
-        if user is None:
-            user = User(
-                id=next_id(),
-                phone=phone,
-                nickname="超级管理员",
-                password_hash=hash_password(password),
-                status="active",
-                register_source="cli",
-                register_ip=to_inet("127.0.0.1"),
-                is_deleted=False,
-            )
-            db.add(user)
-            await db.flush()
-            db.add(UserProfile(user_id=user.id, exam_level="yijian"))
-            await db.flush()
-            _log(f"created super admin {phone}")
-        else:
-            user.password_hash = hash_password(password)
-            user.status = "active"
-            user.is_deleted = False
-            _log(f"super admin {phone} exists; password reset and account activated")
+            if user is None:
+                user = User(
+                    id=next_id(),
+                    phone=phone,
+                    nickname="超级管理员",
+                    password_hash=hash_password(password),
+                    status="active",
+                    register_source="cli",
+                    register_ip=to_inet("127.0.0.1"),
+                    is_deleted=False,
+                )
+                db.add(user)
+                await db.flush()
+                db.add(UserProfile(user_id=user.id, exam_level="yijian"))
+                await db.flush()
+                _log(f"created super admin {phone}")
+            else:
+                user.password_hash = hash_password(password)
+                user.status = "active"
+                user.is_deleted = False
+                _log(f"super admin {phone} exists; password reset and account activated")
 
-        await rbac_service.ensure_role_assigned(db, user_id=user.id, role_code="super_admin")
-        await db.commit()
-        _log("super_admin role is ready")
+            await rbac_service.ensure_role_assigned(db, user_id=user.id, role_code="super_admin")
+            await db.commit()
+            _log("super_admin role is ready")
+    except Exception as exc:  # noqa: BLE001
+        # 运维命令**保留全栈**（对着 "xxx failed" 猜是最贵的一种排障），
+        # 但在全栈**之前**先给一行可读的：**目标是什么** + 一句话原因。
+        # 全栈里看不出它连的是哪台机器 —— 而那正是这次事故卡住的地方。
+        _log(f"seed-admin failed :: {_db_target()} :: {type(exc).__name__}: {exc}")
+        raise
     return 0
 
 

@@ -4287,3 +4287,80 @@ for c in candidates:
 
 **同族**：硬约定里的「**休眠的契约**」——
 改动前问"谁在依赖这段代码的**形状**"，而不只是"谁在调用它"。
+
+---
+
+## 93. ★★ 同一个连接串被两个解析器读 ⇒ **解出两个主机名**（2026-10-01，Render 第二次部署真故障）
+
+### 症状（**最不像"解析问题"的那一种**）
+
+```
+[entrypoint] 等待 PostgreSQL ...
+[cli] PostgreSQL ready                    ← 裸 asyncpg 连得上
+[entrypoint] 确保数据库结构已就绪 ...
+[cli] 镜像内无 schema.sql，但目标库已就绪（users）⇒ 跳过 init-db   ← 也连得上
+[entrypoint] 初始化超级管理员 ...
+Traceback ... File "/app/app/cli.py", line 335, in _seed_admin
+    role = await rbac_service.get_role_by_code(db, "super_admin")
+...
+socket.gaierror: [Errno -2] Name or service not known   ← 引擎的 getaddrinfo 失败
+```
+
+**同一个进程、相隔几秒**：两条路都连得上，第三条（SQLAlchemy 引擎）报 **DNS 解析失败**。
+重启后**稳定复现**（不是偶发）。
+
+### 机理：两条路读的是**同一个字符串**，却用**两个解析器**
+
+```
+settings.dsn          = database_url.replace("+asyncpg","")   → 裸 asyncpg（wait-db / init-db）
+settings.database_url = 原串（带 +asyncpg）                    → SQLAlchemy 引擎
+```
+
+两者**从同一个字符串派生** ⇒ 只要解出的**主机名一致**就永远不会出问题。
+而下面两条差异会让它们**不一致**：
+
+| | `urllib` 那一族（asyncpg） | SQLAlchemy 的 URL 正则 |
+|---|---|---|
+| `\r` `\n` `\t` | **剔除** | **吃进主机名**（host 正则是 `[^:@/]+`） |
+| authority 止于 | `/` `?` `#` | 只认 `/` |
+| userinfo 止于 | 最后一个 `@` | **第一个** `@`（密码是 `[^@]*`） |
+
+实测（**容器那一版**：asyncpg 0.30 + SQLAlchemy 2.0.54）：
+
+```
+postgresql://u:p@HOST\n/neondb   →  asyncpg: HOST            ✅
+                                 →  SQLAlchemy: HOST + "\n"   ❌ 解析失败
+```
+
+⇒ **折行粘贴一次就中**：`DATABASE_URL` 太长，从 Render 输入框/剪贴板折行粘进去，
+authority 里留下一个 `\n`，肉眼完全看不出来。
+
+### 我按顺序猜错了两次（这段比结论值钱）
+
+1. **先猜"密码里的 `@`"**：`u:pa@ss@host` 确实会让主机名变成 `ss@host`（两族都会）。
+   **但那样 `wait-db` 也会挂** —— 而日志里它是 ready。⇒ 假设被日志证伪。
+2. **再猜"本机 asyncpg 版本不同"**：我本机是 0.31，容器是 `requirements.txt` 钉的 0.30。
+   ⇒ **去装了容器那一版**（`pip install --target /tmp/ag30 asyncpg==0.30.0`）重跑，
+   结论不变。**这一步是对的，但没找到东西。**
+3. 最后**穷举**（字符 × 结构 × 不可见字符），才落到 `\n` 上。
+
+### 判据
+
+1. ★★ **同一个配置被两个解析器读时，就把它归一成"两边都会解成一样"的规范形式，
+   并用一条断言证明它确实一样** —— 别靠"我记得它一样"。
+   （本次落地：`core/config.py::normalize_database_url` 出口调 `assert_url_parses_the_same`。）
+2. ★★ **"会变多少"要量，但"哪一版"更要量**：本项目依赖是**范围钉**（`>=`），
+   **容器的版本 ≠ 本机的版本**（asyncpg 0.30 vs 0.31、SQLAlchemy 2.0.54 vs 2.0.34）。
+   ⇒ 凡是要"验证某个库的行为"，先 `pip install --target` 把**容器那一版**装下来再验。
+   **同一条命令结果取决于环境 ⇒ 本机结论不构成证据。**
+3. ★★ **日志里看不出"两条路连的是不是同一个目标"，就只能靠猜** —— 而这次猜错两次。
+   ⇒ 已在 `cli.py::_db_target()` 里把 `host / port / db / ssl`（**不含凭据**）打进
+   `PostgreSQL ready` 那行与失败行。**"同一个配置被两条路读"的地方，日志就要能打印目标。**
+4. ★ **别让"测量工具"自己成为新的错误信念**：tripwire 是拿"我写的两个模型"互相比，
+   写这条用例时真的误报了一次 —— `urlsplit` 会把 IPv6 的 `[::1]` 方括号去掉，
+   我的模型没去 ⇒ 把一条**本来正常**的串判成分岔。
+   ⇒ 因此配了一格**拿真货对照**的用例（`_host_by_strict == make_url(...).host`）。
+5. ⚠️ **这条约束只保证"两族一致"，不保证"解出来是对的"**：密码里的字面量 `/`
+   会把 authority 提前截断，而 URL 语法里这就是不可表示的（必须写 `%2F`）——
+   那时**两族一起错**，tripwire 不会响。**别把"一致"当成"正确"的证据。**
+

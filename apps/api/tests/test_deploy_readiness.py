@@ -15,10 +15,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote as urllib_unquote
+from urllib.parse import urlsplit
 
 import pytest
+from sqlalchemy.engine import make_url
 
-from app.core.config import Settings, normalize_database_url
+from app.core.config import (
+    Settings,
+    _host_by_lenient_parser,
+    _host_by_strict_parser,
+    assert_url_parses_the_same,
+    normalize_database_url,
+)
+
+# 给断言用的**短别名**：让"哪个解析器"在断言里一眼可读。
+_host_by_lenient = _host_by_lenient_parser
+_host_by_strict = _host_by_strict_parser
 
 REPO = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPO / "apps" / "api" / "Dockerfile"
@@ -139,6 +152,140 @@ def test_asyncpg_connect_args_follow_the_flag(monkeypatch: pytest.MonkeyPatch) -
     assert base.asyncpg_connect_args() == {"ssl": True}
     monkeypatch.setattr(settings, "db_ssl_require", False)
     assert base.asyncpg_connect_args() == {}
+
+
+# ---------------------------------------------------------------- ①b 两个解析器必须一致
+#
+# ★★ 这一组是 2026-10-01 Render **第二次**部署真故障的回归。
+#
+#   缘由：同一条 `DATABASE_URL` 被**两个解析器**读 —— `settings.dsn`（裸 asyncpg 用）
+#   走 `urllib`，`settings.database_url`（SQLAlchemy 引擎用）走 SQLAlchemy 的 URL 正则。
+#   两者**从同一个字符串派生**，所以只要解出的主机名一致就不会出事；
+#   一旦不一致，症状是**最不像解析问题的那一种**：
+#
+#       [cli] PostgreSQL ready      ← asyncpg 解对了，连得上
+#         …几秒后…
+#       socket.gaierror: [Errno -2] Name or service not known   ← 引擎解错了
+#
+#   ⇒ 判据：**别只测"归一后的字符串等于什么"，要测"两个解析器解出的主机名相同"。**
+#     前者是"我抄对了没有"，后者才是真性质（同族：探活路径要连着 app 一起验）。
+
+_HOST = "ep-cool-name-123456-pooler.us-east-2.aws.neon.tech"
+
+
+@pytest.mark.parametrize("invisible", ["\n", "\t", "\r"])
+def test_invisible_whitespace_never_reaches_the_hostname(invisible: str) -> None:
+    """★★ 折行粘贴留下的不可见字符，**不许活着走到主机名里**。
+
+    实测（asyncpg 0.30 + SQLAlchemy 2.0.54，都是容器里那一版）：
+
+        `…neon.tech\\n/neondb`  →  urllib 得 `…neon.tech`   ← wait-db 连得上
+                                →  SQLAlchemy 得 `…neon.tech\\n`  ← 引擎报 DNS 失败
+
+    只测"归一后的串长什么样"抓不到它（那个串看起来完全正常）；
+    必须**分别用两个真解析器解一遍**。
+    """
+    raw = f"postgresql://alice:secret@{_HOST}{invisible}/neondb?sslmode=require"
+    url, wants_ssl = normalize_database_url(raw)
+
+    assert invisible not in url, "不可见字符必须被剔除，否则它会成为主机名的一部分"
+    assert url == f"postgresql+asyncpg://alice:secret@{_HOST}/neondb"
+    assert wants_ssl is True
+
+    # 成对验：两个解析器必须解出**同一个**主机名
+    assert make_url(url).host == _HOST, "SQLAlchemy 那一族（引擎走这条）"
+    assert urlsplit(url).hostname == _HOST, "urllib 那一族（wait-db / init-db 走这条）"
+
+
+def test_leading_invisible_whitespace_does_not_break_scheme_detection() -> None:
+    """行首的不可见字符不能把"补驱动前缀"这步顶掉。
+
+    ⚠️ 顺序有讲究：**剔除空白必须在判断 scheme 之前** ——
+      否则 `"\\npostgresql://…"` 不以任何已知前缀开头 ⇒ 不补 `+asyncpg`
+      ⇒ 现场变成 `No module named 'psycopg2'`（一个**完全指不到原因**的错）。
+    """
+    url, _ = normalize_database_url(f"\n  postgresql://alice:secret@{_HOST}/neondb\n")
+    assert url.startswith("postgresql+asyncpg://"), "前缀没被补上 ⇒ 会去找 psycopg2"
+
+
+@pytest.mark.parametrize("special", ["@", "?", "#"])
+def test_password_specials_do_not_move_the_hostname(special: str) -> None:
+    """密码里的字面量 `@` `?` `#` 不许把主机名切歪。
+
+    这类串原本会让**两族一起**解错主机名（`…:pa@ss@host` ⇒ 主机名变成 `ss@host`），
+    报出来同样是 `Name or service not known` —— 和 ⓿ 那类是**同一个症状、不同的成因**。
+
+    归一把 userinfo 重新百分号编码之后，两边都会解出**同一个正确的主机名**，
+    且密码原文不变（两个解析器都会 unquote）。
+    """
+    password = f"pa{special}ss"
+    raw = f"postgresql://alice:{password}@{_HOST}/neondb?sslmode=require"
+    url, _ = normalize_database_url(raw)
+
+    assert make_url(url).host == _HOST
+    assert urlsplit(url).hostname == _HOST
+    # 编码是"形式"变了，"内容"不能变 —— 两个解析器解出来的密码都必须是原文
+    assert make_url(url).password == password
+    assert urllib_unquote(urlsplit(url).password or "") == password
+
+
+def test_url_parser_tripwire_can_actually_fire() -> None:
+    """★ 硬约定 J：**测量工具本身要被验证** —— 这条判据必须能报红。
+
+    否则"两个解析器一致"可能只是一句**永远不会失败的常数**，
+    而它给人的安全感反而是负的（这次就是：我先信了"同一个字符串 ⇒ 同一个主机"）。
+
+    造一个**已知分岔**的串（就是真事故那一串），它必须抛。
+    """
+    divergent = f"postgresql+asyncpg://alice:secret@{_HOST}\n/neondb"
+    assert _host_by_strict(divergent) != _host_by_lenient(divergent), "前提变了：这条用例要重看"
+    with pytest.raises(ValueError, match="两个不同的主机名"):
+        assert_url_parses_the_same(divergent)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "postgresql://alice:secret@h/db?sslmode=require",
+        "postgresql://alice:secret@h:5432/db",
+        "postgresql+asyncpg://alice:secret@[::1]:5432/db",
+        "postgresql://alice@h/db",
+        "postgresql://h/db",
+        "postgresql://alice:pa%40ss@h/db",
+        "postgresql://alice:pa@ss@h/db",
+        "postgresql://alice:secret@h/db?application_name=yijian&sslmode=require",
+        "sqlite:///tmp/x.db",
+    ],
+)
+def test_normalization_output_is_always_parser_agnostic(raw: str) -> None:
+    """归一化的**出口**必须永远是"两族一致"的 —— 上面那些都是真实出现过的形状。"""
+    url, _ = normalize_database_url(raw)
+    assert_url_parses_the_same(url)  # 不抛即通过
+    assert _host_by_lenient(url) == _host_by_strict(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"postgresql+asyncpg://alice:secret@{_HOST}/neondb",
+        f"postgresql+asyncpg://alice:secret@{_HOST}:5432/neondb",
+        "postgresql+asyncpg://alice:secret@[::1]:5432/db",
+        "postgresql+asyncpg://alice:pa%40ss@h/db",
+        "postgresql+asyncpg://h/db",
+        "postgresql+asyncpg://alice@h/db",
+    ],
+)
+def test_the_two_models_match_the_real_parsers(url: str) -> None:
+    """★ 硬约定 J 的第二半：**校验器自己的模型，必须对着真解析器校准**。
+
+    上面那条 tripwire 是拿"我写的两个模型"互相比 —— 如果模型本身写错了，
+    它就会变成一个**新的错误信念**（写这条用例时真发生过：IPv6 那格
+    `urlsplit` 去方括号、我的模型没去 ⇒ 把一条本来正常的串判成"分岔"）。
+
+    ⇒ 判据：**凡是我用代码"模拟"别人的行为，就必须有一格是拿真货对照的。**
+    """
+    assert _host_by_lenient(url) == (urlsplit(url).hostname or "").lower()
+    assert _host_by_strict(url) == (make_url(url).host or "").lower()
 
 
 # ---------------------------------------------------------------- ② 容器契约
