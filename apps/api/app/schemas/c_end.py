@@ -247,6 +247,81 @@ class AnswerResultOut(BaseModel):
     session: SessionProgressOut
 
 
+class WrongSubjectOut(BaseModel):
+    """错题本筛选用的科目分面（**带条数**）。
+
+    ★ 为什么把它放进列表响应、而不是让前端去调 `/subjects`：
+      `/subjects` 返的是**全部**科目（6 个），而错题本很可能只涉及其中 1~2 个 ——
+      界面上会出现 4 个点了没反应的 chip。分面（facet）是"这批数据的分布"，
+      它只有和列表一起算才准。
+    """
+
+    subject_id: BigIntStr
+    name: str
+    count: int
+
+
+class WrongItemOut(BaseModel):
+    """错题本的一行。**不含选项与正确答案** —— 那是详情的事。
+
+    ⚠️ 列表刻意**只给题干摘要**：一页 20 题把选项也带上，首屏就白等几百 KB，
+      而列表页的用处是"认出这是哪道题"。
+    """
+
+    question_id: BigIntStr
+    subject_id: BigIntStr | None = None
+    subject_name: str | None = None
+    chapter_name: str | None = None
+    type: str
+    stem: str
+    #: 错过几次（`_UPSERT_WRONG` 每次答错 +1）。
+    wrong_count: int
+    #: 之后又答对过几次（`_BUMP_RETRY_CORRECT`）。
+    retry_correct: int
+    mastered_level: int
+    last_wrong_at: datetime | None = None
+
+
+class WrongListOut(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    subjects: list[WrongSubjectOut] = []
+    items: list[WrongItemOut] = []
+
+
+class WrongDetailOut(BaseModel):
+    """错题详情 —— **含正确答案与解析**。
+
+    ★★ 与 P2b-1 那条"未作答的题不返 `answer`"**不矛盾**，理由必须写清：
+      · P2b-1 防的是"**没答就看到答案**"；
+      · 错题本的**前提就是"你已经答过了、而且答错了"**（`wrong_questions` 有行才给看）。
+      ⇒ 两条规则的目标一致：**答案只在「你已经和这道题交过手」之后才给**。
+
+    ⚠️ 因此这个接口**必须有"真的错过"这道门**（`wrong_questions` 里有行）——
+      否则它就变成一个**用 `question_id` 遍历题库拿答案的后门**（比不返答案更糟）。
+      拒绝用 `40401`（**不是 403**：403 会告诉对方"这道题存在、你没权限"）。
+    """
+
+    question_id: BigIntStr
+    subject_id: BigIntStr | None = None
+    subject_name: str | None = None
+    chapter_name: str | None = None
+    type: str
+    stem: str
+    stem_html: str | None = None
+    options: list[QuestionOptionOut] = []
+    #: 归一形态的正确答案（判断题统一成 `[true]` / `[false]`）。
+    answer: dict[str, Any]
+    analysis: str | None = None
+    analysis_html: str | None = None
+    wrong_count: int
+    retry_correct: int
+    mastered_level: int
+    reason_tag: str | None = None
+    last_wrong_at: datetime | None = None
+
+
 def parse_answer_doc(raw: Any) -> dict[str, Any]:
     """把库里的 `answer` / `user_answer` JSONB 解成 **dict**。
 

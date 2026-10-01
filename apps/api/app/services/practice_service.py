@@ -27,6 +27,10 @@ from app.schemas.c_end import (
     KpStatOut,
     QuestionOptionOut,
     SessionItemOut,
+    WrongDetailOut,
+    WrongItemOut,
+    WrongListOut,
+    WrongSubjectOut,
     SessionOut,
     SessionProgressOut,
     SessionReportOut,
@@ -543,6 +547,219 @@ async def get_session(db: AsyncSession, *, user_id: int, session_id: int) -> Ses
     )
 
 
+# ============================================================ 错题本（P2c-2）
+
+
+#: ⚠️ 为什么**写两条** SQL 而不是 `(:sub IS NULL OR w.subject_id = :sub)`：
+#:   后者让参数在"NULL / 数字"之间摇摆，而 `asyncpg` 要靠类型推参数 ——
+#:   这正是坑 73 那一族（裸参数推不出类型）。**能免则免**：两条常量，各自绑定明确的类型。
+#: ★ 两条的差异**只有** `AND w.subject_id = :sub` 一行，其余逐字相同。
+_WRONG_BASE_SQL = """
+    SELECT w.question_id, w.subject_id, w.chapter_id, w.wrong_count, w.retry_correct,
+           w.mastered_level, w.last_wrong_at,
+           s.name AS subject_name, ch.name AS chapter_name,
+           q.type, q.stem
+      FROM wrong_questions w
+      JOIN questions q  ON q.id = w.question_id
+      LEFT JOIN subjects s ON s.id = w.subject_id
+      LEFT JOIN chapters ch ON ch.id = w.chapter_id
+     WHERE w.user_id = :uid AND w.is_removed = false
+"""
+
+_SELECT_WRONG_PAGE = text(
+    _WRONG_BASE_SQL + " ORDER BY w.last_wrong_at DESC, w.question_id DESC LIMIT :lim OFFSET :off"
+).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("lim", type_=Integer),
+    bindparam("off", type_=Integer),
+)
+
+_SELECT_WRONG_PAGE_BY_SUBJECT = text(
+    _WRONG_BASE_SQL
+    + "   AND w.subject_id = :sub"
+    + " ORDER BY w.last_wrong_at DESC, w.question_id DESC LIMIT :lim OFFSET :off"
+).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("sub", type_=BigInteger),
+    bindparam("lim", type_=Integer),
+    bindparam("off", type_=Integer),
+)
+
+_COUNT_WRONG = text(
+    "SELECT count(*) AS n FROM wrong_questions w WHERE w.user_id = :uid AND w.is_removed = false"
+).bindparams(bindparam("uid", type_=BigInteger))
+
+_COUNT_WRONG_BY_SUBJECT = text(
+    "SELECT count(*) AS n FROM wrong_questions w "
+    "WHERE w.user_id = :uid AND w.is_removed = false AND w.subject_id = :sub"
+).bindparams(bindparam("uid", type_=BigInteger), bindparam("sub", type_=BigInteger))
+
+#: 分面：科目分布。★★ **恒为全量**，不随 `subject_id` 收缩 —— 见 `list_wrong` 里的注释：
+#:   分面的作用正是「**让你看见还能切到哪**」，收缩之后就切不过去了（p2c2 走查抓到的真缺陷）。
+_SELECT_WRONG_FACETS = text(
+    """
+    SELECT w.subject_id, COALESCE(s.name, '未归类') AS name, count(*) AS n
+      FROM wrong_questions w
+      LEFT JOIN subjects s ON s.id = w.subject_id
+     WHERE w.user_id = :uid AND w.is_removed = false
+     GROUP BY 1, 2
+     ORDER BY 3 DESC, 1
+    """
+).bindparams(bindparam("uid", type_=BigInteger))
+
+#: ★★ 详情有**一道门**：`wrong_questions` 里必须有这个用户 × 这道题的行。
+#:    没有 ⇒ 404（**不返答案**）—— 否则这个接口就是"用 question_id 遍历题库拿答案的后门"。
+_SELECT_WRONG_DETAIL = text(
+    """
+    SELECT w.question_id, w.subject_id, w.chapter_id, w.wrong_count, w.retry_correct,
+           w.mastered_level, w.reason_tag, w.last_wrong_at,
+           s.name AS subject_name, ch.name AS chapter_name,
+           q.type, q.stem, q.stem_html, q.answer, q.analysis, q.analysis_html
+      FROM wrong_questions w
+      JOIN questions q  ON q.id = w.question_id
+      LEFT JOIN subjects s ON s.id = w.subject_id
+      LEFT JOIN chapters ch ON ch.id = w.chapter_id
+     WHERE w.user_id = :uid AND w.question_id = :qid AND w.is_removed = false
+    """
+).bindparams(bindparam("uid", type_=BigInteger), bindparam("qid", type_=BigInteger))
+
+#: 一次能取多少（上限刻意小）：错题本是"回看"的界面，不是批量导出的通道。
+WRONG_PAGE_MAX = 50
+WRONG_PAGE_DEFAULT = 20
+
+
+async def list_wrong(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    subject_id: int | None = None,
+    page: int = 1,
+    page_size: int = WRONG_PAGE_DEFAULT,
+) -> WrongListOut:
+    """错题列表（按 `last_wrong_at` 倒序 = **最近错的在前**）。
+
+    ★ 倒序的理由：错题本的入口是"我刚错的那些题"，不是"我最老的账"。
+      掌握度排序属下一批（那要有 `mastery`，而现在它是 0）。
+
+    ★★ `subjects`（分面）**恒为全量分布**，即使传了 `subject_id`。
+      我第一版写成了"只返选中科目"，理由是怕"chip 写着 3、列表 1 条"——
+      **那个理由不成立**：一条错题只属于**一个**科目，按科目筛选不会改变该科目自己的条数。
+      而它的代价是实的：**切一次科目之后，其他 chip 从 DOM 里消失 ⇒ 切不过去**
+      （p2c2 走查在 `[data-facet="1002"]` 上等超时，第一次跑就抓到了）。
+
+    ⚠️ 分页参数在这里**夹了一次**（不是靠调用方）：`page >= 1`、`page_size ∈ [1, 50]`。
+      夹在 service 里而不是只在 schema 上，是因为**别的地方（将来的 worker）也会调这个函数**。
+    """
+    page = max(1, int(page))
+    page_size = max(1, min(WRONG_PAGE_MAX, int(page_size)))
+    off = (page - 1) * page_size
+
+    if subject_id is None:
+        total = int((await db.execute(_COUNT_WRONG, {"uid": user_id})).scalar() or 0)
+        rows = (
+            (await db.execute(_SELECT_WRONG_PAGE, {"uid": user_id, "lim": page_size, "off": off}))
+            .mappings()
+            .all()
+        )
+        facets = (await db.execute(_SELECT_WRONG_FACETS, {"uid": user_id})).mappings().all()
+    else:
+        total = int(
+            (
+                await db.execute(_COUNT_WRONG_BY_SUBJECT, {"uid": user_id, "sub": subject_id})
+            ).scalar()
+            or 0
+        )
+        rows = (
+            (
+                await db.execute(
+                    _SELECT_WRONG_PAGE_BY_SUBJECT,
+                    {"uid": user_id, "sub": subject_id, "lim": page_size, "off": off},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        rows = (
+            (
+                await db.execute(
+                    _SELECT_WRONG_PAGE_BY_SUBJECT,
+                    {"uid": user_id, "sub": subject_id, "lim": page_size, "off": off},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        facets = (await db.execute(_SELECT_WRONG_FACETS, {"uid": user_id})).mappings().all()
+
+    return WrongListOut(
+        total=total,
+        page=page,
+        page_size=page_size,
+        subjects=[
+            WrongSubjectOut(subject_id=f["subject_id"], name=str(f["name"]), count=int(f["n"]))
+            for f in facets
+        ],
+        items=[
+            WrongItemOut(
+                question_id=r["question_id"],
+                subject_id=r["subject_id"],
+                subject_name=r["subject_name"],
+                chapter_name=r["chapter_name"],
+                type=str(r["type"]),
+                stem=str(r["stem"]),
+                wrong_count=int(r["wrong_count"]),
+                retry_correct=int(r["retry_correct"]),
+                mastered_level=int(r["mastered_level"]),
+                last_wrong_at=r["last_wrong_at"],
+            )
+            for r in rows
+        ],
+    )
+
+
+async def get_wrong_detail(db: AsyncSession, *, user_id: int, question_id: int) -> WrongDetailOut:
+    """错题详情（含正确答案与解析）。**没真的错过 ⇒ 40401、不返答案**。
+
+    判据见 `WrongDetailOut` 的注释：答案是给"已经和这道题交过手"的人的。
+    """
+    r = (
+        (await db.execute(_SELECT_WRONG_DETAIL, {"uid": user_id, "qid": question_id}))
+        .mappings()
+        .first()
+    )
+    if r is None:
+        raise not_found("这道题不在你的错题本里", 40401)
+
+    qid = int(r["question_id"])
+    opt_rows = (await db.execute(_SELECT_OPTIONS, {"qids": [qid]})).mappings().all()
+    qtype = str(r["type"])
+    answer_doc = parse_answer_doc(r["answer"])
+    return WrongDetailOut(
+        question_id=r["question_id"],
+        subject_id=r["subject_id"],
+        subject_name=r["subject_name"],
+        chapter_name=r["chapter_name"],
+        type=qtype,
+        stem=str(r["stem"]),
+        stem_html=r["stem_html"],
+        options=[
+            QuestionOptionOut(
+                label=str(o["label"]), content=str(o["content"]), content_html=o["content_html"]
+            )
+            for o in opt_rows
+        ],
+        # ★ 出参前**归一**（判断题在库里有 `[true]` / `["A"]` 两套写法，坑 76）。
+        answer=public_answer(qtype, parse_answer_value(r["answer"])) if answer_doc else {},
+        analysis=r["analysis"],
+        analysis_html=r["analysis_html"],
+        wrong_count=int(r["wrong_count"]),
+        retry_correct=int(r["retry_correct"]),
+        mastered_level=int(r["mastered_level"]),
+        reason_tag=r["reason_tag"],
+        last_wrong_at=r["last_wrong_at"],
+    )
+
+
 # ============================================================ 交卷（#7）+ 报告（#2）
 
 
@@ -920,6 +1137,8 @@ __all__ = [
     "create_session",
     "finish_session",
     "get_report",
+    "get_wrong_detail",
+    "list_wrong",
     "get_session",
     "grade",
     "list_chapters",
