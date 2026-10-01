@@ -495,10 +495,21 @@ def test_resolvers_return_none_when_no_candidate_exists(
 def test_init_db_skips_when_schema_file_missing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """缺 schema.sql → **跳过并返回 0**：这是"没挂脚本"的正常情形，不该让容器启动失败。"""
+    """缺 schema.sql **但目标库已建好** → **跳过并返回 0**：托管部署的正常情形。
+
+    ★★ 语义在 2026-10-01 变过一次（Render 第一次部署真炸出来的）：
+      老版本"schema 文件缺失 ⇒ **一律**返回 0"会让一个**没有任何表**的 API 正常启动
+      （`/api/v1/health` 还返 200 `degraded`），而每个真实请求都 500 ——
+      这是最难查的一种"活着但没用"。
+      ⇒ 现在它会**连库确认**：库有表 ⇒ 跳过（这条）；库没表 ⇒ **失败 + 给出可照做的修法**。
+
+    ⚠️ 所以这条用例**依赖"真 PG 且库里已建表"**（与文件头声明的依赖一致）。
+      "库没表"的那一半**不在这里测** —— 用替身连接覆盖，见
+      `tests/test_deploy_readiness.py::test_init_db_is_loud_when_...`（它不依赖 PG）。
+    """
     monkeypatch.setattr(cli, "Path", _MissingFile)
     assert cli.main(["init-db"]) == 0
-    assert "not found; skipping init-db" in _out(capsys)
+    assert "跳过 init-db（**预期**）" in _out(capsys)
 
 
 def test_init_db_is_idempotent_when_schema_present(capsys: pytest.CaptureFixture[str]) -> None:
@@ -608,10 +619,14 @@ def _schema_file(name: str, body: str) -> Path:
 def test_seed_rbac_skips_when_schema_file_missing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """缺 schema.sql → 0（跳过）。"""
+    """缺 schema.sql → 0（跳过）；且**跳过要说明为什么**（2026-10-01 起）。
+
+    ★ 文案变过：以前是 `not found; skipping seed-rbac` —— 那句话会被下一个人读成
+      "**角色没灌进去**"。现在写明"角色/权限已随 apply-schema 灌入"。
+    """
     monkeypatch.setattr(cli, "Path", _MissingFile)
     assert cli.main(["seed-rbac"]) == 0
-    assert "not found; skipping seed-rbac" in _out(capsys)
+    assert "跳过 seed-rbac" in _out(capsys)
 
 
 def test_seed_rbac_rejects_schema_without_slice_markers(

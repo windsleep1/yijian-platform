@@ -43,14 +43,66 @@ def _log(msg: str) -> None:
     print(f"[cli] {msg}", flush=True)
 
 
+def _ancestor(level: int) -> Path | None:
+    """`__file__` 的第 `level` 级父目录；**不够深就返回 None**（不抛异常）。
+
+    ★★ 为什么必须这样写（2026-10-01 在 Render 上真炸过）：
+
+      容器里 `__file__` 是 **`/app/app/cli.py`** ⇒ `parents` 只有 **3** 项
+      （`/app/app`、`/app`、`/`）⇒ `parents[3]` 抛 **`IndexError`**。
+      而本机是 `…/yijian-platform/apps/api/app/cli.py`（**8 层**）⇒ **本机永远复现不出来**。
+
+    ★ 更隐蔽的一点：**候选列表是"饿着构造"的** —— 越界发生在"逐个 `is_file()` 试探"
+      **之前**，所以连"退回到别的候选"这条兜底路都走不到，直接崩。
+    ⇒ 判据：**凡是按深度索引的路径推断，都要能容忍"实际路径比预期浅"**；
+      并且**别在"列候选"阶段做可能失败的事**（列候选应当是纯的）。
+
+    ★ 实现上用 **`try / except IndexError`**，而不是先 `len(parents)` 再判断：
+      `len()` 当然也能用，但那样等于把"**必须支持 `len`**"变成调用方的新前置条件 ——
+      而 `tests/test_cli_commands.py` 里有一个 `_MissingFile` **替身**
+      （只实现 `resolve / is_file / __truediv__ / __getitem__ / parents / name`），
+      正是靠"**下标越界抛 `IndexError`**"这一条**真实行为**工作的。
+      ⇒ 优先依赖**文档化的行为**（越界抛 `IndexError`），而不是"顺手可用的方法"：
+        这样"替身必须实现的最小表面"不会被动扩大。
+      （第一版写的就是 `len()`，**是全量跑把它抓出来的** —— 392 passed / 4 failed。）
+    """
+    try:
+        return Path(__file__).resolve().parents[level]
+    except IndexError:
+        return None
+
+
+def _repo_relative(depth: int, *parts: str) -> Path | None:
+    """`__file__` 往上 `depth` 级的目录 + 相对片段；不够深就 `None`。
+
+    ★★ 这里**刻意用 `/` 运算符**（而不是 `Path.joinpath`），并且**不用** `len()` 探深度 ——
+      因为 `tests/test_cli_commands.py` 有一个 `_MissingFile` **替身**，
+      它实现的是**接口表面**：`/`（`__truediv__`）、`resolve`、`is_file`、`parents[i]`、`cwd`、`name`。
+
+      ⚠️ 我第一次重写时用了 `len(parents)` 和 `joinpath()` —— 两次都被**全量跑**抓出来
+      （392 passed / 4 failed）。它们**语义上完全等价**，却**扩大了替身必须实现的最小表面**。
+
+      ⇒ 一般化的判据：**当一段代码被测试替身包着时，"语义等价的重写"仍可能破坏它** ——
+        因为替身实现的是**表面**，不是**语义**。
+        （同族：「休眠的契约」——改动前先问"谁在依赖这段代码的**形状**"，不只是"谁在调用它"。）
+    """
+    base = _ancestor(depth)
+    if base is None:
+        return None
+    p = base
+    for part in parts:
+        p = p / part
+    return p
+
+
 def _resolve_schema_file() -> Path | None:
-    candidates = [
-        Path(settings.schema_file),
-        Path(__file__).resolve().parents[3] / "db" / "schema.sql",  # apps/api/app -> repo/db
-        Path(__file__).resolve().parents[2] / "db" / "schema.sql",
-        Path.cwd() / "db" / "schema.sql",
-        Path("/db/schema.sql"),
-    ]
+    candidates: list[Path] = [Path(settings.schema_file)]
+    # 顺序与原实现一致（先仓库根、再 apps/api），只是**越界的那一级会被跳过**。
+    for depth in (3, 2):
+        p = _repo_relative(depth, "db", "schema.sql")
+        if p is not None:
+            candidates.append(p)
+    candidates += [Path.cwd() / "db" / "schema.sql", Path("/db/schema.sql")]
     for c in candidates:
         if c.is_file():
             return c
@@ -58,11 +110,11 @@ def _resolve_schema_file() -> Path | None:
 
 
 def _resolve_seed_file() -> Path | None:
-    candidates = [
-        Path("/data/seed/questions.sql"),
-        Path(__file__).resolve().parents[3] / "data" / "seed" / "questions.sql",
-        Path.cwd() / "data" / "seed" / "questions.sql",
-    ]
+    candidates: list[Path] = [Path("/data/seed/questions.sql")]
+    p = _repo_relative(3, "data", "seed", "questions.sql")
+    if p is not None:
+        candidates.append(p)
+    candidates.append(Path.cwd() / "data" / "seed" / "questions.sql")
     for c in candidates:
         if c.is_file():
             return c
@@ -132,14 +184,35 @@ async def _wait_redis(timeout: int) -> int:
 
 
 async def _init_db() -> int:
+    """确保库里有表。**镜像里没有 schema 时，也要能分清"已就绪"与"这个部署是坏的"。**
+
+    ★★ 为什么这条分支必须存在（2026-10-01 在 Render 上的真实故障）：
+      Docker 构建上下文是 `apps/api`，而 `db/schema.sql` 在**仓库根** ⇒ **镜像里没有它**
+      （本地 compose 靠卷挂载 `../db:/db:ro` 才有）。于是托管部署时
+      `_resolve_schema_file()` 必然返回 `None` —— **这是常态，不是错误**。
+
+      但"常态"与"这个库根本没初始化"在日志里长得**一模一样**：
+      老的写法是直接 `return 0` 跳过 ⇒ 一个**没有任何表**的 API 会正常启动。
+      它 `/api/v1/health` 还能返 200（`degraded`），而每个真实请求都 500 ——
+      **最难查的一种"活着但没用"**。⇒ 判据（兜底要出声）：
+      **别让"没找到前置条件"和"前置条件已满足"走同一条路**。
+    """
     schema_file = _resolve_schema_file()
-    if schema_file is None:
-        _log("db/schema.sql not found; skipping init-db")
-        return 0
 
     conn = await raw_asyncpg_connection()
     try:
         exists = await conn.fetchval("SELECT to_regclass('public.users')")
+
+        if schema_file is None:
+            if exists is not None:
+                _log(f"镜像内无 schema.sql，但目标库已就绪（{exists}）⇒ 跳过 init-db（**预期**）")
+                return 0
+            _log("✗ 目标库里没有 public.users，而镜像里也没有 db/schema.sql ⇒ 这个库还没初始化。")
+            _log("  修法（在**本机**跑一次，见 docs/27 §1.3）：")
+            _log('      python tools/deploy/apply-schema.py --url "<Neon 连接串>" --yes')
+            _log("  然后再重新部署。")
+            return 1
+
         if exists is not None:
             _log(f"schema already present ({exists}); skipping {schema_file.name}")
             return 0
@@ -186,7 +259,11 @@ async def _seed_rbac() -> int:
     """
     schema_file = _resolve_schema_file()
     if schema_file is None:
-        _log("db/schema.sql not found; skipping seed-rbac")
+        # 镜像里没有 schema.sql（Docker 构建上下文是 apps/api；托管部署的常态）。
+        # 角色/权限**是随 schema.sql 一起灌进去的**（`tools/deploy/apply-schema.py` 跑的就是它）
+        # ⇒ 这里跳过是对的。
+        # ⚠️ 但"跳过"必须**说清为什么**，否则下一个人会把它读成"角色没灌进去"。
+        _log("镜像内无 schema.sql ⇒ 跳过 seed-rbac（角色/权限已随 apply-schema 灌入）")
         return 0
 
     sql = schema_file.read_text(encoding="utf-8")

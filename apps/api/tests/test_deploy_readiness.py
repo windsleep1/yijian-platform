@@ -195,3 +195,88 @@ def test_entrypoint_keeps_postgres_fatal_and_still_execs() -> None:
     sh = ENTRYPOINT.read_text(encoding="utf-8")
     assert "\npython -m app.cli wait-db" in sh
     assert 'exec "$@"' in sh
+
+
+# ---------------------------------------------------------------- ③ 容器里的路径更深/更浅
+
+
+def test_schema_resolution_survives_the_container_path_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★★ 回归：**容器里的 `__file__` 比本机浅得多**，路径推断不能因此抛异常。
+
+    真故障（2026-10-01，Render 第一次部署）：
+      容器里 `__file__` = `/app/app/cli.py` ⇒ `parents` 只有 **3** 项 ⇒
+      老代码的 `Path(__file__).resolve().parents[3]` 抛 **`IndexError`**，
+      而本机是 8 层 ⇒ **本机永远复现不出来**。
+
+    ★ 更隐蔽的是**"饿着构造候选列表"**：越界发生在逐个 `is_file()` 试探**之前**，
+      所以连"退回到别的候选"这条兜底路都走不到 —— 它不是"找不到文件"，
+      是**"连找的动作都没做成"**。
+
+    ⇒ 判据：**按深度索引的路径推断必须容忍"路径比预期浅"**。
+      （Windows 上 `Path("/app/app/cli.py").resolve()` → `C:\\app\\app\\cli.py`，
+       父目录同样只有 3 级 ⇒ 这条用例在**本机**就能复现容器的条件。）
+    """
+    from app import cli
+
+    monkeypatch.setattr(cli, "__file__", "/app/app/cli.py")
+    assert len(Path("/app/app/cli.py").resolve().parents) == 3, "前提变了：这条用例要重看"
+
+    schema = cli._resolve_schema_file()  # 不能抛
+    seed = cli._resolve_seed_file()  # 不能抛
+    assert schema is None or schema.is_file()
+    assert seed is None or seed.is_file()
+
+
+def _fake_conn(users: object):
+    """最小 asyncpg 连接替身：只回答 `to_regclass('public.users')` 那一次查询。"""
+
+    class _Conn:
+        async def fetchval(self, sql: str, *args: object) -> object:
+            assert "to_regclass" in sql, sql
+            return users
+
+        async def close(self) -> None:
+            return None
+
+    async def _make() -> _Conn:
+        return _Conn()
+
+    return _make
+
+
+def test_init_db_is_loud_when_the_schema_is_missing_and_the_db_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """镜像里没有 schema、**库里也没有表** ⇒ 必须**明确失败**（返回 1）。
+
+    ★ 这是"兜底要出声"的部署形态：老写法在这里 `return 0` 跳过 ⇒
+      一个**没有任何表**的 API 会正常启动，`/health` 还返 200（degraded），
+      而每个真实请求都 500 —— 最难查的一种"活着但没用"。
+    """
+    import asyncio
+
+    from app import cli
+
+    monkeypatch.setattr(cli, "_resolve_schema_file", lambda: None)
+    monkeypatch.setattr(cli, "raw_asyncpg_connection", _fake_conn(None))
+    assert asyncio.run(cli._init_db()) == 1
+
+
+def test_init_db_quietly_skips_when_the_schema_is_missing_but_the_db_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**成对验的另一头**：镜像里没有 schema、但库里已有表 ⇒ 跳过（返回 0）。
+
+    ★ 只测"空库要失败"是不够的：一条**恒返 1** 的实现在那条用例下也是绿的，
+      而它会让托管部署**永远起不来**（schema 本来就该由 apply-schema 提前灌好）。
+      两头都有场景，才说明这条分支真的在**区分**两种情形。
+    """
+    import asyncio
+
+    from app import cli
+
+    monkeypatch.setattr(cli, "_resolve_schema_file", lambda: None)
+    monkeypatch.setattr(cli, "raw_asyncpg_connection", _fake_conn("users"))
+    assert asyncio.run(cli._init_db()) == 0
