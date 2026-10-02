@@ -6,6 +6,7 @@
     python -m app.cli init-db       执行 db/schema.sql（幂等：已建表则跳过）
     python -m app.cli seed-rbac     重放 db/schema.sql 的角色/权限种子（幂等，用于补新角色）
     python -m app.cli seed-admin    创建/修复超级管理员（幂等）
+    python -m app.cli seed-demo     创建/修复**只读演示账号**（幂等；README 的 Live Demo 用）
     python -m app.cli seed-questions 导入种子题库（幂等，依赖 db/seed/questions.sql）
 """
 
@@ -337,6 +338,101 @@ async def _seed_rbac() -> int:
         await conn.close()
 
 
+# ---------------------------------------------------------------- 演示账号
+#
+# ★★ **账号就是手机号** —— 这是 B 端登录表单的字段（`apps/admin/src/app/login/page.tsx`
+#    里写的是「手机号 / 11 位手机号」），后端 `schemas/auth.py::PHONE_RE` 钉的是
+#    `^1[3-9]\d{9}$`。所以演示账号**不可能**叫 `admin123456`（那不是合法手机号，
+#    登录会被 422 挡下）。这一组值 = README「Live Demo」段里公示的那一组，**改动要同步**。
+DEMO_PHONE = "13800000001"
+DEMO_PASSWORD = "admin123456"
+DEMO_ROLE = "viewer"
+
+
+async def _seed_demo() -> int:
+    """创建 / 修复**只读演示账号**（幂等）。
+
+    ## 为什么要有它
+    部署出去之后 B 端**进不去** —— 超管的手机号与密码在你自己手里，
+    而给面试官 / 评审看的时候**不能把超管交出去**（那是全部权限）。
+    所以要一个**只读**账号：`viewer` 角色只有四个读权限
+    （`db/schema.sql` §12.2：`user:read` / `system:audit` / `stats:read` / `exam:read`）
+    ⇒ 登进去**能看列表、改不动任何东西**。这一条也正是"权限门控能被真实演示"的载体。
+
+    ## 三条判据（每条都对应一个具体的翻车方式）
+    1. ★★ **只授 viewer —— 用 `assign_roles`（整体替换），不用 `ensure_role_assigned`（追加）**。
+       追加式在"这个号以前是超管 / 是 researcher"的场景下会**把旧角色留着**，
+       于是"只读演示账号"变成一个**悄悄带写权限的后门**。
+    2. **幂等**：连跑两次结果一致。seed 类命令天生会被反复跑（换库、重部署），
+       "第二次报错"或"越跑权限越大"都不能接受。
+    3. **必须能登录**：写死 `status='active'` + `is_deleted=False`。
+       被停用 / 软删的账号登不进去，而这件事在**演示当天**才发现就晚了。
+    """
+    from sqlalchemy import select
+
+    from app.db.base import SessionLocal
+    from app.db.models import User, UserProfile
+    from app.services import rbac_service
+
+    phone, password = DEMO_PHONE, DEMO_PASSWORD
+    # ⚠️ 这里**刻意不加重试**（同 `_seed_admin` 的理由）：`wait-db` 已经吸收掉
+    #    "依赖还没起来"，能走到这里就是真错；重试只会让确定性失败**晚**出现。
+    try:
+        async with SessionLocal() as db:
+            role = await rbac_service.get_role_by_code(db, DEMO_ROLE)
+            if role is None:
+                _log(f"no {DEMO_ROLE} role in table; run init-db first")
+                return 1
+
+            user = (await db.execute(select(User).where(User.phone == phone))).scalar_one_or_none()
+            if user is None:
+                user = User(
+                    id=next_id(),
+                    phone=phone,
+                    nickname="演示账号（只读）",
+                    password_hash=hash_password(password),
+                    status="active",
+                    register_source="cli",
+                    register_ip=to_inet("127.0.0.1"),
+                    is_deleted=False,
+                )
+                db.add(user)
+                await db.flush()
+                db.add(UserProfile(user_id=user.id, exam_level="yijian"))
+                await db.flush()
+                _log(f"created demo account {phone}")
+            else:
+                user.password_hash = hash_password(password)
+                user.status = "active"
+                user.is_deleted = False
+                _log(f"demo account {phone} exists; password reset and account activated")
+
+            priv = await rbac_service.assign_roles(
+                db, redis=None, user_id=user.id, role_codes=[DEMO_ROLE]
+            )
+            await db.commit()
+
+            # ★ **把"只读"打出来**，而不是只说一句"好了"：
+            #   否则"它到底是不是只读"只能靠人去翻库（而演示账号恰恰是最不能出错的那个）。
+            roles = sorted(priv.role_codes)
+            perms = sorted(priv.permission_set)
+            _log(f"demo account ready: {phone} / {password}")
+            _log(f"  roles = {roles}（**整体替换**，不是追加）")
+            _log(f"  permissions({len(perms)}) = {' '.join(perms)}")
+            # ⚠️ 这里**只**断言"角色恰好是 viewer"。
+            #   刻意**不**去猜"这些权限名看起来像不像只读" —— 那是把 viewer 的权限组成
+            #   又抄了一份（`db/schema.sql` §12.2 才是唯一真相），会随命名漂移误报。
+            #   "改不动任何东西"由用例证明：`tests/test_demo_account.py` 用这个账号
+            #   登录后逐个打写接口，断言全部 40301。**行为用行为验，别用名字验。**
+            if roles != [DEMO_ROLE]:
+                _log(f"✗ 角色不是恰好 [{DEMO_ROLE}] ⇒ 这个账号**不是只读的**，拒绝收工")
+                return 1
+    except Exception as exc:  # noqa: BLE001
+        _log(f"seed-demo failed :: {_db_target()} :: {type(exc).__name__}: {exc}")
+        raise
+    return 0
+
+
 # ---------------------------------------------------------------- 超管
 
 
@@ -450,7 +546,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="app.cli", description="Yijian backend operations CLI")
     parser.add_argument(
         "command",
-        choices=["wait-db", "wait-redis", "init-db", "seed-rbac", "seed-admin", "seed-questions"],
+        choices=[
+            "wait-db",
+            "wait-redis",
+            "init-db",
+            "seed-rbac",
+            "seed-admin",
+            "seed-demo",
+            "seed-questions",
+        ],
     )
     parser.add_argument(
         "--timeout", type=int, default=120, help="timeout in seconds for wait-* commands"
@@ -467,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_seed_rbac())
     if args.command == "seed-admin":
         return asyncio.run(_seed_admin())
+    if args.command == "seed-demo":
+        return asyncio.run(_seed_demo())
     if args.command == "seed-questions":
         return asyncio.run(_seed_questions())
     # argparse 的 `choices` 已枚举全部取值，非法命令在 parse_args 阶段就以 2 退出 ——

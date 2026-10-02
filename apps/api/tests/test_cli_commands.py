@@ -805,6 +805,77 @@ def test_seed_admin_resets_password_for_existing_admin(
     assert after == before, "幂等：不应重复建号"
 
 
+# ---------------------------------------------------------------- seed-demo
+
+
+def _demo_roles() -> list[str]:
+    rows = sql_fetch(
+        "SELECT r.code FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+        "JOIN users u ON u.id = ur.user_id WHERE u.phone = $1 ORDER BY r.code",
+        cli.DEMO_PHONE,
+    )
+    return [r["code"] for r in rows]
+
+
+def test_seed_demo_creates_a_readonly_account(capsys: pytest.CaptureFixture[str]) -> None:
+    """`seed-demo` 建出公示的那个账号，而且**只有 viewer**、**能登录**（active + 未软删）。
+
+    这是 README「Live Demo」段承诺的那一组值 —— 它错了，就是**演示当天**才发现的错。
+    """
+    assert cli.main(["seed-demo"]) == 0
+    out = _out(capsys)
+    assert f"demo account ready: {cli.DEMO_PHONE}" in out
+    assert "roles = ['viewer']" in out, out
+
+    rows = sql_fetch("SELECT id, status, is_deleted FROM users WHERE phone = $1", cli.DEMO_PHONE)
+    assert rows, "应当建出演示账号"
+    assert rows[0]["status"] == "active", "停用的账号登不进去 —— 演示当天才发现就晚了"
+    assert rows[0]["is_deleted"] is False
+    uid = int(rows[0]["id"])
+    assert sql_fetch("SELECT 1 FROM user_profiles WHERE user_id = $1", uid), (
+        "profile 是登录后的必需项"
+    )
+    assert _demo_roles() == ["viewer"]
+
+
+def test_seed_demo_is_idempotent(capsys: pytest.CaptureFixture[str]) -> None:
+    """连跑两次 ⇒ 账号数不变、角色不变（seed 类命令天生会被反复跑）。"""
+    assert cli.main(["seed-demo"]) == 0
+    before = sql_fetch("SELECT count(*) AS n FROM users WHERE phone = $1", cli.DEMO_PHONE)[0]["n"]
+    assert cli.main(["seed-demo"]) == 0
+    assert f"demo account {cli.DEMO_PHONE} exists" in _out(capsys), "第二次应走「已存在」分支"
+    after = sql_fetch("SELECT count(*) AS n FROM users WHERE phone = $1", cli.DEMO_PHONE)[0]["n"]
+    assert after == before, "幂等：不应重复建号"
+    assert _demo_roles() == ["viewer"]
+
+
+def test_seed_demo_strips_any_pre_existing_privileged_roles() -> None:
+    """★★ **最关键的一条**：这个号若已经带别的（带写权限的）角色，跑完必须**只剩 viewer**。
+
+    `seed-demo` 用 `assign_roles`（**整体替换**）而不是 `ensure_role_assigned`（追加）。
+    追加式在这里会**留下旧角色** ⇒ "只读演示账号"变成一个**悄悄带写权限的后门** ——
+    而它表面上仍然打印 `demo account ready`，谁都看不出来。
+
+    ★ 造前置**不动别人的账号**（第一版把超管的手机号换过来，虽然能在 `finally` 里还回去，
+      但"改到超管头上"这件事本身就会让**别的用例**在中间那一瞬间读到错的状态）。
+      改成**直接给演示账号塞一个 admin 角色**：要验的是"整体替换"，这样就够了。
+    """
+    from app.core.idgen import next_id
+
+    assert cli.main(["seed-demo"]) == 0
+    uid = int(sql_fetch("SELECT id FROM users WHERE phone = $1", cli.DEMO_PHONE)[0]["id"])
+    sql_exec(
+        "INSERT INTO user_roles (id, user_id, role_id, scope_type) "
+        "SELECT $1, $2, r.id, 'global' FROM roles r WHERE r.code = 'admin'",
+        next_id(),
+        uid,
+    )
+    assert sorted(_demo_roles()) == ["admin", "viewer"], "前置没造成立，这条用例就白跑了"
+
+    assert cli.main(["seed-demo"]) == 0
+    assert _demo_roles() == ["viewer"], "旧角色没被清掉 ⇒ 演示账号是个后门"
+
+
 # ---------------------------------------------------------------- seed-questions
 
 
@@ -898,13 +969,14 @@ def test_unknown_command_exits_with_2() -> None:
         ("init-db", "_init_db"),
         ("seed-rbac", "_seed_rbac"),
         ("seed-admin", "_seed_admin"),
+        ("seed-demo", "_seed_demo"),
         ("seed-questions", "_seed_questions"),
     ],
 )
 def test_main_dispatches_each_command_to_its_own_handler(
     command: str, target: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """六个子命令各自**路由到自己的处理函数**，并把它的返回码原样带出来。
+    """七个子命令各自**路由到自己的处理函数**，并把它的返回码原样带出来。
 
     比"读源码找字符串"强的地方：它验证的是**真的调用了谁** —— 少一个分支、
     或者两个子命令接到同一个处理函数，这里都会红。用 7 当哨兵值是为了证明
