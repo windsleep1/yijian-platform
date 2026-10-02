@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#205CE9" />
+    <title>当前离线 · 一建通</title>
+    <!--
+      这个页面是 Service Worker 在**断网时**兜底渲染的那一张（`docs/28` §3.4）。
+
+      ★★ 它必须**自包含**：样式内联、不引 `/_next/*`、不引任何外部域名。
+        理由：它出现的**唯一场合**就是"什么都拿不到的时候" ——
+        只要它依赖一个网络资源（字体 / CSS / 图标），那个资源就一定也拿不到，
+        于是"不白屏"变成"一个没有样式的白屏"（看起来像坏了）。
+
+      ⚠️ 文案只承诺我们**真的**做得到的事：断网时**页面本身**能打开。
+        不要说"离线也能刷题" —— 那要缓存接口与作答队列，属 BL-21，本批明确不做。
+    -->
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #ffffff; /* = C 端 --bg */
+        color: #1a1d23; /* = hsl(222 22% 12%)，与 C 端 --ink 同值 */
+        font-family:
+          -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .card {
+        width: 100%;
+        max-width: 320px;
+        text-align: center;
+      }
+      .logo {
+        width: 56px;
+        height: 56px;
+        margin: 0 auto 20px;
+        border-radius: 16px;
+        background: #205ce9; /* = C 端 --brand */
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        font-weight: 700;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+      }
+      p {
+        margin: 0 0 24px;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #6b7280;
+      }
+      button {
+        min-height: 44px; /* C 端的可点区域下限 */
+        width: 100%;
+        border: 0;
+        border-radius: 12px;
+        background: #205ce9;
+        color: #fff;
+        font-size: 16px;
+        font-weight: 500;
+        font-family: inherit;
+      }
+      button:active {
+        opacity: 0.8;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="logo" aria-hidden="true">建</div>
+      <h1>当前离线</h1>
+      <p>网络恢复后就能继续。请检查网络连接，或稍后重试。</p>
+      <button type="button" id="retry">重试</button>
+    </main>
+    <script>
+      document.getElementById("retry").addEventListener("click", function () {
+        location.reload();
+      });
+    </script>
+  </body>
+</html>

@@ -1,6 +1,7 @@
-# 28 · PWA 收尾 · 方案（**待确认 —— 确认后才写代码**）
+# 28 · PWA 收尾 · 方案（**已实现**，2026-10-02 —— 实施记录见 §10）
 
-> **作用**：开工前把**边界**定死。**这份文件本身不是实现。**
+> **作用**：开工前把**边界**定死。§1~§8 是**开工前的计划**（保持原样，不改写 —— 改了就等于篡改计划）；
+> **实际做出来是什么样**、以及**计划里没想到的两件事**，都写在 **§10**。
 > **依据**：`docs/26` §4（**D2 / D3 / D4** 已经写好了三条验收判据）+ 2026-10-02 用户口径。
 > **只做 C 端**（`apps/web`）；B 端（`apps/admin`）**不做** PWA。
 > ★ **与 BL-21 无关**：BL-21 是"个人 PWA（**功能层**：标记 / 收藏 / 笔记）"，主触发是
@@ -254,8 +255,90 @@ Chrome 68+ 默认已绕过 HTTP 缓存取 SW 脚本，但这条让它**不可能
 
 ---
 
-## 9. 要你回的三句话（**回了我就开工**）
+## 9. 用户回的三句话（2026-10-02，**已生效**）
 
-1. **主题色**：`#ffffff`（建议，零观感变化）还是 `#205CE9`（品牌蓝状态栏）？
-2. **图标**：用我生成的"`#205CE9` 底 + 白字 **建**"，还是你给我 logo？
-3. **§5 那条"本机 CDP 验离线不白屏"**（推荐做，能把最关键的判据从"真机才知道"变成"本机测过"）—— 做不做？
+1. **主题色** → **`#205CE9`**。开工前先核过：C 端主按钮就是 `bg-brand`
+   （`hsl(222 82% 52%)` = `#205CE9`），**全站只有这一个蓝**，没有"另一个蓝"。
+   已同时改 `manifest.theme_color` 与 `layout.tsx::viewport.themeColor`（两处必须同值）。
+2. **图标** → 用生成的"`#205CE9` 底 + 白字**建**"；**`maskable` 的字不许贴边**
+   （Android 会裁）；**manifest 里 `any` 与 `maskable` 分开写**。
+3. **本机 CDP 断网验离线** → **做**。理由（用户原话）："**只能真机验 = SW 等于没验过**"。
+   范围：production bundle + 静态服务器 + CDP 拦截网络 + 一条断言（离线页可见，不是白屏）；
+   **不做**离线答题（BL-21）、不做完整离线矩阵。
+
+---
+
+## 10. 实施记录（2026-10-02）—— **实际做出来的样子**
+
+### 10.1 交付物（与 §6 计划一致）
+
+| 新增 | 说明 |
+|---|---|
+| `apps/web/public/sw.js` | 手写；**默认拒绝**式白名单（只接管 `/_next/static/` 与 `/icons/`） |
+| `apps/web/public/offline.html` | 自包含（内联样式、不引 `/_next/*`） |
+| `apps/web/public/icons/*.png` | 192 / 512 / maskable-512 / apple-touch-icon(180) |
+| `apps/web/src/app/manifest.ts` | App Router 的 `MetadataRoute`；`any` 与 `maskable` 分开写 |
+| `apps/web/src/app/sw-register.tsx` | 只 `NODE_ENV === "production"` 注册 |
+| `tools/local-verify/gen-pwa-icons.py` | 生成图标 + **自验 IHDR 尺寸与 maskable 安全圆** |
+| `tools/local-verify/probe-pwa-offline.py` | **本机验"离线不白屏"**（§5 那条"推荐做"的） |
+
+| 修改 | 说明 |
+|---|---|
+| `apps/web/src/middleware.ts` | `PUBLIC_PREFIXES` 加三条（**§1.1 那个核心修复**） |
+| `apps/web/src/app/layout.tsx` | `appleWebApp` + `apple-touch-icon` + 挂注册组件 + `themeColor` 改品牌蓝 |
+| `apps/web/next.config.mjs` | `/sw.js` ⇒ `Cache-Control: no-store` |
+| `tools/local-verify/check-invariants.py` | 新增**不变量 10**；修不变量 9 的**假红**（见 10.3） |
+| `tools/local-verify/mutate-invariants.py` | 7 → **13** 条变异；新增**二进制变异**支持（PNG） |
+
+### 10.2 ★★ 计划里**没想到**的第一件事：SW 的断网要**单独**给它造
+
+探针第一版：给页面目标开 `Network.emulateNetworkConditions`，页面内 `fetch` 确实失败了，
+但**断网导航拿到的还是真页面**（登录页）。
+
+根因：**CDP 的断网是「按 target」生效的，而 Service Worker 有自己独立的 target**。
+只给页面断网 ⇒ SW 发起的 `fetch` 仍然通网 ⇒ `navigate` 分支里的 `await fetch(req)`
+**成功返回真响应** ⇒ "离线兜底"这条分支**永远走不到**。
+
+⇒ 修法：连上 SW 的 target（`/json/list` 里 `type == "service_worker"`），
+**在它上面**也开断网，并且**在 SW 上下文里自测一次** `fetch` 真的失败 —— 才继续。
+★ 这条与硬约定 **L**（业务代码在哪个进程跑，就在哪个进程插桩）是同一件事：
+**要给某个上下文造条件，就得进那个上下文。**
+
+### 10.3 ★★ 计划里**没想到**的第二件事：**注释会同时造成假绿和假红**
+
+同一批里，两条"grep 式"判据被注释骗了两次，方向相反：
+
+- `manifest.ts` 必须 `display: "standalone"` ⇒ 文件里**解释这条判据的注释**就写着它 ⇒ **假绿**
+  （把它改成 `minimal-ui` 仍然绿）。**是变异套件抓到的**（"存活 2 条"），不是人眼。
+- `offline.html` 不得引用 `/_next/*` ⇒ 页面自己的注释里写着"**不引 `/_next/*`**" ⇒ **假红**。
+
+⇒ 修法：**凡"文件里有/没有 X"的判据，先剥注释**（JS/TS 用 `_strip_js_comments`，
+HTML 用 `_strip_html_comments`）；`manifest.ts` 的图标判据同时改成**按条目配对**
+（`sizes:` ↔ `purpose:`），因为字符串级判断分不清"删掉 `any` 的 512、只留 maskable 的"。
+已记为 **坑 98**（含边界：**不要去改注释措辞来消红，要改判据**）。
+
+### 10.4 另一件如实记的事：不变量 9 的**假红**
+
+`/sw.js`、`/manifest.webmanifest`、`/offline.html` 加进 `PUBLIC_PREFIXES` 后，
+不变量 9（"公开路由必须有站内入口"）**当场报红两条** —— 因为它的引用天然落在
+**它扫不到的地方**（`public/sw.js`、`next.config.mjs`，而它只扫 `apps/*/src/**`）。
+⇒ 判据修正：**带扩展名 = 静态文件，不是页面**（App Router 的页面路径一律不含 `.`），
+跳过并在输出里**报出跳过了几个**（不静默）。这**不会**放过"新加页面却忘了加入口"。
+
+### 10.5 验收结果（全部实测）
+
+| 层 | 结果 |
+|---|---|
+| 不变量门禁 | **42 项 / 0 失败**（新增第 10 组 4 条；9 组的假红已修） |
+| 变异验证 | **13 / 13 捕获 · 0 未应用**（新增 6 条覆盖不变量 10 的每一头） |
+| **本机 CDP 探针** | **9 项全过**：未登录可达(3) · SW 已接管 · 缓存内容正确 · 两个 target 都断网 · 断网落到离线页 · 自包含 · 清理现场 |
+| 探针**突变** | 把 `sw.js` 的 `mode === "navigate"` 打掉 ⇒ **探针变红**，且现场直接给出 `chrome-error://chromewebdata/` + `ERR_INTERNET_DISCONNECTED`（正是"不许出现"的那个） |
+| `apps/web` 静态门禁 | `lint` / `tsc --noEmit` / `prettier --check` 全过 |
+| 图标 | 4 张按 **IHDR 实读**尺寸合格；maskable 的墨迹外接圆 **36.1% < 40%**（安全区） |
+
+### 10.6 还差什么（**不是本批能做的**）
+
+- **D2/D3 的"线上 + 真机"那一半**：装到主屏、standalone、飞行模式 —— 见 §7，**由你做**。
+  （本机只能验到"dev server + CDP 断网"这一层；`next build` 在本机跑不了，
+  产物构建归 CI 的 `web · build`。）
+- ★ 明确**不做**：离线答题 / 作答队列 / 回传同步（BL-21）、完整离线矩阵、Lighthouse 打分。

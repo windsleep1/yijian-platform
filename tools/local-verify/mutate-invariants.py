@@ -1,7 +1,9 @@
 """对 `check-invariants.py` 做**变异验证**：打掉被测对象，检查必须变红。
 
 判据（硬约定 J）：一个"检查"如果打掉它要检查的东西还是绿的，它就不是检查。
-★ **5 个**变异各对应一检查组，**都必须被捕获**；还原用**文件备份**（不用 `git checkout`）。
+★ **逐条**变异，每条对应一处判据，**都必须被捕获**；还原用**文件备份**（不用 `git checkout`）。
+⚠️ 数量**刻意不写在这里**（写死的数字一定会过期）：以 `MUTANTS` 的实际条数为准，
+   输出的末行会报"捕获 N / 应用 M / 未应用 K"。
 
     python tools/local-verify/mutate-invariants.py
 """
@@ -20,7 +22,8 @@ CHECK = REPO / "tools" / "local-verify" / "check-invariants.py"
 #: 备份落点：**仓库外**（见下面 `bak =` 处的理由）。
 _BAK_DIR = Path(tempfile.gettempdir()) / "yijian-mutantbak"
 
-MUTANTS: list[tuple[str, Path, str, str]] = [
+#: `old` / `new` 为 `str` 时按 UTF-8 文本替换；为 `bytes` 时按字节替换（用于 PNG 这类二进制）。
+MUTANTS: list[tuple[str, Path, str | bytes, str | bytes]] = [
     (
         "[1] 门禁：把 `pytest` 那道步骤改名",
         REPO / ".github" / "workflows" / "ci.yml",
@@ -77,6 +80,62 @@ MUTANTS: list[tuple[str, Path, str, str]] = [
         '        return canonical_doc("judge", [answer_raw.strip().upper()])',
         '        return {"value": [answer_raw.strip().upper()]}',
     ),
+    # ---- 不变量 9 / 10（2026-10-02 加，PWA 批次）----
+    (
+        # ★ 不变量 10-a：把 manifest 的 `display` 从 `standalone` 改掉 ——
+        #   判据是"装到桌面后**没有地址栏**"，而它唯一的来源就是这一行。
+        #   改错的后果在**本机看不出来**（浏览器里照样能开，只是装出来像书签）。
+        "[10] PWA manifest：`display` 从 standalone 改成 minimal-ui",
+        REPO / "apps" / "web" / "src" / "app" / "manifest.ts",
+        'display: "standalone",',
+        'display: "minimal-ui",',
+    ),
+    (
+        # ★ 不变量 10-a（负向那一头）：把 512 图标从 manifest 里拿掉。
+        #   缺它时 **Chrome 不显示「安装」入口**，而页面看起来完全正常 ——
+        #   这正是"必须写进门禁"的典型：症状是"少一个按钮"，没人会为此建 bug。
+        "[10] PWA manifest：删掉 512 图标那条",
+        REPO / "apps" / "web" / "src" / "app" / "manifest.ts",
+        '      { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },\n',
+        "",
+    ),
+    (
+        # ★ 不变量 10-b：**让文件名撒谎** —— 把 `icon-192.png` 的 IHDR 宽高字节改成 512。
+        #   这是"本机没有浏览器读数 ⇒ 只能真机才发现"那一类，**只能靠读字节挡**。
+        #   ⚠️ 改完 IHDR 的 CRC 会失效，但本检查只读前 24 字节（不验 CRC），
+        #      CI 里也没有别的东西解析这张图 ⇒ 作为变异体足够，且**随后立刻还原**。
+        "[10] PWA 图标：把 icon-192.png 的 IHDR 宽高字节改成 512（文件名撒谎）",
+        REPO / "apps" / "web" / "public" / "icons" / "icon-192.png",
+        b"\x00\x00\x00\x0dIHDR\x00\x00\x00\xc0\x00\x00\x00\xc0",
+        b"\x00\x00\x00\x0dIHDR\x00\x00\x02\x00\x00\x00\x02\x00",
+    ),
+    (
+        # ★ 不变量 10-c（负向）：往 SW 的缓存白名单里塞一个**接口路径**。
+        #   后果是"悄悄缓存了不该缓存的响应"，**不报错、也扫不出来** ——
+        #   只有这条判据能挡（它就是为这个而写的）。
+        "[10] SW 白名单：往里塞一个接口路径（默认拒绝被破坏）",
+        REPO / "apps" / "web" / "public" / "sw.js",
+        'const CACHE_PREFIXES = ["/_next/static/", "/icons/"];',
+        'const CACHE_PREFIXES = ["/_next/static/", "/icons/", "/api/"];',
+    ),
+    (
+        # ★ 不变量 10-c（正向）：把静态资源前缀拿掉 —— 那 SW 就不缓存任何 JS/CSS 了，
+        #   "静态资源可用缓存"这个承诺作废（而离线页仍然能开 ⇒ **看起来一切正常**）。
+        "[10] SW 白名单：拿掉 `/_next/static/`",
+        REPO / "apps" / "web" / "public" / "sw.js",
+        'const CACHE_PREFIXES = ["/_next/static/", "/icons/"];',
+        'const CACHE_PREFIXES = ["/icons/"];',
+    ),
+    (
+        # ★ 不变量 9 的**连带**（2026-10-02 加）：`/offline.html` 忘了登记成公开路径。
+        #   它同时会被不变量 10-d 抓到（同一件事的两道闸），这里验的是 10-d 那一头。
+        #   ⚠️ 为什么这条特别值得有变异体：这个缺陷**在已登录状态下完全看不出来**
+        #      （有 cookie 就放行）⇒ 人肉测试会假绿，只有门禁能挡。
+        "[10] 未登录可达：把 `/offline.html` 从 `PUBLIC_PREFIXES` 里删掉",
+        REPO / "apps" / "web" / "src" / "middleware.ts",
+        '"/offline.html"];',
+        '"];',
+    ),
 ]
 
 
@@ -110,12 +169,22 @@ def main() -> int:
         _BAK_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, bak)
         try:
-            s = path.read_text(encoding="utf-8")
+            # ★ 支持**二进制**变异（2026-10-02 加）：`old` 是 `bytes` 时按字节替换。
+            #   为什么需要这一档：不变量 10-b 的判据是"图标的**真实像素**要和文件名一致"，
+            #   而它的变异体只能是"把一张图的 IHDR 宽高改掉" —— 那是**字节**操作，
+            #   走不了 `read_text`（PNG 不是合法 UTF-8）。
+            #   加这一档，比"这条判据没有变异体"好得多：**没有变异体的判据等于没有判据**（硬约定 J）。
+            is_bytes = isinstance(old, bytes)
+            s = path.read_bytes() if is_bytes else path.read_text(encoding="utf-8")
             if s.count(old) != 1:
                 # ★ "锚点不匹配"必须**单独计成"未应用"**，不能算"存活"（硬约定 J）
                 print(f"\n{label}\n  [未应用] 锚点匹配 {s.count(old)} 次（应为 1）")
                 continue
-            path.write_text(s.replace(old, new, 1), encoding="utf-8", newline="")
+            patched = s.replace(old, new, 1)
+            if is_bytes:
+                path.write_bytes(patched)
+            else:
+                path.write_text(patched, encoding="utf-8", newline="")
             applied += 1
             rc, out = run_check()
             fails = [ln.strip() for ln in out.splitlines() if "[FAIL]" in ln]

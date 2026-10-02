@@ -8,6 +8,12 @@
 （真缺陷：`/register` 页做出来了，登录页却按 P1 的计划**刻意没放入口**，
 而那个 TODO 的触发条件"P2 加 `/register` 时"早就成立了 —— 见坑 94。）
 
+第 10 条（2026-10-02 加）：**C 端 PWA 契约** —— manifest 必须 `standalone` + 192/512，
+图标的**真实像素**必须与文件名一致（读 PNG 的 IHDR，不信文件名），
+SW 的缓存白名单必须含静态资源、**不得含接口**，且 `sw.js` / `manifest.webmanifest` /
+`offline.html` 三个必须**未登录也取得到**（否则装不上，而登录状态下看不出来）。
+方案 = `docs/28-PWA收尾-方案.md`。
+
 为什么要有它（用户 2026-09-27）：
     不变量**不是"开工前确认一次"**，而是"**每次 push 后跑一次**" ——
     P0→P3 每推一次都可能把它们破掉。写成可执行文件才能每批收尾自动跑。
@@ -34,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -654,7 +661,6 @@ def check_answer_single_source() -> None:
 
 #: `apps/*/src/middleware.ts` 里公开路由的声明处。
 _PUBLIC_PREFIXES_RE = re.compile(r"const\s+PUBLIC_PREFIXES\s*=\s*\[(?P<body>[^\]]*)\]")
-_QUOTED_PATH_RE = re.compile(r"""["'`](/[^"'`]*)["'`]""")
 
 #: 「站内入口」的判据：**别处有人引用过这个路径字面量**（引号包着的 `/xxx`）。
 #:
@@ -728,8 +734,24 @@ def check_public_route_entrypoints() -> None:
         return
 
     missing: list[str] = []
+    skipped_static: list[str] = []
     for app, prefixes in targets:
         for prefix in prefixes:
+            # ★★ 静态文件**不是页面**，不参与这条检查（2026-10-02 加）。
+            #
+            # 为什么必须排除：PWA 把 `/sw.js`、`/manifest.webmanifest`、`/offline.html`
+            # 加进了 `PUBLIC_PREFIXES`（它们**必须**能被未登录访客取到，见 `docs/28` §1.1），
+            # 可它们的引用天然落在**本检查扫不到的地方**：
+            #   · `/manifest.webmanifest` 由 Next 从 `src/app/manifest.ts` 产出，没人"引用"它；
+            #   · `/offline.html` 被 `public/sw.js` 引用 —— 而这里只扫 `apps/*/src/**`；
+            #   · `/sw.js` 恰好被 `sw-register.tsx` 的 `register("/sw.js")` 引用，所以它"过"了。
+            # ⇒ 不排除就会**假红**，而假红的下场是被人加豁免或干脆删掉这条检查（硬约定 J）。
+            #
+            # 判据：**带扩展名 = 静态文件**（App Router 的页面路径一律不含 `.`）。
+            # 所以这条排除**不会**放过"新加了页面却忘了加入口"——页面路径没有点。
+            if "." in prefix:
+                skipped_static.append(f"{app} {prefix}")
+                continue
             # 引用必须来自**别的目录**：`src/app/register/page.tsx` 里引用自己不算入口
             own_dir = f"apps/{app}/src/app{prefix}"
             hit = {
@@ -752,12 +774,178 @@ def check_public_route_entrypoints() -> None:
         )
         return
 
-    total = sum(len(p) for _, p in targets)
-    ok(f"扫 {scanned} 个前端文件 —— {total} 个公开路由都有人在别处引用")
+    total = sum(len(p) for _, p in targets) - len(skipped_static)
+    note = f"（另跳过 {len(skipped_static)} 个静态文件：{' / '.join(skipped_static)}）" if skipped_static else ""
+    ok(f"扫 {scanned} 个前端文件 —— {total} 个公开**页面**都有人在别处引用{note}")
+
+
+# ------------------------------------------------------------------ 10
+
+#: C 端 PWA 契约（2026-10-02 加，`docs/28`）。
+#:
+#: ★ 这一组**只做静态断言**（读文件字节），**不依赖浏览器** —— 所以它能在 CI、在任何
+#:   干净环境跑（硬约定 H）。浏览器那一层（真的能装、断网真的不白屏）由
+#:   `tools/local-verify/probe-pwa-offline.py` 负责，两者**不能互相代替**：
+#:     · 这组管"**产物对不对**"（尺寸、字段、白名单、可达性）；
+#:     · 探针管"**行为对不对**"（注册成功、断网渲染出离线页）。
+#:   而它们各自都会漏：只跑门禁 ⇒ "文件都在，就是装不上"；只跑探针 ⇒
+#:   探针在 dev 下能过，线上却因为**没加 PUBLIC_PREFIXES** 而失败。
+#:
+#: ★ 为什么值得写成门禁（每条都对应一个"**只有真机/线上才发现**"的失败模式）：
+#:   a) 缺 `display: standalone` ⇒ 装到桌面仍带地址栏（看起来"像网页书签"）；
+#:   b) 图标尺寸与文件名不符 ⇒ 启动图/桌面图标糊掉或直接被拒（**本机没浏览器读数**）；
+#:   c) 白名单里混进接口路径 ⇒ 悄悄缓存了不该缓存的响应（**不报错**）；
+#:   d) 三个静态文件没进 `PUBLIC_PREFIXES` ⇒ 未登录访客拿不到它们
+#:      （**登录状态下完全看不出来** ⇒ 最容易在"我自测是好的"里漏掉）。
+_PWA_APP = "apps/web"
+#: 文件名 -> 期望边长。**文件名是可以撒谎的**，所以下面要读 IHDR 核对。
+_PWA_ICONS: dict[str, int] = {
+    "icon-192.png": 192,
+    "icon-512.png": 512,
+    "maskable-512.png": 512,
+    "apple-touch-icon.png": 180,
+}
+#: 这三个**必须**能被未登录访客取到（判据见 C 端 `middleware.ts` 顶部的注释）。
+_PWA_MUST_BE_PUBLIC = ["/sw.js", "/manifest.webmanifest", "/offline.html"]
+
+
+def _png_size(path: Path) -> tuple[int, int] | None:
+    """读 PNG 的 **IHDR** 拿真实宽高（第 16~24 字节）。读不出返回 `None`。
+
+    ⚠️ 为什么不看文件名、也不看 `<img>` 上的 `width`：**它们在撒谎时不会报错**。
+       "icon-192.png 里放一张 512 的图"在浏览器里表现为"图标有点糊"或者
+       "启动画面被裁"，且**本机没有浏览器可以读数** ⇒ 只信字节。
+    """
+    try:
+        with path.open("rb") as f:
+            head = f.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    w, h = struct.unpack(">II", head[16:24])
+    return int(w), int(h)
+
+
+def check_pwa_contract() -> None:
+    print("[10] C 端 PWA 契约（manifest / 图标真尺寸 / SW 白名单 / 静态文件未登录可达）—— 不变量 10")
+
+    # ---- a) manifest：standalone + 192/512(any) + maskable ----
+    mrel = f"{_PWA_APP}/src/app/manifest.ts"
+    if not (REPO / mrel).is_file():
+        bad(f"缺 `{mrel}` —— 没有 manifest ⇒ `display: standalone` 没有来源，装不到桌面")
+    else:
+        # ★★ **必须先剥注释**（2026-10-02 实测踩到）：第一版直接搜原文，
+        #    而 `manifest.ts` 的注释里就写着 `display: "standalone"` 这句判据说明
+        #    ⇒ 把 `display` 改成别的值之后，检查**依然是绿的**（假绿）。
+        #    变异套件当场抓到它（"存活 2 条"）—— 这说明**注释能满足任何字符串判据**。
+        #    ⇒ 判据：凡"某字段值必须是什么"的检查，**先剥注释再搜**。
+        src = _strip_js_comments((REPO / mrel).read_text(encoding="utf-8"))
+
+        # 按**条目**断言，而不是"文件里出现过这个字符串"：
+        # `sizes` 与 `purpose` 在每条 icon 里各出现一次（prettier 也保持这个顺序），
+        # 所以按出现顺序配对即可。这样"删掉 `any` 的 512、只留 maskable 的"能被抓到 ——
+        # 而字符串级判断会以为"512 还在"（maskable 那条也是 512×512）。
+        sizes = re.findall(r'sizes:\s*"(\d+x\d+)"', src)
+        purposes = re.findall(r'purpose:\s*"([a-z]+)"', src)
+        problems: list[str] = []
+        if len(sizes) != len(purposes):
+            # 数不齐 ⇒ 本检查会静默变成假绿，直接失败（"查不了"不能当"通过"）
+            problems.append(f"icons 里 `sizes` {len(sizes)} 条、`purpose` {len(purposes)} 条，数不齐")
+        else:
+            pairs = sorted(set(zip(sizes, purposes)))
+            if ('192x192', 'any') not in pairs:
+                problems.append('缺 192×192 的 `purpose: "any"`')
+            if ('512x512', 'any') not in pairs:
+                problems.append('缺 512×512 的 `purpose: "any"`（**缺它时 Chrome 不显示「安装」**）')
+            if not any(p == 'maskable' for _, p in pairs):
+                problems.append('缺 `purpose: "maskable"`（边缘会被 Android 裁掉）')
+        if '"standalone"' not in src:
+            problems.append('没有 `display: "standalone"`（判据「打开后无地址栏」靠它）')
+
+        if problems:
+            bad(f"`{mrel}`：" + "；".join(problems))
+        else:
+            ok(f"`{mrel}` —— standalone + 192/512(any) + maskable 都在：{sorted(set(zip(sizes, purposes)))}")
+
+    # ---- b) 图标真尺寸（读字节）----
+    missing_icons = [n for n in _PWA_ICONS if not (REPO / _PWA_APP / "public/icons" / n).is_file()]
+    wrong: list[str] = []
+    for name, want in _PWA_ICONS.items():
+        if name in missing_icons:
+            continue
+        got = _png_size(REPO / _PWA_APP / "public/icons" / name)
+        if got != (want, want):
+            wrong.append(f"{name} 实际 {got}（期望 {want}×{want}）")
+    if missing_icons:
+        bad(
+            f"缺图标 {' / '.join(missing_icons)} —— 跑 `tools/local-verify/gen-pwa-icons.py` 生成"
+            "（PNG 与脚本一起提交，换 logo 时可重跑）"
+        )
+    elif wrong:
+        bad("图标**尺寸与文件名不符**：" + "；".join(wrong))
+    else:
+        ok(f"{len(_PWA_ICONS)} 张图标尺寸与文件名一致（按 PNG 的 IHDR 实读，不信文件名）")
+
+    # ---- c) SW 白名单：含静态资源、不含接口 ----
+    srel = f"{_PWA_APP}/public/sw.js"
+    if not (REPO / srel).is_file():
+        bad(f"缺 `{srel}` —— 没有 SW 就没有缓存与离线兜底")
+    else:
+        # ★ 同样**先剥注释**：`sw.js` 的注释里就整段解释着这个白名单
+        #   （包括 `/_next/static/` 这几个字）—— 不剥注释，改坏了也会被注释救回来。
+        ssrc = _strip_js_comments((REPO / srel).read_text(encoding="utf-8"))
+        m = re.search(r"const\s+CACHE_PREFIXES\s*=\s*\[(?P<body>[^\]]*)\]", ssrc)
+        if m is None:
+            bad(f"`{srel}` 里读不到 `CACHE_PREFIXES` —— 本检查会静默变成假绿，故直接失败")
+        else:
+            entries = _QUOTED_PATH_RE.findall(m.group("body"))
+            api = [e for e in entries if "api" in e.lower()]
+            if not entries:
+                bad(f"`{srel}::CACHE_PREFIXES` 是空的 —— SW 连它承诺的静态资源都不会缓存")
+            elif api:
+                bad(
+                    f"`{srel}::CACHE_PREFIXES` 里有接口路径 {api} —— "
+                    "**接口响应一律不进缓存**（它与『离线答题』是两件事，属 BL-21）"
+                )
+            elif "/_next/static/" not in entries:
+                # ⚠️ 比较串**必须带前导斜杠**：`_QUOTED_PATH_RE` 只匹配以 `/` 开头的字面量，
+                #    所以 `entries` 里存的是 `"/_next/static/"`。
+                #    第一版写成 `"_next/static/"`（少一个斜杠）⇒ **判据恒红**
+                #    （2026-10-02 实测：同一批里"应该红"的场景先红了这条，才发现是比错了）。
+                bad(f"`{srel}::CACHE_PREFIXES` 里没有 `/_next/static/` —— JS/CSS/字体不会被缓存")
+            else:
+                ok(f"`{srel}` 白名单 = {entries}（有静态资源、**不含接口**）")
+
+    # ---- d) 三个静态文件必须**未登录**也能访问 ----
+    rel_mw = f"{_PWA_APP}/src/middleware.ts"
+    mw = REPO / rel_mw
+    prefixes: list[str] | None = None
+    if mw.is_file():
+        # ★ 同上：先剥注释（`middleware.ts` 顶上那段注解里就列着这三个路径）
+        mm = _PUBLIC_PREFIXES_RE.search(_strip_js_comments(mw.read_text(encoding="utf-8")))
+        prefixes = None if mm is None else _QUOTED_PATH_RE.findall(mm.group("body"))
+
+    # ★ 这里刻意**不用**"改成"的措辞：它验的是"两个文件里同一个东西一致"，
+    #   而按坑 97 的判据，我们只声明**它必须在这里**（唯一真相来源 = middleware），
+    #   不声明"和别处保持一致"。
+    if prefixes is None:
+        bad(f"`{rel_mw}` 里读不到 `PUBLIC_PREFIXES` —— 无法验证『未登录可达』，故直接失败")
+    else:
+        miss = [p for p in _PWA_MUST_BE_PUBLIC if p not in prefixes]
+        if miss:
+            bad(
+                f"`PUBLIC_PREFIXES` 里缺 {miss} —— 未登录访客访问它们会被 302 到 `/login`："
+                "SW 拿到 HTML ⇒ **注册失败**；manifest 取不到 ⇒ **装不上**；"
+                "离线页被抓成**登录页** ⇒ 断网看到登录表单。"
+                "★ 这条**在已登录状态下完全看不出来**（有 cookie 就放行）"
+            )
+        else:
+            ok(f"`PUBLIC_PREFIXES` 含 {_PWA_MUST_BE_PUBLIC}（未登录也能取到）")
 
 
 def main() -> int:
-    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9；每批收尾跑一次）===")
+    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10；每批收尾跑一次）===")
     check_gates()
     check_coverage_ratchet()
     check_ephemeral_db()
@@ -767,6 +955,7 @@ def main() -> int:
     check_write_paths_commit()
     check_answer_single_source()
     check_public_route_entrypoints()
+    check_pwa_contract()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()

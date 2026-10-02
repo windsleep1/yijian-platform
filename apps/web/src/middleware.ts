@@ -16,8 +16,20 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const HINT_COOKIE = process.env.NEXT_PUBLIC_AUTH_HINT_COOKIE || "yj_web_authed";
 
-/** 公开路由（不需要登录就能看）。**新加公开页必须同步加到这里**，否则会被挡在 `/login`。 */
-const PUBLIC_PREFIXES = ["/login", "/register"];
+/**
+ * 公开路由（不需要登录就能看）。**新加公开页必须同步加到这里**，否则会被挡在 `/login`。
+ *
+ * ⚠️ 这里**不只是页面** —— PWA 的三个静态文件也必须进来（2026-10-02 加）：
+ * 本文件的 `matcher` 只排除了 `_next/*`、`favicon.ico` 与图片后缀，
+ * **没有排除 `.js` / `.html` / `.webmanifest`** ⇒ 下面这三条若不公开，
+ * 未登录访客访问它们会被 302 到 `/login`，各自后果是：
+ *   · `/sw.js`                → Service Worker 拿到的是 HTML ⇒ **注册失败**，装不上；
+ *   · `/manifest.webmanifest` → 浏览器取不到 manifest ⇒ **装不上**；
+ *   · `/offline.html`         → 离线页被抓成**登录页** ⇒ 断网打开看到登录表单。
+ * ★ 这三个坑**在已登录状态下全都不可见**（有 cookie 就直接放行）——
+ *   也就是说"我自己测是好的"证明不了它们好；`check-invariants.py` 不变量 10-d 专门钉这件事。
+ */
+const PUBLIC_PREFIXES = ["/login", "/register", "/sw.js", "/manifest.webmanifest", "/offline.html"];
 
 export function middleware(req: NextRequest) {
   const { pathname, search } = req.nextUrl;

@@ -437,7 +437,14 @@ async def drive_p2a(args: argparse.Namespace) -> dict[str, object]:
         tabs_visited: list[str] = ["/"]
         await b.click_text("练习", tag="a")
         await b.wait_for("location.pathname === '/practice'", timeout=30, label="切到 /practice")
-        await b.wait_text("这一屏还没做", timeout=20)
+        # ★ 2026-10-02 修：这里原先是 `wait_text("这一屏还没做")` ——
+        #   那是 **P2a 期**练习页的**占位文案**（`docs/24` 的"范围冻结"里还记着它），
+        #   而 P2b 把练习页**真做出来了** ⇒ 占位文案消失 ⇒ **这条走查从此必红**，
+        #   而且一直没人发现：它只在 `--e2e-web` 时跑，**不在默认管道里**。
+        #   ⇒ 换成页面自带的、**无条件渲染**的副标题：验的还是同一件事
+        #     （"切过来了、这一屏真的渲染了"，不是空白页），但不依赖某个批次的实现进度。
+        #   ⚠️ 别改回"只在某批次存在的文案" —— 那种期望会随页面演进而**静默腐烂**。
+        await b.wait_text("选一门科目，再选章节，开始刷题", timeout=20)
         tabs_visited.append("/practice")
 
         await drill_to_me(b)
