@@ -12,6 +12,8 @@
 - **C 端（学员）**：<https://yijian-platform-tau.vercel.app/>（**可直接注册体验**）
 - **B 端（管理）**：演示账号见 `docs/27-部署指南.md` §1.6，或**现场演示**
 
+![C 端作答：判分结论 + 正确答案 + 解析](apps/web/docs/screenshots/c-answer-graded.png)
+
 > ⚠️ **Vercel 国内访问不稳定**，如打不开请尝试**代理**。
 >
 > ⚠️ 免费档会**冷启动**：Render 上的后端 15 分钟无流量会挂起，下一次请求要 **50 秒**左右才有响应。
@@ -27,6 +29,45 @@
 ## 🎬 演示视频
 
 完整演示（注册 → 答题 → 交卷 → 错题本）可按需提供。
+
+---
+
+## 🏗 系统架构
+
+```mermaid
+flowchart TB
+    subgraph client["浏览器 / 手机"]
+        A["C 端 · 学员<br/>H5 + PWA（可安装 · 离线兜底）"]
+        B["B 端 · 管理后台"]
+    end
+
+    subgraph fe["Vercel"]
+        W["apps/web<br/>Next.js 14 App Router"]
+        D["apps/admin<br/>Next.js 14 App Router"]
+    end
+
+    subgraph be["Render · 容器"]
+        API["apps/api<br/>FastAPI · 67 接口 / 13 模块<br/>42 项不变量门禁 · 437 用例"]
+        CORE["packages/api-core<br/>认证链路**唯一**实现"]
+    end
+
+    subgraph data["托管数据层"]
+        PG[("Neon · PostgreSQL 16<br/>64 表 · 3 视图 · 102 索引")]
+        RD[("Upstash · Redis<br/>登录 / 注册必需")]
+    end
+
+    A --> W
+    B --> D
+    W -->|"直连 /api/v1<br/>（不设 rewrite 代理，为的是看得见真实的 CORS / 401 / trace_id）"| API
+    D --> API
+    API --> CORE
+    CORE --> PG
+    API --> RD
+```
+
+> ★ **认证链路只有一处实现**（`packages/api-core`）—— 两端共用同一份，避免"C 端能过、B 端不能过"这类只在一边出现的安全缺陷。
+> ★ 后端**不设 rewrite 代理**、前端直连：这样 CORS / 401 / `trace_id` 的行为在本地与生产一致（生产由平台同域转发）。
+> ★ 数据库是**两套来源**：业务表在 `db/schema.sql`（**表结构唯一真相**），变更只能走 `db/migrations/`。
 
 ---
 
@@ -266,12 +307,12 @@ ADMIN_INIT_PHONE=13800000000 ADMIN_INIT_PASSWORD=Admin@123456 pytest tests -v
 # 发验证码（SMS_PROVIDER=mock，非生产环境会在响应里回显 dev_code，方便离线联调）
 curl -s -X POST http://localhost:8000/api/v1/auth/sms/send \
   -H 'Content-Type: application/json' \
-  -d '{"phone":"13800000001","scene":"register"}'
+  -d '{"phone":"13900001234","scene":"register"}'   # 手机号随便填（本地 mock 会回显 dev_code）
 
 # 用上一步拿到的 dev_code 注册，直接返回令牌对 + 用户信息
 curl -s -X POST http://localhost:8000/api/v1/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"phone":"13800000001","code":"<dev_code>","password":"Passw0rd123"}'
+  -d '{"phone":"13900001234","code":"<dev_code>","password":"Passw0rd123"}'
 ```
 
 > 这段演示的是 **Batch 2 当时的 10 个接口**（`/health` + `/auth` 7 个 + `/admin/users` 2 个）——
@@ -287,10 +328,14 @@ curl -s -X POST http://localhost:8000/api/v1/auth/register \
 ```bash
 BASE=http://localhost:8123/api/v1
 
-# 1) 拿超管 token（超管由 python -m app.cli seed-admin 创建）
+# 1) 拿超管 token（超管由 `python -m app.cli seed-admin` 创建）
+#    ⚠️ 手机号 / 密码 = 你 `deploy/.env` 里的 `ADMIN_INIT_PHONE` / `ADMIN_INIT_PASSWORD`。
+#       模板里密码是 `CHANGE_ME_admin_password`（**要求自己设，不再放真密码**）
+#       ⇒ 先把它们 export 出来再跑这一段；没设过就用模板值建的超管，登录必然失败。
+: "${ADMIN_INIT_PASSWORD:?先把 deploy/.env 里的 ADMIN_INIT_PASSWORD export 出来}"
 TOKEN=$(curl -s -X POST $BASE/auth/login/password \
   -H 'Content-Type: application/json' \
-  -d '{"phone":"13800000000","password":"Admin@123456"}' \
+  -d "{\"phone\":\"${ADMIN_INIT_PHONE:-13800000000}\",\"password\":\"$ADMIN_INIT_PASSWORD\"}" \
   | python -c 'import sys,json;print(json.load(sys.stdin)["data"]["access_token"])')
 
 # 2) 看一眼科目树，挑一个 subject_id（本地种子数据是 1001 这类小数字）
