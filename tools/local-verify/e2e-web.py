@@ -118,6 +118,26 @@ def say(msg: str) -> None:
     print(f"[e2e] {msg}", flush=True)
 
 
+async def shot(browser: "cdp_browser.Browser", args: argparse.Namespace, name: str) -> None:
+    """在**既有断言之后**截一张图（`--shots` 没给就什么都不做）。
+
+    ★★ 为什么插在断言之后、而不是另走一遍"截图专用"的流程：
+      **每一张图都必须先跑过断言** —— 否则图里的东西只是"看起来对"，
+      没人证明它真的对（`docs/26` §1 A.1 判据 1 要的就是"图里的数字是真的"）。
+      顺带：这让截图**可回归** —— 走查一红，就说明"图里那一幕"也不再可信。
+
+    视口 = `VIEW_W × VIEW_H`（375×667；`Browser(mobile=True)` ⇒ DPR=2），
+    与 A.1 判据 5（"移动端走查用 375×667"）一致。
+    """
+    if not getattr(args, "shots", ""):
+        return
+    out = Path(args.shots)
+    out.mkdir(parents=True, exist_ok=True)
+    await browser.screenshot(str(out / f"{name}.png"))
+    say(f"   📸 {name}.png")
+
+
+
 class Failure(RuntimeError):
     """走查断言失败。**单独一个类型**，便于和"环境没起来"区分（后者是 RuntimeError）。"""
 
@@ -397,6 +417,7 @@ async def drive_p2a(args: argparse.Namespace) -> dict[str, object]:
             need(isinstance(loc, str) and "next=" in loc, f"{path} 的跳转没带 next：{loc}")
             seen.append(loc)
         report["tabs_guard"] = seen
+        await shot(b, args, "c-login")  # C1 登录页
 
         # ---------------- ② 注册闭环 ----------------
         say("② 注册：手机号 → 验证码 → 设置密码")
@@ -434,6 +455,7 @@ async def drive_p2a(args: argparse.Namespace) -> dict[str, object]:
             timeout=40,
             label="首页显示刚注册的手机号",
         )
+        await shot(b, args, "c-home")  # C2 首页（倒计时 + 三个 Tab）
         tabs_visited: list[str] = ["/"]
         await b.click_text("练习", tag="a")
         await b.wait_for("location.pathname === '/practice'", timeout=30, label="切到 /practice")
@@ -449,6 +471,7 @@ async def drive_p2a(args: argparse.Namespace) -> dict[str, object]:
 
         await drill_to_me(b)
         tabs_visited.append("/me")
+        await shot(b, args, "c-me")  # C8 我的（昵称 + 设置项）
 
         await b.click_text("首页", tag="a")
         await b.wait_for("location.pathname === '/'", timeout=30, label="切回 /")
@@ -466,6 +489,7 @@ async def drive_p2a(args: argparse.Namespace) -> dict[str, object]:
             timeout=40,
             label="专业列表加载完成",
         )
+        await shot(b, args, "c-onboarding")  # C9 引导页（分步进度）
         picked = await b.eval(
             "(document.querySelectorAll('main ul button')[0] || {}).innerText || ''"
         )
@@ -811,6 +835,8 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
             #   把页面文本一起报出来，"请求失败"与"确实没题"一眼可分。
             txt = await b.eval("document.body.innerText")
             raise Failure(f"章节列表没出来（{e}）。此刻页面文本：\n{txt}") from None
+        # ★ C3：**章节带题数** —— 截在"章节列表已加载、还没点进去"这一刻。
+        await shot(b, args, "c-practice-chapters")
         first_chapter = await b.eval(_PRACTICE_FIRST_CHAPTER_JS)
         if not report.get("chapter_picked"):
             report["chapter_picked"] = " ".join(str(first_chapter).split())
@@ -864,6 +890,8 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
         stem_a = await b.eval(_PRACTICE_STEM_JS)
         need(isinstance(stem_a, str) and stem_a.strip() != "", "读不到题干")
         report["session_a"] = url_a
+        # ★ C4：第 1 题（题干 + 选项 + 「已答 0/N」+ 「← 上一题」灰掉）
+        await shot(b, args, "c-answer-q1")
 
         # ---------------- ② 建 B：必须抽到**同一道题** ----------------
         say("② 再建一次（B）：此刻两边都还没答过 ⇒ 应抽到同一道题")
@@ -908,6 +936,7 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
         need(isinstance(right, str) and right.strip() != "", "结果面板里没有「正确答案」")
         report["first_verdict"] = verdict
         report["revealed_answer"] = right.strip()
+        await shot(b, args, "c-answer-graded")  # C5 判分：结论 + 正确答案 + 解析
 
         # ---------------- ④ 刷新 A：进度还在，且下一题不给答案 ----------------
         say("④ 刷新 A：进度还在（同一条 session），且**下一题不给答案**")
@@ -1043,6 +1072,12 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
                         break
                     await asyncio.sleep(0.02)
                 mid["x"] = v
+                # ★ C7：**唯一要"抓时机"的一张** —— 只有手势中途才有 translateX 位移；
+                #   手势一结束 transform 就被重置 ⇒ 事后再截，"弹回"与"没触发"长得一样（坑 81）。
+                #   只在**第一次真读到位移**时截（后面几次滑动会覆盖同一个文件）。
+                if isinstance(v, int) and v != 0 and not mid.get("shot"):
+                    mid["shot"] = True
+                    await shot(b, args, "c-swipe-mid")
 
             await b.swipe("main [data-swipe-card] h1", dx=dx, dy=dy, on_mid=_on_mid)
             got = mid["x"]
@@ -1145,6 +1180,7 @@ async def drive_p2b1(args: argparse.Namespace) -> dict[str, object]:
             f"展开后有边进视口 ⇒ 从底部滑出｜transform = {box1['transform']!r}"
         )
 
+        await shot(b, args, "c-sheet")  # C6 答题卡：5 列网格 + 四态图例
         # ---- 网格：5 列 / 行数自适应 ----
         grid = await b.eval(_SHEET_GRID_JS)
         need(isinstance(grid, dict), f"读不到网格：{grid!r}")
@@ -1425,6 +1461,7 @@ async def drive_p2c1(args: argparse.Namespace) -> dict[str, object]:
             f"｜已答 {r1['answered']}｜知识点 {r1['kp_rows']} 条｜无「没交卷」横幅"
         )
         say(f"    {report['report_filled']}")
+        await shot(b, args, "c-report")  # 成绩报告（总分 / 正确率 / 用时 / 知识点）
 
         # ---------------- ⑤ 空卷：正确率必须显示「—」 ----------------
         say("⑤ ★★ 点「再练一遍」建一份**空**练习 → 直接交卷 ⇒ 正确率必须显示「—」")
@@ -1601,6 +1638,7 @@ async def drive_p2c2(args: argparse.Namespace) -> dict[str, object]:
             + "）"
         )
         say(f"    {report['wrong_list']}")
+        await shot(b, args, "c-wrong-book")  # 错题本（列表 + 科目 chip）
 
         # ---------------- ③ 按科目筛选：chip 的数字必须与列表条数一致 ----------------
         say("③ ★ 逐个点科目 chip ⇒ 筛出来的条数必须**等于 chip 上写的那个数**")
@@ -1720,6 +1758,11 @@ def main(argv: list[str] | None = None) -> int:
         help="用 next dev 而不是「构建 + next start」（★ 本机必加：build 被宿主的删除保护拦，见抬头）",
     )
     ap.add_argument("--keep-web", action="store_true", help="跑完不关 next start")
+    ap.add_argument(
+        "--shots",
+        default="",
+        help="把走查途中几个关键画面截到该目录（**每张图都跑过断言**；见 shot()）",
+    )
     ap.add_argument("--boot-timeout", type=int, default=60)
     ap.add_argument("--hydrate-timeout", type=float, default=120.0)
     ap.add_argument("--submit-timeout", type=float, default=40.0)

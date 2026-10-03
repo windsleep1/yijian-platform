@@ -188,7 +188,9 @@ export default function PracticeReportPage() {
       {/* 知识点分布 */}
       <section className="mt-6">
         <h2 className="text-sm font-medium">知识点分布</h2>
-        <p className="mt-1 text-xs text-sub">按正确率**从低到高** —— 最上面的是这次最该补的。</p>
+        <p className="mt-1 text-xs text-sub">
+          按正确率<strong>从低到高</strong> —— 最上面的是这次最该补的。
+        </p>
         {rep.by_kp.length === 0 ? (
           <p
             data-report-kp="empty"

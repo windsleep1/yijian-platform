@@ -60,13 +60,16 @@ npm run dev                                       # 打开 http://localhost:3000
 | **Batch 6** | **导入向导**：前端 4 页（批次列表 / 三步向导 / 批次详情 / 错误报告 CSV）+ 批次变更日志接口 | ✅ 已交付 |
 | **Batch 7** | **组卷引擎**：组卷规则 CRUD + 自动组卷 / 卷面校验 / 发布（版本锁定）+ 试卷管理前端（列表 / 详情 / 新建 / 规则管理 / 实时试算 / 下线） | ✅ 已交付 |
 | **Batch 7+** | **状态机补齐**：试卷下线 + 账号停用/启用 + 删 `exams.archived` + **数据范围收口**（题目八条入口） | ✅ 已交付 |
+| **整改批** | 状态机审计 / 审计链立项 / 数据范围收口 / **门禁整顿** / 覆盖率与导入缺口诊断 / **统计看板**（`docs/14`~`docs/20`） | ✅ 已交付 |
+| **C 端** | **P0 / P1 / P2a / P2b-1 / P2b-2 / P2c-1 / P2c-2** + **PWA 收尾**（manifest / SW / 离线兜底） | ✅ 已交付 |
 
 > **交付序号与最初规划不同。** 原「Batch 5」把导入流水线、组卷引擎、记忆曲线、小程序端、
 > 支付、数据看板、压测打包在一批里；实际按依赖顺序拆成了
 > **Batch 5（导入管道）→ Batch 6（导入向导）→ Batch 7（组卷引擎）**。
-> 记忆曲线、小程序端、支付仍未启动；**数据看板已有方案（`docs/20`），待开工**。
+> 记忆曲线、小程序端、支付仍未启动；**统计看板已落地**（`docs/20` 的方案 + 后端
+> `admin_stats` 5 个接口 + 管理端 `/dashboard` 页）。
 >
-> 当前后端共 **50 个接口**，pytest 全量 **252 passed, 1 skipped**。
+> 当前后端共 **67 个接口**，pytest 全量 **437 passed, 1 skipped**。
 
 **每一批都可以独立执行、独立验收。** Batch 2 起，后端本身就是可运行服务：
 `cd deploy && cp .env.example .env && docker compose up -d --build` → `http://localhost:8000/docs` 即可点开 Swagger 联调。
@@ -85,7 +88,8 @@ Batch 7 之后转为**整改批**（不带新功能，专治已有账）：
 - 门禁整顿：`docs/17-门禁整顿.md`（假门禁 / ruff / CI / 覆盖率 / 全仓格式化）
 - 覆盖率缺口诊断：`docs/18-覆盖率缺口诊断.md`（补测批 ⑤a–⑤d 逐批结果 + 棘轮 + CI 事故归因）
 - 导入服务缺口诊断：`docs/19-import-service缺口诊断.md`（⑤c 全批）
-- 统计看板方案：`docs/20-统计看板-方案.md`（聚合 / 缓存 / 图表 / 多维筛选 —— **待确认**）
+- 统计看板：`docs/20-统计看板-方案.md`（聚合 / 缓存 / 图表 / 多维筛选 —— **已落地**：
+  `admin_stats` 5 个接口 + 管理端 `/dashboard`）
 
 ### 界面速览（管理后台 · Batch 3 – 6）
 
@@ -98,6 +102,22 @@ Batch 7 之后转为**整改批**（不带新功能，专治已有账）：
 | ![版本历史抽屉](apps/admin/docs/screenshots/batch4/13-version-history-drawer.png) | ![导入预览](apps/admin/docs/screenshots/batch6/04-preview.png) |
 | **回滚二次确认（复述"软删除 N 道" + 手输批次号）** | **更多截图** |
 | ![回滚确认](apps/admin/docs/screenshots/batch6/17-rollback-confirm.png) | Batch 4 共 13 张 / Batch 6 共 18 张，见 `apps/admin/docs/screenshots/` |
+
+### 界面速览（**C 端** · 学员侧 · P0 – P2c）
+
+| 首页（引导入口卡 + 资料摘要） | 练习：选科目 → 选章节（**题数实时算**） |
+|:---:|:---:|
+| ![C 端首页](apps/web/docs/screenshots/c-home.png) | ![选章节](apps/web/docs/screenshots/c-practice-chapters.png) |
+| **答题：判分结论 + 正确答案 + 解析** | **答题卡：5 列网格 + 四态** |
+| ![判分](apps/web/docs/screenshots/c-answer-graded.png) | ![答题卡](apps/web/docs/screenshots/c-sheet.png) |
+| **成绩报告（总分 / 正确率 / 用时 / 知识点）** | **错题本（条数 = 科目 chip 上的数）** |
+| ![成绩报告](apps/web/docs/screenshots/c-report.png) | ![错题本](apps/web/docs/screenshots/c-wrong-book.png) |
+
+> **11 张全在** `apps/web/docs/screenshots/`（另有登录 / 引导 / 我的 / **滑动切题中途**）。
+> ★ 它们**不是手工截的**：由 `tools/local-verify/e2e-web.py --shots` 在**走查的断言之间**抓
+> ⇒ **每张图里的数字都是跑过断言的**（清单 = `docs/26` §1 A.2）。视口 375×667（DPR=2）。
+> ⚠️ 首页的**聚合**（今日进度 / 考试倒计时 / 掌握度环）**仍属后续批次** ——
+> 现在那一屏是"引导入口卡 + 资料摘要"（见 `apps/web/src/app/(tabs)/page.tsx` 抬头）。
 
 ---
 
@@ -128,25 +148,35 @@ yijian-platform/
 │   ├─ 17-门禁整顿.md                  # 假门禁 / 覆盖率门槛 / 全仓格式化（本批验收）
 │   ├─ 18-覆盖率缺口诊断.md            # 补测批 ⑤a–⑤d + 棘轮 + CI 事故归因（2026-09-23）
 │   ├─ 19-import-service缺口诊断.md   # ⑤c 全批（2026-09-23）
-│   ├─ 20-统计看板-方案.md             # 聚合 / 缓存 / 图表 / 多维筛选（**待确认**）
+│   ├─ 20-统计看板-方案.md             # 聚合 / 缓存 / 图表 / 多维筛选（**已落地**）
+│   ├─ 21-待办清单.md                  # BL 清单（每条：编号 + 触发条件 + 检查点）
+│   ├─ 22-C端-方案.md                  # C 端全量方案（IA / 页面 / 数据流）
+│   ├─ 23-文档与现实对照清单.md        # 文档里的「声称」逐条对账（每批收尾扫）
+│   ├─ 24-C端首批-范围冻结.md          # C 端首批边界（含门禁口径 13 类 / 18 道）
+│   ├─ 25-宿主删除保护.md              # 会被拦的删除一律 rename 到 .trash/
+│   ├─ 26-作品集收尾清单.md            # 截图 / README / 视频 / 部署 + 执行清单
+│   ├─ 27-部署指南.md                  # Neon + Render + Vercel 从零到访问成功
+│   ├─ 28-PWA收尾-方案.md              # manifest / SW / 离线兜底（已实现）
 │   └─ samples/                        # 验收用样例文件（错误报告 / 走查 CSV）
 ├─ apps/
 │   ├─ api/                           # FastAPI 后端（Batch 2 起，逐批扩充）
 │   │   ├─ Dockerfile                 # python:3.12-slim，非 root 运行
 │   │   ├─ docker-entrypoint.sh       # 等依赖 → 建表 → 建超管 → 启动
 │   │   ├─ requirements.txt
-│   │   ├─ tests/                     # pytest（126 passed, 1 skipped）：smoke + v3 + v4 + v5 + v7 + idgen
+│   │   ├─ tests/                     # pytest（437 passed, 1 skipped）：25 个测试模块（smoke / admin v3~v7 / 题库 / 导入 /
+│   │                                 #   组卷 / C 端 / 部署契约 / 演示账号 …）
 │   │   └─ app/
 │   │       ├─ main.py                # 应用入口（中间件 / 异常处理 / 路由挂载）
-│   │       ├─ cli.py                 # wait-db / wait-redis / init-db / seed-admin / seed-questions
+│   │       ├─ cli.py                 # wait-db / wait-redis / init-db / seed-rbac / seed-admin / seed-demo / seed-questions
 │   │       ├─ core/                  # 配置、安全、依赖、异常、统一响应、雪花 ID、数据范围
 │   │       ├─ db/                    # 引擎与会话、Redis 单例、ORM 模型（仅认证/RBAC/审计 8 表）
 │   │       ├─ schemas/               # 入参/出参模型（BigIntStr 统一 ID 序列化）
 │   │       ├─ services/              # 业务逻辑（auth / rbac / sms / user / audit / question / import / exam）
-│   │       └─ api/v1/                # health / auth / admin_users / admin_rbac / admin_audit
-│   │                                 #   / admin_chapters / admin_questions / admin_imports
-│   │                                 #   / admin_exams（共 50 个接口）
-│   └─ admin/                         # 管理后台（Next.js 14，Batch 3–7）
+│   │       └─ api/v1/                # health / auth / users / practice / subjects
+│   │                                 #   / admin_users / admin_rbac / admin_audit / admin_chapters
+│   │                                 #   / admin_questions / admin_imports / admin_exams / admin_stats
+│   │                                 #   （13 个模块，共 67 个接口）
+│   ├─ admin/                         # 管理后台（Next.js 14，Batch 3–7）
 │       ├─ .eslintrc.cjs              # ESLint 配置：@typescript-eslint 基础集 + react-hooks
 │       │                             #   （规则暂全为 warn，第二步提为 error）
 │       ├─ src/app/(console)/         # questions（列表/new/[id]）/ imports（列表/new/[id]）
@@ -157,15 +187,21 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 56 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 99 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
 │           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）
 │           ├─ screenshots/batch7-pass2b/        # /paper-rules + /exams/new 实时试算（13 张）
 │           └─ screenshots/batch7-state-machine/ # 试卷下线 + 账号停用（4 张）
-├─ .github/workflows/ci.yml           # CI 门禁：tsc --noEmit + pytest + ruff check
+│   └─ web/                           # **C 端**（Next.js 14，移动端优先 + PWA）
+│       ├─ public/                    #   sw.js（只缓存静态资源）/ offline.html / icons/
+│       ├─ src/app/                   #   首页 / 登录 / 注册 / 引导 / 练习 / 答题 / 报告 / 错题本 / 我的
+│       ├─ src/middleware.ts           #   第一层守卫（只看提示位 cookie；**不是安全边界**）
+│       └─ docs/screenshots/          #   C 端走查截图（`docs/26` §1 A.2）
+├─ packages/api-core/                 # **认证链路唯一实现**（前端两个 app 共用）
+├─ .github/workflows/ci.yml           # CI 门禁：3 个 job（后端 / 管理端 / C 端）· 18 道全拦截式
 ├─ ruff.toml                          # ruff 配置（只开默认集 E4/E7/E9/F，不含风格规则）
-├─ tools/local-verify/                # 本地联调脚本：起服务 / 冒烟 / 回归探针 / 导入转换器
+├─ tools/local-verify/                # 本地联调：起服务 / 走查 / 门禁 / 变异 / 探针 / 截图
 ├─ db/
 │   ├─ schema.sql                     # 可直接执行的 PostgreSQL 建表脚本（64 表 + 3 视图 + 102 索引 + 基础数据）
 │   └─ seed/
@@ -211,7 +247,7 @@ curl http://localhost:8000/api/v1/health
 cd ../apps/api
 pip install -r requirements.txt
 ADMIN_INIT_PHONE=13800000000 ADMIN_INIT_PASSWORD=Admin@123456 pytest tests -v
-# 全量 126 passed, 1 skipped（1 skipped 是 6000 行导入用例，需环境变量显式开启）
+# 全量 437 passed, 1 skipped（那 1 条是 6000 题灌库用例：需 YIJIAN_BIG_IMPORT=1 显式开启）
 ```
 
 `test_smoke.py` 覆盖认证主链路：注册 → `/me` → 密码登录 → 刷新令牌轮换（旧 token 立即失效）→ 登出 →
@@ -235,7 +271,7 @@ curl -s -X POST http://localhost:8000/api/v1/auth/register \
 > 这段演示的是 **Batch 2 当时的 10 个接口**（`/health` + `/auth` 7 个 + `/admin/users` 2 个）——
 > 认证与 RBAC 的最小完整闭环，详见 `docs/08-Batch2-验收报告.md`。
 > 后续批次在此基础上加了题库 CRUD（Batch 4）、章节树、导入管道（Batch 5）、变更日志（Batch 6）、
-> 组卷引擎（Batch 7），**当前共 50 个接口**。
+> 组卷引擎（Batch 7），**当前共 67 个接口**。
 
 ### 手动新建一道题（Batch 4 题库接口）
 
@@ -344,7 +380,7 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 | 题型分布 | 单选 3049 / 多选 1501 / 判断 978 / 案例 120 / 案例小题 352 |
 | 难度分布 | 1⭐ 480 / 2⭐ 2058 / 3⭐ 2231 / 4⭐ 1067 / 5⭐ 164 |
 | 质检结果 | 全部 11 项检查通过，0 错误 0 警告 |
-| schema.sql | 64 表 + 3 视图 + 102 索引，1508 行 |
+| schema.sql | 64 表 + 3 视图 + 102 索引，1552 行 |
 
 ---
 
@@ -381,12 +417,13 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 | 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | — |
 | 前端 lint | `npm run lint`（eslint） | **拦截** | 2026-09-20 存量 14 条清零 → 提级为 error → 上 CI |
 | 前端格式 | `npm run format:check`（prettier） | **拦截** | 配置 `apps/admin/prettier.config.mjs`，`printWidth 100` |
-| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 126 passed, 1 skipped |
+| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 437 passed, 1 skipped |
 | 后端静态检查 | `ruff check apps/api` | **拦截** | 2026-09-20 存量 19 条清零后转的 |
 | 后端格式 | `ruff format --check apps/api` | **拦截** | 配置 `ruff.toml`，`line-length 100` |
-| 后端覆盖率 | `coverage report` | **拦截**（门槛 65%） | 2026-09-20 起；依据见 `.coveragerc` |
+| 后端覆盖率 | `coverage report` | **拦截**（门槛 94.40） | 2026-09-20 起；依据见 `.coveragerc` |
 
-CI 配置：`.github/workflows/ci.yml` —— push `main` 与 PR 触发，两个 job（后端 / 前端）。
+CI 配置：`.github/workflows/ci.yml` —— push `main` 与 PR 触发，**三个 job**
+（后端 / 管理端 / C 端）。
 
 ### 格式化的两个决定（都不是"默认值"）
 
@@ -454,6 +491,17 @@ services       2282      301     86.81%（本地口径）
 门槛           fail_under = 85（**临时值**，见下）
 ```
 
+**当前数字（2026-10-03）**：
+
+```
+               语句    未覆盖    覆盖率
+本地           5478      257     95%
+门槛           fail_under = 94.40（= 上一轮**触发时的动作结果**，见下）
+```
+
+> ★ 上面那块（2026-09-22）**保留**：它记的是「门槛为什么长这样」的演进过程。
+>   但**别拿它当现状** —— 现状看这一块。
+
 ⚠️ **两地残余差异只剩 2 行**（在 `cli.py`，**方向是 CI 覆盖更多**）：`_wait_db` 的重试
 循环在 CI 里多跑了一轮（它的 PG 是 service container、稍慢）—— **时序差异，不是缺陷**。
 （2026-09-22 之前那个 `86.7%` 是"只采 API 进程一份"的旧口径，已废。修完 `questions.json`
@@ -467,18 +515,26 @@ services       2282      301     86.81%（本地口径）
 #### 门槛与抬升的**触发条件**（可判定，不靠"记得回来改"）
 
 ```
-当前：fail_under = 85      （2026-09-22 裁定，临时值：贴 89.25% − 4.25）
-下一档触发：实测总覆盖率 ≥ 90%
+当前：fail_under = 94.40   （2026-10-03；= 上一轮触发时的动作结果：95.40 − 1）
+下一档触发：实测总覆盖率 ≥ 门槛 + 2（即当前 ≥ 96.40%）
 动作：把 fail_under 改成「实测值 − 1」，并重写本段
 ```
 
-> 为什么必须写成"条件 + 动作"而不是"目标 85%"：后者依赖某个人的记忆，而
+> ★ **规则只有一条**（2026-10-03 收敛）：**实测 ≥ 门槛 + 2 ⇒ 门槛 = 实测 − 1**。
+>   早先还写着一条"实测 ≥ 90% 就抬"，它与这条**互相打架**
+>   （90% 早就过了，而门槛却停在 85）—— **已被上面这条取代**。
+>
+> ⚠️ `94.40` 是**上一轮触发时那一次动作的结果**（当时实测 95.40 ⇒ 95.40 − 1 = 94.40），
+>   **不是按另一个公式算出来的** —— 别看到 94.40 就以为存在某个「− 0.6」的规则。
+
+> 为什么必须写成"条件 + 动作"而不是"目标 X%"：后者依赖某个人的记忆，而
 > **没有任何交付流程会因为"当时说过达到后要改"而停下来** —— 结局就是门槛
 > 从"棘轮"退化成一个数字。写成可判定条件后，收尾动作里的
 > 「跑一次 coverage report 看当前数字」就能直接对照执行
 > （见 `apps/admin/docs/B端联调坑.md` 末尾「一批交付收尾的固定动作」§5）。
 
-越过 90% 之后同样按这个套路：门槛提到「实测值 − 1」，并重新写一条"下一档 + 触发条件"。
+> **演进（留痕，别删）**：`65%`（2026-09-20 起始）→ `85`（2026-09-22，定为**临时值**）
+> → **`94.40`**（当前）。前两步的来由见 `docs/17-门禁整顿.md`。
 
 ### 两道跑的是**同一条链路**
 
@@ -553,13 +609,19 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -NoCov
   批量删除 / 恢复 / 两个下拉）统一走 `question_service.scope_subject_ids()` 这一份唯一来源；
   顺手消掉 `exam_service` 里的第二份副本。判据是「**凡是按 id 寻址的入口都要自己再拦一次**」
   —— 列表过滤防的是"翻到"，防不了"猜到"（`B端联调坑.md` 坑 48 / 49）。
-- **② 门禁整顿（下一步）** → `npm run lint` 目前是**假门禁**（脚本在、配置不在，坑 44）；
-  补 ESLint / Prettier 配置与覆盖率阈值。
+- **② 门禁整顿（已完成）** → ESLint / Prettier / 覆盖率门槛都已补齐并**进 CI**（`docs/17`）。
+  当年 `npm run lint` 是**假门禁**（脚本在、配置不在，坑 44）那笔账已清；
+  现在 CI 是 **18 道全拦截式**（口径见 `docs/24` §10.2.1）。
 - **③ 审计链补齐** → `docs/15-审计链补齐.md` 立项：`reviewed_by` / `audited_by` /
   `reviewer_id` 三处引用数全为 0 —— 状态能改，但"谁审的、什么时候审的"从没被记录。
-- **记忆曲线** → 学员练习调度算法（依赖答题记录，需 C 端先落地）
-- **记忆曲线** → 学员练习调度算法（依赖答题记录，需 C 端先落地）
-- **移动端骨架** → 学员侧页面：首页倒计时、章节练习、答题卡、错题本、模拟考试、成绩报告
+- **记忆曲线** → 学员练习调度算法（C 端答题记录**已落地**，具备开工条件；
+  ⚠️ **尚未登记为 `docs/21` 的 BL** —— 它是产品路线图项，不是本项目待办）
+- **学员侧页面（已完成）** → C 端 **P0 / P1 / P2a / P2b-1 / P2b-2 / P2c-1 / P2c-2 全部落地**：
+  首页（引导入口卡 + 资料摘要）/ 登录 / 注册 / 引导 / 章节练习 / 答题卡 / 交卷结果页 /
+  错题本 / 我的（方案 `docs/22`，边界与验收 `docs/24`）；另加 **PWA 收尾**（可安装 +
+  离线不白屏，`docs/28`）。
+  ⚠️ **首页的"聚合"（今日进度 / 考试倒计时 / 掌握度环）仍属后续批次** ——
+  见 `apps/web/src/app/(tabs)/page.tsx` 抬头与 `docs/24` §1.1（那些是**设计**，不是现状）。
 - **「调整方案」** → 告诉我哪里要改（比如要换 Spring Boot / 要加直播 / 要做多租户加盟商）
 
 > ⚠️ **批量导入落地前必读**：导入会在同一毫秒连出多个雪花 ID，

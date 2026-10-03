@@ -522,6 +522,8 @@ class Pipeline:
             cmd.append("--dev")
         if self.a.e2e_keep_web:
             cmd.append("--keep-web")
+        if self.a.e2e_shots:
+            cmd += ["--shots", self.a.e2e_shots]
         # 构建 + 起 next + 浏览器走查：给 15 分钟（首次构建 ~40s，冷启动 ~10s）
         return run(
             cmd,
@@ -691,6 +693,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--e2e-keep-web", action="store_true", help="走查完不关 next start（手工接着点）"
+    )
+    ap.add_argument(
+        "--e2e-shots",
+        default="",
+        help="把走查途中关键画面截到该目录（透传给 `e2e-web.py --shots`）",
     )
     args = ap.parse_args(argv)
 
