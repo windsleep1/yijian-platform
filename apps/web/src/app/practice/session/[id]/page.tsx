@@ -555,10 +555,6 @@ export default function PracticeSessionPage() {
                 </button>
               </div>
             </div>
-
-            <p className="mt-5 rounded-xl border border-dashed border-line p-3 text-xs text-sub">
-              长按标记 / 收藏 / 笔记 → **BL-21**（个人 PWA 时）；交卷报告 / 历史 / 错题本在 P2c。
-            </p>
           </>
         )}
 

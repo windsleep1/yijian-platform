@@ -183,13 +183,6 @@ export default function PracticePage() {
         </section>
       )}
 
-      <p className="mt-8 rounded-xl border border-dashed border-line p-4 text-xs text-sub">
-        本批（P2b-1）只做到「建好练习 + 答第一题」。
-        <br />
-        切题 / 答题卡 / 交卷报告 / 错题本**已落地**（P2b-2a·2b / P2c-1 / P2c-2）； 长按标记 / 收藏 /
-        笔记 见 **BL-21**（个人 PWA 时）。
-      </p>
-
       <Link href="/" className="mt-6 block text-center text-sm text-brand">
         先回首页
       </Link>

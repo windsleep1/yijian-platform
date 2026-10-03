@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.types import BigIntStr
 
@@ -118,11 +118,40 @@ class ChapterOut(BaseModel):
 
 
 class SessionCreateIn(BaseModel):
-    """创建一次练习。P2b-1 只支持 `mode='chapter'`（`chapter_id` 必填）。"""
+    """创建一次练习。**两种题源共用一个接口**。
 
-    subject_id: BigIntStr
+    - `mode='chapter'`（默认，P2b-1）：从科目 / 章节抽题 ⇒ **`subject_id` 必填**；
+    - `mode='wrong'`（**P2c-3 · 错题重练**）：从**我自己的错题本**抽题 ⇒ `subject_id`
+      **只当筛选**（不给 = 全部科目 —— 跨科目重练是合法场景，所以
+      `practice_sessions.subject_id` 允许为 NULL）。`question_ids` 给具体题
+      （重练这一题 / 这一组）；不给则按「最近错的在前」抽 `count` 道。
+
+    ★ 为什么**不新开** `POST /practice/wrong-sessions`：两者产出的都是
+      `practice_sessions` 行、走**同一套**答题 / 交卷 / 报告链路，差别只有"题从哪来"。
+      新开接口会把 `submit_answer` / `get_session` / `report` / `finish` 全复制一遍
+      —— 而它们的语义**完全一样**，复制出来的第二份迟早分叉。
+    """
+
+    mode: Literal["chapter", "wrong"] = "chapter"
+    subject_id: BigIntStr | None = None
     chapter_id: BigIntStr | None = None
+    #: 只对 `mode='wrong'` 有意义：重练**指定的这些题**（按调用方给的这一组）。
+    question_ids: list[BigIntStr] | None = None
     count: int = Field(10, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _check(self) -> "SessionCreateIn":
+        """★ 必填项**按 mode 分叉**。
+
+        写成 `model_validator` 而不是 service 里的 if，是为了让"缺字段"仍然是 **422**
+        —— 与改造前（`subject_id: BigIntStr` 必填）**对外表现一致**，
+        免得多出一种"以前 422、现在 50001"的新形态（那种变化只会让调用方困惑）。
+        """
+        if self.mode == "chapter" and not self.subject_id:
+            raise ValueError("mode='chapter' 需要 subject_id")
+        if self.mode != "wrong" and self.question_ids:
+            raise ValueError("question_ids 只在 mode='wrong' 下有意义")
+        return self
 
 
 class SessionItemOut(BaseModel):

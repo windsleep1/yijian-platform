@@ -332,13 +332,88 @@ _PICK_SQL = text(
     bindparam("cnt", type_=Integer),
 )
 
+#: 错题重练（P2c-3）的抽题。★ 三条硬约束**都写在 SQL 里**，不靠调用方记得：
+#:   ① `w.user_id = :uid` —— 别人的错题**永远抽不到**（硬约定 G 的原文：
+#:      "按 id 寻址的入口都要自己再拦一次"；`question_ids` 是调用方给的，更不能省）；
+#:   ② 只抽未软删、题目仍 `published` 且未软删、且是**可判分题型** ——
+#:      否则会建出一个"点进去题没了 / 判不了分"的会话；
+#:   ③ 顺序 `last_wrong_at DESC` 与**错题本列表同口径** ⇒ 前端把当前页的 id 原样传进来时，
+#:      得到的顺序与列表一致（前端不必再排一次）。
+_WRONG_PICK_HEAD = f"""
+    SELECT w.question_id AS id
+      FROM wrong_questions w
+      JOIN questions q ON q.id = w.question_id
+     WHERE w.user_id = :uid
+       AND w.is_removed = false
+       AND q.status = 'published'
+       AND q.is_deleted = false
+       AND q.type IN ({_TYPES_SQL})
+       AND (:sid IS NULL OR w.subject_id = :sid)
+"""
+_WRONG_PICK_TAIL = """
+     ORDER BY w.last_wrong_at DESC, w.question_id
+     LIMIT :cnt
+"""
+
+_PICK_WRONG_SQL = text(_WRONG_PICK_HEAD + _WRONG_PICK_TAIL).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("sid", type_=BigInteger),
+    bindparam("cnt", type_=Integer),
+)
+
+#: 指定题时用 `IN :qids` + `expanding=True`（**不是** `= ANY(:qids)`）：
+#:   `ANY(array)` 在 asyncpg 上要额外声明数组类型 —— 那是坑 73 那一族
+#:   （裸参数推不出类型，症状是稳定的 50001 而 SQL 看着完全正常）。
+_PICK_WRONG_IDS_SQL = text(
+    _WRONG_PICK_HEAD + "       AND w.question_id IN :qids\n" + _WRONG_PICK_TAIL
+).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("sid", type_=BigInteger),
+    bindparam("cnt", type_=Integer),
+    bindparam("qids", type_=BigInteger, expanding=True),
+)
+
+
+async def _pick_wrong(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    subject_id: int | None,
+    question_ids: list[int] | None,
+    count: int,
+) -> list[int]:
+    """从**我自己的错题本**抽题（`mode='wrong'` 的题源）。
+
+    ★ 归属拦截在 SQL 里（`w.user_id = :uid`），**不是**在 Python 里过滤 ——
+      这样"查不到就是查不到"，不存在一段"先查出来再判断要不要给"的窗口。
+    """
+    params: dict[str, Any] = {"uid": user_id, "sid": subject_id, "cnt": count}
+    if question_ids:
+        params["qids"] = list(question_ids)
+        stmt = _PICK_WRONG_IDS_SQL
+    else:
+        stmt = _PICK_WRONG_SQL
+    rows = (await db.execute(stmt, params)).mappings().all()
+    return [int(r["id"]) for r in rows]
+
+
+#: ⚠️ `mode` 与 `subject_id` 都是**参数**（`mode` 以前写死成 'chapter'）：
+#:   错题重练共用这条插入；且当一个会话跨科目时 `subject_id` 为 NULL。
 _INSERT_SESSION = text(
     """
     INSERT INTO practice_sessions
         (id, user_id, mode, subject_id, chapter_id, title, config, total, status)
     VALUES
-        (:id, :uid, 'chapter', :sid, :cid, :title, CAST(:cfg AS jsonb), :total, 'doing')
+        (:id, :uid, :mode, :sid, :cid, :title, CAST(:cfg AS jsonb), :total, 'doing')
     """
+).bindparams(
+    bindparam("id", type_=BigInteger),
+    bindparam("uid", type_=BigInteger),
+    bindparam("mode", type_=String),
+    bindparam("sid", type_=BigInteger),
+    bindparam("cid", type_=BigInteger),
+    bindparam("title", type_=String),
+    bindparam("total", type_=Integer),
 )
 
 _INSERT_ITEM = text(
@@ -353,61 +428,98 @@ async def create_session(
     db: AsyncSession,
     *,
     user_id: int,
-    subject_id: int,
+    mode: str = "chapter",
+    subject_id: int | None = None,
     chapter_id: int | None = None,
+    question_ids: list[int] | None = None,
     count: int = 10,
 ) -> int:
-    """建一次章节练习，返回 session id。
+    """建一次练习，返回 session id。**两种题源共用同一条插入路径**。
 
-    ★ **抽题顺序是确定性的**（未做过的优先，其次按 id）—— P2b-1 要的是
-      "后端到前端**往返跑通**"，确定性让这件事**可复现、可断言**。
-      "随机抽题 / 按掌握度抽题"属 P2b-2（`config` 列已经留好了位置）。
+    - `mode='chapter'`：★ **抽题顺序是确定性的**（未做过的优先，其次按 id）——
+      为了让"数据流跑通"可复现、可断言；随机 / 按掌握度抽题属后续批次。
+    - `mode='wrong'`（**错题重练**，P2c-3）：题源 = **我自己的错题本**（`wrong_questions`）；
+      `question_ids` 给具体题、不给则按「最近错的在前」抽；`subject_id` 只当筛选
+      （跨科目重练 ⇒ 会话的 `subject_id` 允许为 NULL）。
+
     ⚠️ 抽不到题时**不建空 session**：空 session 会在前端表现为"进去了但没题"，
       而这与"后端炸了"在前端看起来一模一样。宁可当场报 404（带原因）。
+      ★ 错题重练的空态尤其要说清 —— **"错题本还没题"是正常状态，不是故障**，
+      所以文案要带上"怎么才能有题"（去答题、答错才会进来）。
     """
-    subject = await _assert_subject_usable(db, subject_id)
-    cprefix: str | None = None
-    chapter_name: str | None = None
-    if chapter_id is not None:
-        cprefix = await _chapter_prefix(db, chapter_id=chapter_id, subject_id=subject_id)
-        cprefix += "%"
-        ch = (
-            await db.execute(text("SELECT name FROM chapters WHERE id = :cid"), {"cid": chapter_id})
-        ).scalar()
-        chapter_name = str(ch) if ch is not None else None
+    picked: list[int]
+    title: str
 
-    picked = [
-        int(r["id"])
-        for r in (
-            await db.execute(
-                _PICK_SQL,
-                {
-                    "uid": user_id,
-                    "sid": subject_id,
-                    "chapter_id": chapter_id,
-                    "cprefix": cprefix,
-                    "cnt": count,
-                },
-            )
+    if mode == "wrong":
+        picked = await _pick_wrong(
+            db, user_id=user_id, subject_id=subject_id, question_ids=question_ids, count=count
         )
-        .mappings()
-        .all()
-    ]
-    if not picked:
-        scope = f"章节「{chapter_name}」" if chapter_name else f"科目「{subject['name']}」"
-        raise not_found(f"{scope}下还没有可练习的题目", 40401)
+        if not picked:
+            raise not_found(
+                "错题本里还没有可重练的题 —— 这里只放**你自己答错过**的题，先去练习里做几道。",
+                40401,
+            )
+        title = "错题重练"
+        chapter_id = None
+    else:
+        if subject_id is None:
+            # `SessionCreateIn` 已保证；这里再拦一次是因为 service 也能被直接调用（单测就是）。
+            raise bad_request("章节练习需要 subject_id", 40001)
+        subject = await _assert_subject_usable(db, subject_id)
+        cprefix: str | None = None
+        chapter_name: str | None = None
+        if chapter_id is not None:
+            cprefix = await _chapter_prefix(db, chapter_id=chapter_id, subject_id=subject_id)
+            cprefix += "%"
+            ch = (
+                await db.execute(
+                    text("SELECT name FROM chapters WHERE id = :cid"), {"cid": chapter_id}
+                )
+            ).scalar()
+            chapter_name = str(ch) if ch is not None else None
+
+        picked = [
+            int(r["id"])
+            for r in (
+                await db.execute(
+                    _PICK_SQL,
+                    {
+                        "uid": user_id,
+                        "sid": subject_id,
+                        "chapter_id": chapter_id,
+                        "cprefix": cprefix,
+                        "cnt": count,
+                    },
+                )
+            )
+            .mappings()
+            .all()
+        ]
+        if not picked:
+            scope = f"章节「{chapter_name}」" if chapter_name else f"科目「{subject['name']}」"
+            raise not_found(f"{scope}下还没有可练习的题目", 40401)
+        title = f"{chapter_name} 练习" if chapter_name else f"{subject['name']} 练习"
 
     sid = next_id()
-    title = f"{chapter_name} 练习" if chapter_name else f"{subject['name']} 练习"
     await db.execute(
         _INSERT_SESSION,
         {
             "id": sid,
             "uid": user_id,
+            "mode": mode,
             "sid": subject_id,
             "cid": chapter_id,
             "title": title,
-            "cfg": json.dumps({"chapter_id": chapter_id, "count": count}, ensure_ascii=False),
+            "cfg": json.dumps(
+                {
+                    "mode": mode,
+                    "subject_id": subject_id,
+                    "chapter_id": chapter_id,
+                    "question_ids": [str(x) for x in picked],
+                    "count": count,
+                },
+                ensure_ascii=False,
+            ),
             "total": len(picked),
         },
     )
@@ -963,6 +1075,8 @@ _UPSERT_WRONG = text(
     """
 )
 
+#: ★★ **只在 `mode='wrong'` 的会话里调用**（P2c-3 收紧语义，见 `submit_answer`）。
+#:   这个字段回答的问题是"**这道错题我攻克了吗**" ⇒ 只有"重练 **并且** 答对"才该 +1。
 _BUMP_RETRY_CORRECT = text(
     "UPDATE wrong_questions SET retry_correct = retry_correct + 1, updated_at = now() "
     "WHERE user_id = :uid AND question_id = :qid"
@@ -1098,7 +1212,13 @@ async def submit_answer(
         },
     )
     if is_correct:
-        await db.execute(_BUMP_RETRY_CORRECT, {"uid": user_id, "qid": qid})
+        # ★★ **只有"重练答对"才算重练答对**（P2c-3 的语义收紧）。
+        #    改造前这里对**任何**答对都 +1（只要该题在错题本里）⇒ `retry_correct`
+        #    实际含义是"答对次数"。后果不报错，但错题本上会出现**从没重练过、
+        #    却标着"已重练"**的题 —— 字段名与它回答的问题必须一致，
+        #    否则前端只能靠"猜"来用这个数（而猜错的方向是**给用户一个假的成就感**）。
+        if str(sess["mode"]) == "wrong":
+            await db.execute(_BUMP_RETRY_CORRECT, {"uid": user_id, "qid": qid})
     else:
         await db.execute(
             _UPSERT_WRONG,

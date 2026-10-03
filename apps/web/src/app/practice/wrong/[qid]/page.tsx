@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { ApiError, request } from "@/lib/api";
@@ -44,7 +44,12 @@ const TYPE_LABEL: Record<string, string> = {
 
 export default function WrongDetailPage() {
   const { qid } = useParams<{ qid: string }>();
+  const router = useRouter();
   const [d, setD] = useState<WrongDetail | null>(null);
+  //: 建重练会话期间的待定态；`retryErr` 与页面加载错误**分开** ——
+  //: 加载错误要整页替换，而重练失败应该留在原地（页面内容还在，用户还要看答案/解析）。
+  const [creating, setCreating] = useState(false);
+  const [retryErr, setRetryErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [missing, setMissing] = useState(false);
@@ -68,6 +73,26 @@ export default function WrongDetailPage() {
       alive = false;
     };
   }, [qid]);
+
+  /** 建一次只含这道题的**错题重练**会话，然后进现有答题页（不新建页面）。
+   *
+   * ★ 成功后**不复位** `creating`：到路由切换之间按钮若变回可点，连点会建两个会话。
+   */
+  const retry = async () => {
+    if (!qid || creating) return;
+    setCreating(true);
+    setRetryErr("");
+    try {
+      const r = await request<{ id: string }>("/practice/sessions", {
+        method: "POST",
+        body: { mode: "wrong", question_ids: [qid], count: 1 },
+      });
+      router.push(`/practice/session/${r.id}`);
+    } catch (e) {
+      setRetryErr(errText(e));
+      setCreating(false);
+    }
+  };
 
   if (missing) {
     return (
@@ -164,19 +189,40 @@ export default function WrongDetailPage() {
 
       <section data-wrong-record className="mt-4 rounded-xl border border-dashed border-line p-4">
         <p className="text-xs font-medium">这道题的记录</p>
-        <p className="mt-2 text-xs text-sub">
-          错过 <span className="font-medium text-red-600">{d.wrong_count}</span> 次
-          {d.retry_correct > 0 && ` · 之后答对 ${d.retry_correct} 次`}
-          {d.reason_tag && ` · 标记：${d.reason_tag}`}
+        <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-sub">
+          <span>
+            错过 <span className="font-medium text-red-600">{d.wrong_count}</span> 次
+            {d.retry_correct > 0 && ` · 重练答对 ${d.retry_correct} 次`}
+            {d.reason_tag && ` · 标记：${d.reason_tag}`}
+          </span>
+          {d.retry_correct > 0 && (
+            <span
+              data-retried={d.question_id}
+              className="rounded-md bg-green-50 px-2 py-1 text-green-700"
+            >
+              已重练 ✓
+            </span>
+          )}
         </p>
         <p className="mt-1 text-xs text-sub">
           {d.last_wrong_at ? `最近错于 ${new Date(d.last_wrong_at).toLocaleString()}` : " "}
         </p>
       </section>
 
-      <p className="mt-8 rounded-xl border border-dashed border-line p-3 text-xs text-sub">
-        「重练这道题 / 这一批错题」排在后面的批次 —— 它要先做 `mode='wrong'` 的建练习逻辑。
-      </p>
+      <button
+        type="button"
+        data-retry-this={d.question_id}
+        disabled={creating}
+        onClick={() => void retry()}
+        className="mt-5 flex min-h-touch w-full items-center justify-center rounded-xl bg-brand text-sm font-medium text-brand-fg disabled:opacity-40"
+      >
+        {creating ? "正在创建重练…" : "重练这道题"}
+      </button>
+      {retryErr && (
+        <p className="mt-3 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+          {retryErr}
+        </p>
+      )}
     </main>
   );
 }

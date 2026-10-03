@@ -201,7 +201,7 @@ export type WrongItem = {
   stem: string;
   /** 错了几次（每次都 +1）。 */
   wrong_count: number;
-  /** 之后又答对过几次。 */
+  /** **重练**答对过几次（`mode='wrong'` 里答对才 +1；章节练习里答对**不算**）。 */
   retry_correct: number;
   mastered_level: number;
   last_wrong_at: string | null;

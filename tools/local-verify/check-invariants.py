@@ -14,6 +14,13 @@ SW 的缓存白名单必须含静态资源、**不得含接口**，且 `sw.js` /
 `offline.html` 三个必须**未登录也取得到**（否则装不上，而登录状态下看不出来）。
 方案 = `docs/28-PWA收尾-方案.md`。
 
+第 11 条（2026-10-03 加）：**E2E 场景清单三处必须一致** —— `e2e-web.py` 的
+`--scenario` choices / 管道的 `--e2e-scenario` choices / `e2e-web.py` 的
+`drivers` 注册表，必须**同一个集合**；`SCENARIOS_NEEDING_QUESTIONS` 是它的子集。
+为什么要有它：这条清单**同一个事实写了三份**，而漏改的症状**不像配置错**
+（`invalid choice` + 退出码 2 + 1 秒结束，看着像走查没跑起来）——
+实测已经踩过两次（p2b1 / p2c3）。同族：坑 93（一个串被两个解析器读）。
+
 为什么要有它（用户 2026-09-27）：
     不变量**不是"开工前确认一次"**，而是"**每次 push 后跑一次**" ——
     P0→P3 每推一次都可能把它们破掉。写成可执行文件才能每批收尾自动跑。
@@ -944,8 +951,94 @@ def check_pwa_contract() -> None:
             ok(f"`PUBLIC_PREFIXES` 含 {_PWA_MUST_BE_PUBLIC}（未登录也能取到）")
 
 
+#: ★ E2E 场景清单同时出现在**三处**（见不变量 11 抬头）—— 各抓一份来对账。
+_E2E_CHOICES_RE = re.compile(r"choices=\[([^\]]*)\]")
+_E2E_NEED_Q_RE = re.compile(r"SCENARIOS_NEEDING_QUESTIONS\s*=\s*frozenset\(([^)]*)\)")
+
+
+def _e2e_names(body: str) -> set[str]:
+    """从 `"a", "b"` / `"a": drive_a,` 这类文本里取场景名。
+
+    ★ **不把引号写进正则**：源码里单/双引号都用过，而 `["\']` 那种字符类
+      写在 Python 源码里会**提前结束字符串**（这一版第一稿就栽在这）。
+      做法 = 用 `chr(34)` / `chr(39)` 当分隔符切分，正则只认"纯小写字母数字"。
+    """
+    out: set[str] = set()
+    for ch in (chr(34), chr(39)):
+        for chunk in body.split(ch):
+            t = chunk.strip().strip(",").strip(": ").strip()
+            if re.fullmatch(r"[a-z0-9]+", t):
+                out.add(t)
+    return out
+
+
+def _e2e_registry(text: str) -> set[str]:
+    """从 `drivers = { ... }` 里取场景名（那是**第三处**清单）。"""
+    i = text.index("drivers = {")
+    j = text.index("}", i)
+    return _e2e_names(text[i:j])
+
+
+def check_e2e_scenarios() -> None:
+    print("[11] E2E 场景清单**三处必须一致**（不变量 11）—— 加场景漏一处，会静默或直接跑不起来")
+
+    web_rel = "tools/local-verify/e2e-web.py"
+    pipe_rel = "tools/local-verify/run-local-pipeline.py"
+    web = (REPO / web_rel).read_text(encoding="utf-8")
+    pipe = (REPO / pipe_rel).read_text(encoding="utf-8")
+
+    m_web = _E2E_CHOICES_RE.search(web)
+    m_pipe = _E2E_CHOICES_RE.search(pipe)
+    m_need = _E2E_NEED_Q_RE.search(pipe)
+    if m_web is None or m_pipe is None or m_need is None:
+        bad("读不到场景清单（三处之一）—— 本检查会**静默变成假绿**，故直接失败")
+        return
+    try:
+        registry = _e2e_registry(web)
+    except ValueError:
+        bad(f"`{web_rel}` 里找不到 `drivers = {{` —— 注册表被改名或删掉了")
+        return
+
+    want = _e2e_names(m_web.group(1))
+    if not want:
+        bad(f"`{web_rel}` 的 `--scenario` choices 解析出了**空集合** —— 判据形状变了")
+        return
+
+    problems: list[str] = []
+    diff_pipe = _e2e_names(m_pipe.group(1)) ^ want
+    if diff_pipe:
+        problems.append(
+            f"`{pipe_rel}` 的 `--e2e-scenario` choices 与 `{web_rel}` 不同：{sorted(diff_pipe)}"
+        )
+    diff_reg = registry ^ want
+    if diff_reg:
+        problems.append(f"`drivers` 注册表与 choices 不同：{sorted(diff_reg)}")
+    extra_need = _e2e_names(m_need.group(1)) - want
+    if extra_need:
+        problems.append(f"`SCENARIOS_NEEDING_QUESTIONS` 里有 choices 之外的场景：{sorted(extra_need)}")
+
+    if problems:
+        bad("；".join(problems))
+        print(
+            "      ⇒ 加一个 E2E 场景要同时改 **3 处**（+ 可选第 4 处）：\n"
+            f"        ① `{web_rel}` 的 `--scenario` choices\n"
+            f"        ② `{pipe_rel}` 的 `--e2e-scenario` choices\n"
+            f"        ③ `{web_rel}` 的 `drivers` 注册表\n"
+            "        ④ `SCENARIOS_NEEDING_QUESTIONS`（只加「需要灌题库」的场景）\n"
+            "      ★ 漏 ② 的症状：`invalid choice: '<场景>'` + **退出码 2、1 秒结束** ——\n"
+            "        看上去像「走查没跑起来」，**不像配置错**（实测踩过两次：p2b1 / p2c3）。"
+        )
+        return
+
+    need_n = len(_e2e_names(m_need.group(1)))
+    ok(f"{len(want)} 个场景**三处一致**（{'/'.join(sorted(want))}）；其中 {need_n} 个要灌题库")
+
+
 def main() -> int:
-    print("=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10；每批收尾跑一次）===")
+    print(
+        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11；"
+        "每批收尾跑一次）==="
+    )
     check_gates()
     check_coverage_ratchet()
     check_ephemeral_db()
@@ -956,6 +1049,7 @@ def main() -> int:
     check_answer_single_source()
     check_public_route_entrypoints()
     check_pwa_contract()
+    check_e2e_scenarios()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()

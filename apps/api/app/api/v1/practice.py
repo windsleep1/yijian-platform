@@ -1,6 +1,6 @@
 """C 端 · 刷题（P2b-1）：选章节 → 建 session → 取 session → 提交判分。
 
-    POST /practice/sessions                 建一次章节练习
+    POST /practice/sessions                 建一次练习（章节 / 错题重练）
     GET  /practice/sessions/{id}            取练习（`doing` = 断点恢复；`finished` = 全可见）
     POST /practice/sessions/{id}/answer     提交一道题并判分
     POST /practice/sessions/{id}/finish     交卷（#7，P2c-1）
@@ -40,10 +40,13 @@ router = APIRouter(prefix="/practice", tags=["C 端 · 刷题"])
 @router.post(
     "/sessions",
     response_model=Envelope[dict],
-    summary="创建练习（P2b-1 只支持章节练习）",
+    summary="创建练习（章节练习 / 错题重练）",
     description=(
         "从科目 / 章节里抽题建一次练习。需要登录。\n\n"
-        "- P2b-1 只支持 `mode='chapter'`（`chapter_id` 必填）；\n"
+        "- `mode='chapter'`（默认）：从科目 / 章节抽题，`subject_id` 必填；\n"
+        "- `mode='wrong'`（**错题重练**）：从**我自己的错题本**抽题；`question_ids` 给具体题\n"
+        "  （重练这一题 / 这一组），不给则按「最近错的在前」抽；`subject_id` 只当筛选\n"
+        "  （不给 = 全部科目 —— 跨科目重练 ⇒ 会话的 `subject_id` 为 NULL）；\n"
         "- 抽题**顺序是确定性的**（未做过的优先，其次按 id）—— 为了让「数据流跑通」可复现、可断言；\n"
         "  随机 / 按掌握度抽题属 P2b-2；\n"
         "- 只抽**客观题**（单选 / 多选 / 判断）；\n"
@@ -54,8 +57,10 @@ async def create_session(body: SessionCreateIn, db: DbSession, me: CurrentUserDe
     sid = await practice_service.create_session(
         db,
         user_id=me.id,
-        subject_id=int(body.subject_id),
+        mode=body.mode,
+        subject_id=(int(body.subject_id) if body.subject_id else None),
         chapter_id=(int(body.chapter_id) if body.chapter_id else None),
+        question_ids=([int(x) for x in body.question_ids] if body.question_ids else None),
         count=body.count,
     )
     return ok({"id": str(sid)})

@@ -1,4 +1,4 @@
-"""C 端**浏览器**端到端走查（五个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1` / `p2c2`）。
+"""C 端**浏览器**端到端走查（六个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1` / `p2c2` / `p2c3`）。
 
 为什么要单独写一个（而不是塞进 pytest）
 --------------------------------------
@@ -1728,6 +1728,151 @@ async def drive_p2c2(args: argparse.Namespace) -> dict[str, object]:
     return report
 
 
+async def drive_p2c3(args: argparse.Namespace) -> dict[str, object]:
+    """P2c-3 场景：**错题重练** = 错题本 → 重练 → 答对 → 回错题本看见「已重练」。
+
+    | # | 判据 | 没有它会怎样 |
+    |---|---|---|
+    | ① | 答错一题 ⇒ 错题本 1 条，**且此时没有「已重练」标记**、每行有一个「重练」按钮 | 少了"此时没有"，"标记恒画着"也能过（假绿）；少了按钮断言，按钮被删也能过 |
+    | ② | ★ 点「重练这道题」⇒ 进一条**新** session（URL 与原来不同），**只含 1 道题** | 少了它，"按钮又建了一次**章节**练习"也能过 —— 而那样题源根本不是错题本 |
+    | ③ | ★★ 在重练里提交**页面自己揭示过的正确答案** ⇒ 必须「答对了」 | 判分恒返回"错"也能过（同 p2b1 ⑤ 的道理） |
+    | ④ | ★★ 回错题本 ⇒ 出现「已重练 ✓」+「重练答对 1 次」，且「错 1 次」**没变** | 少了它，"点完按钮就算成功"也能过 —— 而 `retry_correct +1` 才是这个功能的全部意义 |
+
+    ★ ①④ 成对才是判据（硬约定 J 的"二元对立必须成对验"）：只看 ④ 的话，
+      "标记一开始就画着"（假绿）与"重练真的记了账"（真绿）长得一样。
+
+    ★ 为什么 ③ 非得"用页面自己揭示的答案"：E2E **没法预先知道**正确答案
+      （未作答的题后端不给答案 —— 这是本项目的红线）⇒ 只能先在章节练习里**故意答错**、
+      拿到揭示出来的答案，再拿它去重练里答对。
+      ★ 顺带这也证明了"揭示出来的答案是**真的**对"（否则 ③ 会红）。
+    """
+    report: dict[str, object] = {}
+
+    async def reveal_by_answering_wrong(b: "cdp_browser.Browser") -> str:
+        """点第 1 个选项 + 提交（**故意答错**），返回判分面板揭示的正确答案文本。"""
+        await b.click("main ul li button", nth=0)
+        await b.wait_for(
+            "document.querySelector('main ul li button[aria-pressed=\"true\"]') !== null",
+            timeout=20,
+            label="选项已选中（提交按钮此时才可用）",
+        )
+        await b.click_text("提交", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('正确答案')", timeout=40, label="出现判分结果"
+        )
+        right = await b.eval("(document.body.innerText.match(/正确答案：([^\\n]+)/) || [])[1] || ''")
+        need(isinstance(right, str) and right.strip() != "", "判分面板里没有「正确答案」")
+        return right.strip()
+
+    async def go_wrong_book(b: "cdp_browser.Browser") -> None:
+        await b.goto_ready(f"{args.web_base}/practice/wrong")
+        await b.wait_for(
+            "document.querySelector('[data-wrong-total]') !== null", timeout=40, label="错题本页"
+        )
+        await b.wait_for(
+            "document.querySelectorAll('[data-wrong-list] [data-wrong-row]').length > 0",
+            timeout=40,
+            label="错题本有内容",
+        )
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        await do_login(b, args)
+
+        # ---------------- ① 造一道错题 ----------------
+        say("① 练习 → 选科目 → 选章节 → **故意答错**第 1 题 ⇒ 错题本应出现 1 条")
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelectorAll('main button[aria-pressed]').length > 0",
+            timeout=40,
+            label="科目列表加载完成",
+        )
+        await b.click("main button[aria-pressed]", nth=0)
+        await b.wait_for(_PRACTICE_CHAPTERS_AVAILABLE_JS, timeout=40, label="章节列表加载完成")
+        await b.click("main section:nth-of-type(2) ul li button:not([disabled])", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进答题页"
+        )
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0", timeout=40, label="有选项"
+        )
+        src_url = await b.eval("location.pathname")
+        right = await reveal_by_answering_wrong(b)
+        report["revealed_answer"] = right
+
+        say("   进错题本：应 1 条、**没有**「已重练」、且每行有一个「重练」按钮")
+        await go_wrong_book(b)
+        rows = await b.eval(
+            "Array.from(document.querySelectorAll('[data-wrong-list] [data-wrong-row]'))"
+            ".map((a) => a.getAttribute('data-wrong-row'))"
+        )
+        need(isinstance(rows, list) and len(rows) == 1, f"应恰好 1 条错题，实际 {rows!r}")
+        # ★★ 可证伪锚：**重练之前**不许有那个标记（否则 ④ 的"出现"证明不了任何事）
+        need(
+            await b.eval("document.querySelectorAll('[data-retried]').length") == 0,
+            "还没重练，错题本上就画着「已重练」标记",
+        )
+        need(
+            await b.eval("document.querySelectorAll('[data-retry]').length") == 1,
+            "错题本每行应有一个「重练」按钮",
+        )
+        report["before_retry"] = "错题本 1 条，无「已重练」标记，有「重练」按钮"
+
+        # ---------------- ② 点重练 ⇒ 新 session 且只含 1 题 ----------------
+        say("② 点「重练这道题」⇒ 应进**新** session，且只含这 1 道题")
+        await b.click("[data-retry]", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进重练答题页"
+        )
+        await b.wait_for(
+            "document.body.innerText.includes('已答 0 / 1')",
+            timeout=40,
+            label="重练会话**只含 1 道题**",
+        )
+        retry_url = await b.eval("location.pathname")
+        need(
+            isinstance(retry_url, str) and retry_url != src_url,
+            f"重练没有建**新**会话（URL 仍是 {retry_url!r}）—— 题源可能不是错题本",
+        )
+        report["retry_session"] = f"新会话 {retry_url}（已答 0 / 1 ⇒ 只含这 1 道题）"
+
+        # ---------------- ③ 用揭示的答案答对 ----------------
+        say(f"③ 提交页面刚揭示的正确答案「{right}」⇒ 必须「答对了」")
+        wants = [x.strip() for x in str(right).split("、") if x.strip()]
+        picked = await b.eval(_PICK_BY_ANSWER_JS % json.dumps(wants, ensure_ascii=False))
+        need(picked is True, f"没能在重练的选项里找到 {wants!r} 对应的按钮")
+        await b.wait_for(
+            "document.querySelector('main ul li button[aria-pressed=\"true\"]') !== null",
+            timeout=20,
+            label="重练的选项已选中",
+        )
+        await b.click_text("提交", tag="button")
+        await b.wait_for(
+            "document.body.innerText.includes('正确答案')", timeout=40, label="重练判分结果"
+        )
+        verdict = await b.eval("(document.body.innerText.match(/(答对了|答错了)/) || [])[0] || ''")
+        need(
+            verdict == "答对了",
+            f"提交的**是页面自己给出的正确答案**，却判成了 {verdict!r} —— 判分逻辑是错的",
+        )
+        report["retry_grading"] = f"提交「{right}」⇒ 答对了"
+
+        # ---------------- ④ 回错题本 ⇒ 已重练 ----------------
+        say("④ 回错题本 ⇒ 应出现「已重练 ✓」+「重练答对 1 次」，且「错 1 次」没变")
+        await go_wrong_book(b)
+        await b.wait_for(
+            "document.querySelectorAll('[data-retried]').length === 1",
+            timeout=40,
+            label="出现「已重练」标记",
+        )
+        txt = str(await b.eval("(document.querySelector('[data-wrong-list]') || {}).innerText || ''"))
+        need("已重练" in txt, f"错题本里没有「已重练」：{txt!r}")
+        need("重练答对 1 次" in txt, f"没有写出重练次数：{txt!r}")
+        need("错 1 次" in txt, f"重练答对**不该**让「错 N 次」增加：{txt!r}")
+        report["after_retry"] = "已重练 ✓ + 重练答对 1 次；错 1 次（未变）"
+
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="e2e-web.py",
@@ -1741,7 +1886,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scenario",
         default="login",
-        choices=["login", "p2a", "p2b1", "p2c1", "p2c2"],
+        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3"],
         help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；"
         "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）；"
         "p2c1 = 交卷 → 结果页（总分/正确率/用时/知识点）+ 空卷必须显示「—」；"
@@ -1822,6 +1967,7 @@ def main(argv: list[str] | None = None) -> int:
             "p2b1": drive_p2b1,
             "p2c1": drive_p2c1,
             "p2c2": drive_p2c2,
+            "p2c3": drive_p2c3,
         }
         report = asyncio.run(drivers[args.scenario](args))
     except Failure as e:
@@ -1851,8 +1997,13 @@ def main(argv: list[str] | None = None) -> int:
     for k, v in report.items():
         say(f"  ✅ {k} = {v}")
     say(
-        "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
-        if args.scenario == "p2c2"
+        (
+            "✅ 走查全部通过（场景 p2c3：错题本 → 重练这道题 → 用揭示的答案答对"
+            " → 回错题本看见「已重练 ✓」）"
+            if args.scenario == "p2c3"
+            else "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
+        )
+        if args.scenario in ("p2c2", "p2c3")
         else (
             "✅ 走查全部通过（场景 p2c1：答 2 题 → 交卷 → 结果页四样数 + 空卷显示「—」）"
             if args.scenario == "p2c1"
