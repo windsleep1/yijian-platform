@@ -1,4 +1,4 @@
-"""C 端**浏览器**端到端走查（六个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1` / `p2c2` / `p2c3`）。
+"""C 端**浏览器**端到端走查（七个场景：`--scenario login` / `p2a` / `p2b1` / `p2c1` / `p2c2` / `p2c3` / `p2c4`）。
 
 为什么要单独写一个（而不是塞进 pytest）
 --------------------------------------
@@ -1873,6 +1873,265 @@ async def drive_p2c3(args: argparse.Namespace) -> dict[str, object]:
     return report
 
 
+async def drive_p2c4(args: argparse.Namespace) -> dict[str, object]:
+    """P2c-4 场景：**标记 / 收藏**（用户级状态）。
+
+    验收路径（用户口径）：标记一道题 → **刷新还在** → 错题本能筛出「已标记」；
+                          收藏一道题 → 我的页能列出 → **取消后消失**。
+
+    | # | 判据 | 没有它会怎样 |
+    |---|---|---|
+    | ① | 答题页有「⚑ 标记」「☆ 收藏」两个按钮，**初始都是未选态** | 少了"初始未选"，"按钮恒高亮"也能过（假绿） |
+    | ② | 点完**两个按钮都变成已选** | —— |
+    | ③ | ★ **刷新后两个状态都还在** | 只改前端 state 的实现也能过 ② |
+    | ④ | ★ 答题卡里这道题的格子是 **`marked` 态**（`cellKind` 的接线点真的通了） | 图例画着而格子不变也能过 |
+    | ⑤ | ★★ 错题本：**答错 2 道、只标 1 道** ⇒ 「只看已标记」只剩那 1 道（**且关掉筛选回到 2 道**） | 筛选恒真 / 恒假都能过 —— 只拿 1 道错题去筛，"筛了什么都没变"与"筛对了"长得一样 |
+    | ⑥ | ★★ 收藏页列出它；**取消收藏后它消失**（空态换成「还没有收藏」） | 只做"能进列表"的话，"取消不生效"也能过 |
+
+    ★ ①③ 与 ⑤⑥ 都是**成对**的（硬约定 J）：只验一头的话，另一头的实现全绿。
+    """
+
+    report: dict[str, object] = {}
+
+    async def new_session(b: "cdp_browser.Browser") -> str:
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelectorAll('main button[aria-pressed]').length > 0",
+            timeout=40,
+            label="科目列表加载完成",
+        )
+        await b.click("main button[aria-pressed]", nth=0)
+        await b.wait_for(_PRACTICE_CHAPTERS_AVAILABLE_JS, timeout=40, label="章节列表加载完成")
+        await b.click("main section:nth-of-type(2) ul li button:not([disabled])", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进答题页"
+        )
+        # ★★ **客户端跳转之后也要等 hydrate**：`goto_ready` 的等待只在整页 `goto` 时跑过，
+        #    而这里是 `router.push` ⇒ 新页只有 SSR HTML，React 还没挂监听。
+        #    那时点击**石沉大海且不报错**（`wait_hydrated` 的 docstring 记的就是这个坑）。
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0", timeout=40, label="有选项"
+        )
+        url = await b.eval("location.pathname")
+        need(isinstance(url, str) and url.startswith("/practice/session/"), f"URL 不对：{url!r}")
+        return url
+
+    async def answer_wrong(b: "cdp_browser.Browser") -> str:
+        """在当前题上**构造一次「答错」**，返回判分结论。
+
+        ★★ 为什么**不能**"点第一个选项就假设它错"（本批实测踩到）：
+          抽题是**随机的** ⇒ 第一个选项**可能就是正确答案** ⇒ 那道题**不进错题本**
+          ⇒ 后面所有"错题本里得有东西"的判据全塌，而**失败点会指向错题本筛选**（错方向）。
+        ⇒ 做法：提交后**读判分结论**；若是「答对了」就切下一题再试（最多 6 道）。
+          这样"答错"是**被断言出来的事实**，不是一个假设。
+
+        ★ 另：必须先等**选项可点**（`disabled={busy || revealed !== null}`）——
+          首屏 `busy` 在"数据到了但 finally 还没跑"的那一帧仍是 true：
+          此时**元素在、点了没反应、也不报错**（实测就这么 flake 过一次）。
+        """
+        can_click = (
+            "(() => { const el = document.querySelector('main ul li button'); "
+            "return el !== null && !el.disabled; })()"
+        )
+        for _ in range(6):
+            await b.wait_for(can_click, timeout=30, label="选项**可点**（不是只存在）")
+            await b.click("main ul li button", nth=0)
+            await b.wait_for(
+                'document.querySelector(\'main ul li button[aria-pressed="true"]\') !== null',
+                timeout=20,
+                label="选项已选中",
+            )
+            await b.click_text("提交", tag="button")
+            await b.wait_for(
+                "document.body.innerText.includes('正确答案')", timeout=40, label="出现判分结果"
+            )
+            verdict = await b.eval(
+                "(document.body.innerText.match(/(答对了|答错了)/) || [])[0] || ''"
+            )
+            need(verdict in ("答对了", "答错了"), f"没读到判分结论：{verdict!r}")
+            if verdict == "答错了":
+                return verdict
+            # 这题的第一选项恰好是对的 ⇒ 换下一题再试（错题本要的是"错"）
+            await b.click_text("下一题", tag="button")
+        raise Failure("连试 6 道题都答对了 ⇒ 构造不出「错题」，后面的判据没法验")
+
+    async def current_qid(b: "cdp_browser.Browser") -> str:
+        """当前题的 qid —— 从**常驻 DOM**的答题卡格子上取（`data-cell-state="current"`）。"""
+        qid = await b.eval(
+            "(() => { const el = document.querySelector('[data-sheet-grid] "
+            "button[data-cell-state=\"current\"]'); "
+            "return el ? el.getAttribute('data-cell-qid') : null; })()"
+        )
+        need(isinstance(qid, str) and qid != "", f"读不到当前题的 qid：{qid!r}")
+        return qid
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        await do_login(b, args)
+
+        # ---------------- ① 建 session → 故意答错第 1 题 ----------------
+        say("① 答错第 1 题（让它进错题本）⇒ 两个按钮**初始都应是未选态**")
+        url = await new_session(b)
+        await answer_wrong(b)
+        await b.wait_for(
+            "document.querySelector('[data-flag-mark]') !== null", timeout=30, label="有标记按钮"
+        )
+        need(
+            await b.eval("document.querySelector('[data-flag-fav]') !== null"),
+            "答题页应有「标记」与「收藏」两个按钮",
+        )
+        for sel, name in (("[data-flag-mark]", "标记"), ("[data-flag-fav]", "收藏")):
+            got = await b.eval(f"document.querySelector('{sel}').getAttribute('{sel[1:-1]}')")
+            need(got == "0", f"★ {name}按钮**初始**就该是未选态，实际 {got!r}")
+        q1 = await current_qid(b)
+        report["initial_state"] = "两个按钮都是 0（未选）"
+
+        # ---------------- ② 点两个按钮 ----------------
+        say("② 点「⚑ 标记」和「☆ 收藏」⇒ 都应变已选")
+        await b.click("[data-flag-mark]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-flag-mark=\"1\"]') !== null",
+            timeout=30,
+            label="标记按钮变已选",
+        )
+        await b.click("[data-flag-fav]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-flag-fav=\"1\"]') !== null",
+            timeout=30,
+            label="收藏按钮变已选",
+        )
+        report["toggled"] = "两个按钮都从 0 → 1"
+
+        # ---------------- ③ 刷新：状态必须还在 ----------------
+        say("③ 刷新页面 ⇒ **点答题卡跳回被标记的那道题**，两个状态都还在")
+        await b.goto_ready(f"{args.web_base}{url}")
+        await b.wait_for(
+            "document.querySelector('[data-sheet-open]') !== null", timeout=40, label="答题页就绪"
+        )
+        # ★★ 断点恢复落在**第一道未答的题**上（不是"你刚才标的那道"）——
+        #    所以要先跳回去（点答题卡上的题号，用户也是这么做的），否则断言的是**另一道题**。
+        await b.click("[data-sheet-open]", nth=0)
+        await b.click(f'[data-cell-qid="{q1}"]', nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-flag-mark=\"1\"]') !== null",
+            timeout=40,
+            label="刷新后「已标记」还在",
+        )
+        need(
+            await b.eval("document.querySelector('[data-flag-fav=\"1\"]') !== null"),
+            "刷新后「已收藏」也该还在 —— 只有前端 state 的话这里会回到 0",
+        )
+        await b.click_text("关闭", tag="button")
+        report["persisted_after_reload"] = "刷新后跳回该题，仍是「已标记 + 已收藏」"
+
+        # ---------------- ④ 答题卡：那道题应是 `marked` 态 ----------------
+        # ★★ 要先**离开**这道题：`cellKind()` 里 `current` **优先于** `marked`
+        #    （当前题的格子显示"当前"），所以"标记色"只在**不是当前题**的格子上看得见。
+        say("④ 切到第 2 题 ⇒ 第 1 题在答题卡上应是 `marked` 态")
+        await b.click_text("下一题", tag="button")
+        await b.wait_for(
+            f"(() => {{ const el = document.querySelector('[data-cell-qid=\"{q1}\"]'); "
+            f"return el !== null && el.getAttribute('data-cell-state') === 'marked'; }})()",
+            timeout=30,
+            label="第 1 题的格子是 marked 态",
+        )
+        await b.click("[data-sheet-open]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-sheet-grid]') !== null", timeout=30, label="答题卡可见"
+        )
+        await b.click_text("关闭", tag="button")
+        report["sheet_cell"] = f"{q1} 在答题卡里是 marked 态（切走之后）"
+
+        # ---------------- ⑤ 错题本：答错 2 道、只标 1 道 ----------------
+        say("⑤ 在当前这题上再答错 ⇒ 错题本 2 条；「只看已标记」应只剩第 1 道")
+        await answer_wrong(b)
+        q2 = await current_qid(b)
+        need(q2 != q1, f"第 2 题与第 1 题相同（{q2}）—— 这条判据构造不起来")
+
+        await b.goto_ready(f"{args.web_base}/practice/wrong")
+        await b.wait_for(
+            "document.querySelectorAll('[data-wrong-list] [data-wrong-row]').length > 0",
+            timeout=40,
+            label="错题本有列表",
+        )
+        all_n = await b.eval("document.querySelectorAll('[data-wrong-list] [data-wrong-row]').length")
+        need(all_n == 2, f"应恰好 2 条错题，实际 {all_n}")
+        await b.click("[data-marked-only]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-marked-only=\"1\"]') !== null",
+            timeout=30,
+            label="「只看已标记」已开",
+        )
+        await b.wait_for(
+            "document.querySelectorAll('[data-wrong-list] [data-wrong-row]').length === 1",
+            timeout=30,
+            label="筛后只剩 1 条",
+        )
+        only = await b.eval(
+            "Array.from(document.querySelectorAll('[data-wrong-list] [data-wrong-row]'))"
+            ".map((a) => a.getAttribute('data-wrong-row'))"
+        )
+        need(only == [q1], f"筛出来的应是**被标记的那道**：{only!r} != [{q1!r}]")
+        need(
+            await b.eval("document.querySelectorAll('[data-wrong-list] [data-marked]').length") == 1,
+            "这一行该带「已标记」徽章",
+        )
+        # ★ 关掉筛选 ⇒ 回到 2 条（证明筛选**真的**在起作用，而不是列表本来就 1 条）
+        await b.click("[data-marked-only]", nth=0)
+        await b.wait_for(
+            "document.querySelectorAll('[data-wrong-list] [data-wrong-row]').length === 2",
+            timeout=30,
+            label="关掉筛选回到 2 条",
+        )
+        report["wrong_book_filter"] = "只看已标记 ⇒ 1 条；关掉 ⇒ 2 条"
+
+        # ---------------- ⑥ 收藏页：列得出 → 取消后消失 ----------------
+        say("⑥ 我的 → 收藏页 ⇒ 有它；取消收藏 ⇒ 消失且换成「还没有收藏」")
+        await b.goto_ready(f"{args.web_base}/me")
+        await b.wait_for(
+            "document.querySelector('[data-entry=\"favorites\"]') !== null",
+            timeout=40,
+            label="我的页有收藏入口",
+        )
+        await b.click("[data-entry=\"favorites\"]", nth=0)
+        # ★ 同上：这是一次**客户端跳转**（`<Link>`），点击前必须等新页 hydrate。
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await b.wait_for(
+            "document.querySelector('[data-collect-list]') !== null", timeout=40, label="收藏页有列表"
+        )
+        rows = await b.eval(
+            "Array.from(document.querySelectorAll('[data-collect-list] [data-collect-row]'))"
+            ".map((a) => a.getAttribute('data-collect-row'))"
+        )
+        need(rows == [q1], f"收藏列表应是 [q1]：{rows!r}")
+        report["collection_list"] = f"收藏页有 {q1}"
+
+        await b.click(f"[data-collect-remove=\"{q1}\"]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-collect-empty]') !== null",
+            timeout=40,
+            label="取消后列表空",
+        )
+        need(
+            await b.eval("document.querySelectorAll('[data-collect-row]').length") == 0,
+            "取消收藏后它必须从列表里消失",
+        )
+        body = str(await b.eval("document.body.innerText"))
+        need("还没有收藏" in body, f"空态文案该是「还没有收藏」：{body[:160]!r}")
+        report["unfavorite_removes_row"] = "取消后列表空 + 文案「还没有收藏」"
+
+        # ★ 顺带：标记页签**仍在**（取消收藏不该动标记）
+        await b.click("[data-kind-tab=\"mark\"]", nth=0)
+        await b.wait_for(
+            "document.querySelectorAll('[data-collect-list] [data-collect-row]').length === 1",
+            timeout=40,
+            label="标记页签仍有 1 条",
+        )
+        report["mark_untouched"] = "取消收藏后，标记页签仍是 1 条"
+
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="e2e-web.py",
@@ -1886,7 +2145,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scenario",
         default="login",
-        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3"],
+        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3", "p2c4"],
         help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；"
         "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）；"
         "p2c1 = 交卷 → 结果页（总分/正确率/用时/知识点）+ 空卷必须显示「—」；"
@@ -1968,6 +2227,7 @@ def main(argv: list[str] | None = None) -> int:
             "p2c1": drive_p2c1,
             "p2c2": drive_p2c2,
             "p2c3": drive_p2c3,
+            "p2c4": drive_p2c4,
         }
         report = asyncio.run(drivers[args.scenario](args))
     except Failure as e:
@@ -1998,12 +2258,16 @@ def main(argv: list[str] | None = None) -> int:
         say(f"  ✅ {k} = {v}")
     say(
         (
-            "✅ 走查全部通过（场景 p2c3：错题本 → 重练这道题 → 用揭示的答案答对"
-            " → 回错题本看见「已重练 ✓」）"
-            if args.scenario == "p2c3"
-            else "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
+            "✅ 走查全部通过（场景 p2c4：答题页标记 + 收藏 → 刷新仍在 → 答题卡 marked 态"
+            " → 错题本只看已标记（2 选 1）→ 收藏页取消后消失）"
+            if args.scenario == "p2c4"
+            else (
+                "✅ 走查全部通过（场景 p2c3：错题本 → 重练这道题 → 用揭示的答案答对 → 回错题本看见「已重练 ✓」）"
+                if args.scenario == "p2c3"
+                else "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
+            )
         )
-        if args.scenario in ("p2c2", "p2c3")
+        if args.scenario in ("p2c2", "p2c3", "p2c4")
         else (
             "✅ 走查全部通过（场景 p2c1：答 2 题 → 交卷 → 结果页四样数 + 空卷显示「—」）"
             if args.scenario == "p2c1"

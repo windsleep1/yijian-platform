@@ -139,6 +139,13 @@ export type SessionItem = {
   is_correct: boolean | null;
   score: number | null;
   answered: boolean;
+  /**
+   * ★ 用户级（**题目级**）状态：来自 `question_marks` / `favorites`。
+   * ⚠️ **不是** `practice_items.marked`（那张表有 `session_id` ⇒ 是「这次练习的卷面标记」，
+   *    且全仓没有任何接口读写它）⇒ 别在这里换成 `practice_items` 的语义。
+   */
+  marked: boolean;
+  favorited: boolean;
   /** ⚠️ **未作答时恒为 null**（后端逐题判断可见性）。不要在前端"兜底"成 `{}`。 */
   answer: { value: unknown[] } | null;
   analysis: string | null;
@@ -205,6 +212,43 @@ export type WrongItem = {
   retry_correct: number;
   mastered_level: number;
   last_wrong_at: string | null;
+  /** ★ 我标记过它吗（`question_marks`）—— 错题本「已标记」筛选用它。 */
+  marked: boolean;
+};
+
+/** 收藏 / 标记列表的一行（`schemas/c_end.py` 的 `CollectionItemOut`）。
+ *  ★ 形状与 `WrongItem` 刻意一致 ⇒ 列表页那一套（分面 / 空态 / 分页）**直接复用**。 */
+export type CollectionItem = {
+  question_id: string;
+  subject_id: string | null;
+  subject_name: string | null;
+  chapter_name: string | null;
+  type: string;
+  stem: string;
+  stem_html: string | null;
+  /** 进这个列表的时间（收藏时间 / 标记时间）—— 后端按它倒序。 */
+  collected_at: string;
+  marked: boolean;
+  favorited: boolean;
+};
+
+/** `GET /practice/favorites?kind=`（`schemas/c_end.py` 的 `CollectionListOut`）。 */
+export type CollectionList = {
+  /** 回显请求的那一种（两个页签据此高亮）。 */
+  kind: "favorite" | "mark";
+  total: number;
+  page: number;
+  page_size: number;
+  /** ★ 分面**恒为全量**（不随筛选收缩）—— 与错题本同一条判据。 */
+  subjects: WrongSubject[];
+  items: CollectionItem[];
+};
+
+/** 标记 / 收藏写入后的**两个**状态（`schemas/c_end.py` 的 `FlagOut`）。 */
+export type FlagState = {
+  question_id: string;
+  marked: boolean;
+  favorited: boolean;
 };
 
 /** `GET /practice/wrong-questions`（`schemas/c_end.py` 的 `WrongListOut`）。 */

@@ -107,9 +107,21 @@ export default function MePage() {
         </div>
       </dl>
 
+      {/* ★ 我的收藏 / 标记（P2c-4）—— 按 IA（`docs/02` 页 35）放在 `/me/*` 下。
+          与错题本在 `/practice/wrong` 不一致**是有意的**：新功能没历史包袱，就按 IA 走
+          （导航从 Tab 统一进，用户看不到路径差异）。 */}
+      <Link
+        href="/me/favorites"
+        data-entry="favorites"
+        className="min-h-touch mt-8 flex w-full items-center justify-between rounded-lg border border-line px-4 font-medium"
+      >
+        <span>我的收藏 / 标记</span>
+        <span className="text-sub">→</span>
+      </Link>
+
       <Link
         href="/onboarding"
-        className="min-h-touch mt-8 flex w-full items-center justify-center rounded-lg border border-line font-medium"
+        className="min-h-touch mt-4 flex w-full items-center justify-center rounded-lg border border-line font-medium"
       >
         {onboarded ? "修改报考信息" : "去完成引导"}
       </Link>

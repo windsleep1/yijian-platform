@@ -167,6 +167,10 @@ class SessionItemOut(BaseModel):
     is_correct: bool | None = None
     score: float | None = None
     answered: bool = False
+    #: ★ 用户级（**题目级**）状态 —— 与 `question_marks` / `favorites` 对账，
+    #:   **不是** `practice_items.marked`（那是「这次练习的卷面标记」，粒度不对、未接线）。
+    marked: bool = False
+    favorited: bool = False
     #: ⚠️ **只有"已作答"或"会话已结束"时才非空** —— 见 practice_service 的 `_may_reveal`。
     answer: dict[str, Any] | None = None
     analysis: str | None = None
@@ -309,6 +313,8 @@ class WrongItemOut(BaseModel):
     retry_correct: int
     mastered_level: int
     last_wrong_at: datetime | None = None
+    #: ★ 我标记过它吗（`question_marks`）—— 错题本的「已标记」筛选用它。
+    marked: bool = False
 
 
 class WrongListOut(BaseModel):
@@ -317,6 +323,53 @@ class WrongListOut(BaseModel):
     page_size: int
     subjects: list[WrongSubjectOut] = []
     items: list[WrongItemOut] = []
+
+
+class CollectionItemOut(BaseModel):
+    """收藏 / 标记 列表的一行 —— 形状与 `WrongItemOut` **刻意保持一致**。
+
+    ★ 为什么一致：两个列表页的分面 / 空态 / 分页判据全都一样（那三条是 P2c-2 拿事故换来的），
+      形状一致才能**直接复用**前端那一套（各写一套迟早漂）。
+    """
+
+    question_id: BigIntStr
+    subject_id: BigIntStr | None = None
+    subject_name: str | None = None
+    chapter_name: str | None = None
+    type: str
+    stem: str
+    stem_html: str | None = None
+    #: 进这个列表的时间（收藏时间 / 标记时间）—— 列表按它倒序。
+    collected_at: datetime
+    #: ★ 两个状态**都给**（一道题可以既收藏又标记）—— 前端两个页签共用一次响应。
+    marked: bool = False
+    favorited: bool = False
+
+
+class CollectionListOut(BaseModel):
+    """收藏 / 标记 列表。`kind` 回显请求的那一种（前端两个页签据此高亮）。"""
+
+    kind: str
+    total: int
+    page: int
+    page_size: int
+    #: 分面**恒为全量**（不随 `subject_id` 收缩）—— 与错题本同一条判据，故复用同一个模型。
+    subjects: list[WrongSubjectOut] = []
+    items: list[CollectionItemOut] = []
+
+
+class FlagIn(BaseModel):
+    """标记 / 收藏的写入体。`on=true` 置上、`false` 取消。"""
+
+    on: bool = True
+
+
+class FlagOut(BaseModel):
+    """写入后的**两个**状态（前端两个按钮共用一次响应，省一次往返）。"""
+
+    question_id: BigIntStr
+    marked: bool = False
+    favorited: bool = False
 
 
 class WrongDetailOut(BaseModel):

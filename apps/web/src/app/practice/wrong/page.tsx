@@ -54,34 +54,40 @@ export default function WrongBookPage() {
   const router = useRouter();
   const [data, setData] = useState<WrongList | null>(null);
   const [subject, setSubject] = useState<string | null>(null);
+  //: ★ 只列「我标记过的」（P2c-4）。与科目筛选**正交**，可以叠加。
+  const [markedOnly, setMarkedOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [busy, setBusy] = useState(false);
   //: 建重练会话期间的**待定态**（硬约定 D：待定期间按钮必须 disabled）。
   const [starting, setStarting] = useState(false);
   const [err, setErr] = useState("");
 
-  const load = useCallback(async (nextSubject: string | null, nextPage: number) => {
-    setBusy(true);
-    setErr("");
-    try {
-      const d = await request<WrongList>("/practice/wrong-questions", {
-        query: {
-          subject_id: nextSubject ?? undefined,
-          page: nextPage,
-          page_size: PAGE_SIZE,
-        },
-      });
-      setData(d);
-    } catch (e) {
-      setErr(errText(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (nextSubject: string | null, nextPage: number, nextMarkedOnly: boolean) => {
+      setBusy(true);
+      setErr("");
+      try {
+        const d = await request<WrongList>("/practice/wrong-questions", {
+          query: {
+            subject_id: nextSubject ?? undefined,
+            marked_only: nextMarkedOnly || undefined,
+            page: nextPage,
+            page_size: PAGE_SIZE,
+          },
+        });
+        setData(d);
+      } catch (e) {
+        setErr(errText(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
-    void load(subject, page);
-  }, [load, subject, page]);
+    void load(subject, page, markedOnly);
+  }, [load, subject, page, markedOnly]);
 
   const pick = (sid: string | null) => {
     setSubject(sid);
@@ -166,6 +172,25 @@ export default function WrongBookPage() {
         ))}
       </div>
 
+      {/* ★ 「已标记」筛选（P2c-4）：与科目筛选**正交**（可叠加）。
+          ⚠️ 分面**不随它收缩** —— 与按科目筛同一条判据（收缩了就切不回去）。 */}
+      <button
+        type="button"
+        data-marked-only={markedOnly ? "1" : "0"}
+        aria-pressed={markedOnly}
+        onClick={() => {
+          setMarkedOnly((v) => !v);
+          setPage(1); // ★ 换筛选必须回第 1 页（否则第 3 页 + 新筛选 ⇒ 空列表）
+        }}
+        className={`mt-3 min-h-touch rounded-full border px-4 text-xs ${
+          markedOnly
+            ? "border-amber-400 bg-amber-50 font-medium text-amber-800"
+            : "border-line text-sub"
+        }`}
+      >
+        ⚑ 只看已标记
+      </button>
+
       {data !== null && data.items.length > 0 && (
         <button
           type="button"
@@ -194,9 +219,9 @@ export default function WrongBookPage() {
           data-wrong-empty={subject === null ? "no-data" : "filtered"}
           className="mt-6 rounded-xl border border-dashed border-line p-4 text-sm text-sub"
         >
-          {subject === null
+          {subject === null && !markedOnly
             ? "还没有错题。去练习里做几道，答错的题会自动记到这里。"
-            : "这个科目下还没有错题 —— 换个科目看看，或者点「全部」。"}
+            : "这个筛选下还没有错题 —— 换个科目、或关掉「只看已标记」。"}
         </p>
       )}
 
@@ -217,6 +242,14 @@ export default function WrongBookPage() {
                 <p className="mt-2 text-xs text-sub">
                   <span className="font-medium text-red-600">错 {it.wrong_count} 次</span>
                   {it.retry_correct > 0 && <span> · 重练答对 {it.retry_correct} 次</span>}
+                  {it.marked && (
+                    <span
+                      data-marked="1"
+                      className="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-amber-700"
+                    >
+                      已标记
+                    </span>
+                  )}
                   {it.chapter_name && <span> · {it.chapter_name}</span>}
                   {it.last_wrong_at && <span> · {when(it.last_wrong_at)}</span>}
                 </p>

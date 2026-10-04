@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, request } from "@/lib/api";
-import type { AnswerResult, PracticeSession, SessionItem } from "@/lib/types";
+import type { AnswerResult, FlagState, PracticeSession, SessionItem } from "@/lib/types";
 
 /**
  * 答题页（**P2b-1：显示当前题 → 选择 → 提交判分 → 显示解析**；
@@ -87,16 +87,15 @@ const CELL_LABEL: Record<CellKind, string> = {
 };
 
 /**
- * ⚠️ **本批「标记」不可达** —— 硬约定 F：状态"可达" ⟺ **有任何接口能写入它**。
+ * ★ **「标记」已接线（P2c-4，2026-10-04）** —— 用户级（**题目级**）标记的**唯一真相**是
+ *   `question_marks`，**不是** `practice_items.marked`（那张表有 `session_id` ⇒ 它只是
+ *   「**这次练习的卷面标记**」，且全仓没有任何接口读它或写它）。
  *
- * 事实：`practice_items.marked` 在库里**存在**（`db/schema.sql:775`），
- * 但**全仓没有任何接口读它或写它**（`grep -rn marked` 只命中 schema 与一条测试的 INSERT 列名）。
+ *   ⇒ 在练习 A 标的题，打开练习 B 的**同一道题**也显示已标记（**跨会话一致**）；
+ *     用旧列会得到"错题本说已标记、答题卡说未标记" —— 同一个事实两种说法。
  *
- * ⇒ 本批（P2b-2b）只做**显示通路**、**不做设置入口**；
- *   而且**不许把"显示得出来"说成"功能已实现"**（走查里那条"抽屉内按钮 = N 格 + 1 关闭"
- *   就是钉这个的）。
- * ★ **BL-21 的接线点**：`cellKind()` 里那一行 `if (it.marked === true) return "marked"` ——
- *   **全站唯一一处**。（同时要在 C 端出参补上 `marked` 字段。）
+ * ★ 接线点就是 `cellKind()` 里那一行 `if (it.marked) return "marked"` —— **全站唯一一处**。
+ *   收藏**不进答题卡**：它不属于「卷面」，只在下面的动作区（四态保持不变）。
  */
 
 export default function PracticeSessionPage() {
@@ -111,6 +110,8 @@ export default function PracticeSessionPage() {
   //   它会阻塞主线程、在无头浏览器里还要额外处理对话框事件；
   //   而「确认」这一步本身是可以被断言的**状态**（`data-confirm` 就是给走查的锚）。
   const [confirming, setConfirming] = useState(false);
+  //: 标记 / 收藏的待定态（硬约定 D：待定期间按钮必须 disabled）。
+  const [flagBusy, setFlagBusy] = useState(false);
   const router = useRouter();
   /**
    * ★★ **当前题由它定，不由 `sess.current_item_id` 现算** —— 这是本轮修掉的一个真 bug。
@@ -264,9 +265,10 @@ export default function PracticeSessionPage() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const cellKind = (it: SessionItem): CellKind => {
     if (it.item_id === cursor) return "current";
-    // ★★ **BL-21 接线点（全站唯一一处）**：将来在这里加
-    //    `if (it.marked === true) return "marked";`（并在 C 端出参补上 `marked`）。
-    //    本批**不加** —— `practice_items.marked` 没有读取接口，加了是死分支（硬约定 F）。
+    // ★★ **BL-21 接线点（全站唯一一处）** —— P2c-4 已接上。
+    //    `marked` 来自 `question_marks`（**题目级**、跨会话一致），
+    //    不是 `practice_items.marked`（卷面内、未接线）。
+    if (it.marked) return "marked";
     return it.answered ? "done" : "todo";
   };
   const jumpTo = useCallback((itemId: string) => {
@@ -334,6 +336,44 @@ export default function PracticeSessionPage() {
       setBusy(false);
     }
   }, [current, sess, busy, revealed, picked, judge]);
+
+  /**
+   * 切换「标记」/「收藏」（P2c-4）。
+   *
+   * ★ 成功后**只就地更新这两个字段**（值来自响应，不是前端自己推的）——
+   *   不去重新 GET 整个 session：那是"刷新数据"，与"用户动作"是两件事（硬约定 S）。
+   * ★ `PUT` 置上 / `DELETE` 取消，两者都**幂等** ⇒ 连点两次的净效果与一次相同。
+   */
+  const toggleFlag = useCallback(
+    async (path: "marks" | "favorites") => {
+      if (!current || flagBusy) return;
+      const on = path === "marks" ? !current.marked : !current.favorited;
+      setFlagBusy(true);
+      setErr("");
+      try {
+        const d = await request<FlagState>(`/practice/${path}/${current.question_id}`, {
+          method: on ? "PUT" : "DELETE",
+        });
+        setSess((s) =>
+          s === null
+            ? s
+            : {
+                ...s,
+                items: s.items.map((x) =>
+                  x.item_id === current.item_id
+                    ? { ...x, marked: d.marked, favorited: d.favorited }
+                    : x,
+                ),
+              },
+        );
+      } catch (e) {
+        setErr(errText(e));
+      } finally {
+        setFlagBusy(false);
+      }
+    },
+    [current, flagBusy],
+  );
 
   const supported = current !== null && ["single", "multiple", "judge"].includes(current.type);
   const canSubmit = !busy && !revealed && supported && toValue(current!, picked, judge) !== null;
@@ -527,6 +567,39 @@ export default function PracticeSessionPage() {
                 )}
               </div>
 
+              {/* ★ 标记 / 收藏（P2c-4）：**用户级**状态（题目级 ⇒ 跨会话一致）。
+                  成功后**只就地更新这两个字段**（值来自响应，不是前端自己推的）——
+                  不去重新 GET 整个 session：那是「刷新数据」，与「用户动作」是两件事
+                  （P2b-1 那条「刷新不许移动当前位置」的教训）。 */}
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  data-flag-mark={current.marked ? "1" : "0"}
+                  disabled={flagBusy}
+                  onClick={() => void toggleFlag("marks")}
+                  className={`min-h-touch flex-1 rounded-xl border text-sm disabled:opacity-40 ${
+                    current.marked
+                      ? "border-amber-400 bg-amber-50 font-medium text-amber-800"
+                      : "border-line"
+                  }`}
+                >
+                  {current.marked ? "⚑ 已标记" : "⚑ 标记"}
+                </button>
+                <button
+                  type="button"
+                  data-flag-fav={current.favorited ? "1" : "0"}
+                  disabled={flagBusy}
+                  onClick={() => void toggleFlag("favorites")}
+                  className={`min-h-touch flex-1 rounded-xl border text-sm disabled:opacity-40 ${
+                    current.favorited
+                      ? "border-brand bg-brand/10 font-medium text-brand"
+                      : "border-line"
+                  }`}
+                >
+                  {current.favorited ? "★ 已收藏" : "☆ 收藏"}
+                </button>
+              </div>
+
               {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}
               <div className="mt-4 flex items-center gap-3">
                 <button
@@ -602,8 +675,8 @@ export default function PracticeSessionPage() {
                 </div>
               </div>
 
-              {/* 图例：四种状态。★「标记」目前**不可达**（见 `isMarked` 的注释）——
-                  图例先给出来，是让"四种状态"这件事**在界面上成立**，不是宣称它已可用。 */}
+              {/* 图例：四种状态。★「标记」自 **P2c-4** 起**真的可达**（`question_marks`，题目级）
+                  —— 这条图例不再是"先摆着"：它描述的四种状态现在都会出现。 */}
               <div className="mt-3 flex flex-wrap gap-3 text-xs text-sub">
                 {(["todo", "done", "current", "marked"] as CellKind[]).map((k) => (
                   <span key={k} className="flex items-center gap-1">

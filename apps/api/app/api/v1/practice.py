@@ -5,7 +5,10 @@
     POST /practice/sessions/{id}/answer     提交一道题并判分
     POST /practice/sessions/{id}/finish     交卷（#7，P2c-1）
     GET  /practice/sessions/{id}/report     报告：总分 / 正确率 / 用时 / 知识点分布（P2c-1）
-    GET  /practice/wrong-questions          错题本列表（可按科目筛选）（P2c-2）
+    GET  /practice/wrong-questions          错题本列表（按科目 / **只筛已标记**）（P2c-2 / P2c-4）
+    PUT|DELETE /practice/favorites/{qid}    收藏 / 取消（幂等）（P2c-4）
+    PUT|DELETE /practice/marks/{qid}        标记 / 取消（幂等）（P2c-4）
+    GET  /practice/favorites                收藏 / 标记 列表（`kind` 切题源）（P2c-4）
     GET  /practice/wrong-questions/{qid}    错题详情（含正确答案与解析）（P2c-2）
 
 ⚠️ **本批只做"数据流跑通"**（用户 2026-09-29 的原话）：先证明后端到前端的完整往返，
@@ -19,12 +22,16 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Path, Query
 
 from app.core.deps import CurrentUserDep, DbSession
 from app.core.response import Envelope, ok
 from app.schemas.c_end import (
     AnswerIn,
+    CollectionListOut,
+    FlagOut,
     AnswerResultOut,
     SessionCreateIn,
     SessionOut,
@@ -104,11 +111,17 @@ async def list_wrong_questions(
     db: DbSession,
     me: CurrentUserDep,
     subject_id: int | None = Query(None, description="按科目筛选（不传 = 全部）"),
+    marked_only: bool = Query(False, description="只列**我标记过的**（P2c-4）；分面仍为全量"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=50),
 ) -> dict:
     data = await practice_service.list_wrong(
-        db, user_id=me.id, subject_id=subject_id, page=page, page_size=page_size
+        db,
+        user_id=me.id,
+        subject_id=subject_id,
+        marked_only=marked_only,
+        page=page,
+        page_size=page_size,
     )
     return ok(data.model_dump())
 
@@ -203,5 +216,119 @@ async def submit_answer(
         session_id=session_id,
         item_id=int(body.item_id),
         value=body.value,
+    )
+    return ok(data.model_dump())
+
+
+# ============================================================ 收藏 / 标记（P2c-4）
+
+
+async def _flag(db: DbSession, user_id: int, question_id: int, *, kind: str, on: bool) -> dict:
+    """四个写端点**共用的那一跳**（只有 HTTP 方法 / 路径不同，逻辑一模一样）。
+
+    ★ 为什么不写成一个通用端点（`PUT /flags/{qid}` 带 `kind` 入参）：
+      两个概念**是两行数据**、可以同时存在，各自的"置 / 清"语义一眼可读；
+      合成一个只会让"我到底改了什么"需要先看请求体。
+    """
+    data = await practice_service.set_flag(
+        db, user_id=user_id, question_id=question_id, kind=kind, on=on
+    )
+    return ok(
+        FlagOut(
+            question_id=str(question_id), marked=data["marked"], favorited=data["favorited"]
+        ).model_dump()
+    )
+
+
+@router.put(
+    "/favorites/{question_id}",
+    response_model=Envelope[FlagOut],
+    summary="收藏一道题（**幂等**）",
+    description=(
+        "置上收藏。**幂等判据 =「目标状态已达成」**（硬约定 C）：已经收藏过 ⇒ "
+        "`ON CONFLICT DO NOTHING`，**净零变更**（连 `created_at` 都不动）。\n\n"
+        "- 题目必须 **`published` 且未软删**，否则 `40401`（**不是 403**）——\n"
+        "  否则会留下指向「用户看不到的题」的脏收藏，而它在列表里表现为**空题干**；\n"
+        "- 返回**两个**状态（`marked` / `favorited`）：它们各是一行数据，可以同时存在。"
+    ),
+)
+async def favorite_question(
+    db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
+) -> dict:
+    return await _flag(db, me.id, question_id, kind="favorite", on=True)
+
+
+@router.delete(
+    "/favorites/{question_id}",
+    response_model=Envelope[FlagOut],
+    summary="取消收藏（**幂等**）",
+    description="清掉收藏。**没收藏过也返成功**（`DELETE` 影响 0 行 = 目标状态已达成）。",
+)
+async def unfavorite_question(
+    db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
+) -> dict:
+    return await _flag(db, me.id, question_id, kind="favorite", on=False)
+
+
+@router.put(
+    "/marks/{question_id}",
+    response_model=Envelope[FlagOut],
+    summary="标记一道题（**幂等**）",
+    description=(
+        "置上标记。语义与收藏**同一层**（用户 × 题目），但**是另一行数据** ——\n"
+        "两者可以同时存在，所以 `favorites` 与 `question_marks` **不合表**\n"
+        "（`favorites` 的唯一索引是 `(user_id, target_type, target_id)`，合表撑不住）。\n\n"
+        "★ 用户级「标记」的唯一真相是 `question_marks`；\n"
+        "`practice_items.marked` / `exam_attempt_items.marked` 是**卷面内**标记、**未接线**。"
+    ),
+)
+async def mark_question(
+    db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
+) -> dict:
+    return await _flag(db, me.id, question_id, kind="mark", on=True)
+
+
+@router.delete(
+    "/marks/{question_id}",
+    response_model=Envelope[FlagOut],
+    summary="取消标记（**幂等**）",
+)
+async def unmark_question(
+    db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
+) -> dict:
+    return await _flag(db, me.id, question_id, kind="mark", on=False)
+
+
+@router.get(
+    "/favorites",
+    response_model=Envelope[CollectionListOut],
+    summary="收藏 / 标记 列表（`kind` 切题源）",
+    description=(
+        "两个列表**同形状**，只有题源不同：\n\n"
+        "- `kind=favorite`（默认）= 我收藏的（`favorites`，`target_type='question'`）；\n"
+        "- `kind=mark` = 我标记的（`question_marks`）。\n\n"
+        "★ **为什么「标记」也要有列表**：标记可以打在**从没错过**的题上，"
+        "那种题**不在错题本里** ⇒ 只做「错题本筛已标记」的话，用户会问"
+        "「**我标的题去哪看**」。\n"
+        "- 按 `collected_at` 倒序（最近放的在前）；\n"
+        "- `subject_id` 可选；`subjects` 分面**恒为全量**（与错题本同一条判据）；\n"
+        "- 只列**可见**的题：题目下架后标记**保留**、但这里不出现（过滤在查询侧 ⇒ 恢复后自然回来）。"
+    ),
+)
+async def list_collections(
+    db: DbSession,
+    me: CurrentUserDep,
+    kind: Literal["favorite", "mark"] = Query("favorite", description="favorite=收藏 / mark=标记"),
+    subject_id: int | None = Query(None, description="按科目筛选（不传 = 全部）"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+) -> dict:
+    data = await practice_service.list_collections(
+        db,
+        user_id=me.id,
+        kind=kind,
+        subject_id=subject_id,
+        page=page,
+        page_size=page_size,
     )
     return ok(data.model_dump())

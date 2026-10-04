@@ -469,7 +469,6 @@ CREATE TABLE favorites (
 );
 CREATE UNIQUE INDEX uq_favorites ON favorites(user_id, target_type, target_id);
 CREATE INDEX idx_favorites_user ON favorites(user_id, created_at DESC);
-
 -- 评论 / 答疑
 CREATE TABLE comments (
   id          BIGINT PRIMARY KEY,
@@ -772,6 +771,8 @@ CREATE TABLE practice_items (
   is_correct   BOOLEAN,
   score        NUMERIC(6,2),
   time_ms      INTEGER     NOT NULL DEFAULT 0,
+  -- ⚠️ **卷面内**标记（这次练习的这一格）；**没有接口读它或写它**。
+  --    用户级「标记」的唯一真相 = `question_marks`（2026-10-04 起）—— 别用这一列。
   marked       BOOLEAN     NOT NULL DEFAULT false,
   show_analysis BOOLEAN    NOT NULL DEFAULT false,
   answered_at  TIMESTAMPTZ,
@@ -810,6 +811,28 @@ CREATE INDEX idx_uqs_wrong ON user_question_state(user_id, subject_id, status) W
 CREATE TRIGGER trg_uqs_updated BEFORE UPDATE ON user_question_state FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- 错题本（独立表，便于人工整理与教研分析；与 uqs 通过 userId+questionId 对齐）
+
+-- ---------------------------------------------------------------------------
+-- 用户 × 题目的「标记」（**唯一真相**）—— 2026-10-04 C 端批次 2 加
+-- ---------------------------------------------------------------------------
+-- ⚠️ **为什么不是 `practice_items.marked`**：那张表有 `session_id` ⇒ 它是"**这次练习的
+--    卷面标记**"，粒度是**会话 × 题**。而"错题本筛已标记"是**跨练习**的问法
+--    ⇒ 用旧列会出现"错题本说已标记、答题卡说未标记"（**同一个事实两种说法**）。
+-- ⚠️ **为什么不是 `user_question_state` 加一列**：那张表的"**有行**"本身就是抽题判据
+--    （`_PICK_SQL` 的 `ORDER BY (uqs.id IS NOT NULL)` = 未做过的优先）⇒ 为标记一道
+--    **没答过**的题插一行会**改变抽题顺序**，且**不报错**。
+-- ⇒ 所以单开一张语义单一的表。**用户级"标记"一律走它**，旧列保留但**不再接线**。
+CREATE TABLE question_marks (
+  id          BIGINT PRIMARY KEY,
+  user_id     BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  question_id BIGINT      NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+  subject_id  BIGINT      NOT NULL,          -- 冗余，给"按科目筛选"用（省一次 join）
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_question_marks ON question_marks(user_id, question_id);
+CREATE INDEX idx_question_marks_user ON question_marks(user_id, created_at DESC);
+
+
 CREATE TABLE wrong_questions (
   id            BIGINT PRIMARY KEY,
   user_id       BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -965,6 +988,8 @@ CREATE TABLE exam_attempt_items (
   review_comment  VARCHAR(1000),
   point_hits      JSONB       NOT NULL DEFAULT '[]'::jsonb,   -- 主观题评分点命中情况
   time_ms         INTEGER     NOT NULL DEFAULT 0,
+  -- ⚠️ 同 `practice_items.marked`：**考场内**标记、未接线；
+  --    用户级「标记」的唯一真相 = `question_marks`。
   marked          BOOLEAN     NOT NULL DEFAULT false,
   answered_at     TIMESTAMPTZ,
   reviewed_at     TIMESTAMPTZ,

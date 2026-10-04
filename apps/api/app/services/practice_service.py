@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, String, bindparam, text
+from sqlalchemy import BigInteger, Boolean, Integer, String, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import bad_request, conflict, not_found
@@ -23,6 +23,8 @@ from app.core.idgen import next_id
 from app.schemas.answer import judge_bool
 from app.schemas.c_end import (
     AnswerResultOut,
+    CollectionItemOut,
+    CollectionListOut,
     ChapterOut,
     KpStatOut,
     QuestionOptionOut,
@@ -45,6 +47,32 @@ GRADABLE_TYPES: tuple[str, ...] = ("single", "multiple", "judge")
 #:    加一个新题型只需要改上面那一行。用 `= ANY(:arr)` 要额外声明数组类型，
 #:    而那条路在 `asyncpg` 上正是坑 73 那一族（裸参数推不出类型）。
 _TYPES_SQL = ", ".join(f"'{t}'" for t in GRADABLE_TYPES)
+
+
+def _marked_exists(qref: str, uref: str = ":uid") -> str:
+    """「我标记过这道题吗」——**全站唯一一处**写法。
+
+    ★ **必须在文件顶部**：它被下面那些**模块级 SQL 常量**在 f-string 里立即求值，
+      定义在末尾会在 **import 时** NameError（实测 ruff 先报 6 条 F821）。
+    ★ 为什么写成函数：这个谓词在**查询列**与**筛选条件**里都要用（错题本的 `marked`
+      与 `marked_only`、两个列表的 `marked`）⇒ 手抄两遍必然漂（同族：坑 93）。
+    ★ 为什么用 `:uid` 而不是外层表的 `w.user_id`：外层已经 `WHERE user_id = :uid`，
+      两者等价，但用 `:uid` 让这个片段**能贴到任何"以我为口径"的查询里**。
+    """
+    return (
+        "EXISTS (SELECT 1 FROM question_marks mk"
+        f" WHERE mk.user_id = {uref} AND mk.question_id = {qref})"
+    )
+
+
+def _favorited_exists(qref: str, uref: str = ":uid") -> str:
+    """「我收藏过这道题吗」——同上，唯一一处。"""
+    return (
+        "EXISTS (SELECT 1 FROM favorites fv"
+        f" WHERE fv.user_id = {uref} AND fv.target_type = 'question'"
+        f" AND fv.target_id = {qref})"
+    )
+
 
 #: 多选题"选对一半"的得分系数。全对 = 1.0，**真子集且无错选** = 0.5，其他 = 0。
 #: 是否允许部分分由**题目自己的** `answer.partial_credit` 决定（下面 `grade` 的注释）。
@@ -557,9 +585,11 @@ _SELECT_SESSION = text(
 ).bindparams(bindparam("sid", type_=BigInteger), bindparam("uid", type_=BigInteger))
 
 _SELECT_ITEMS = text(
-    """
+    f"""
     SELECT i.id AS item_id, i.seq, i.question_id, i.user_answer, i.is_correct, i.score,
-           i.answered_at, q.type, q.stem, q.stem_html, q.answer, q.analysis, q.analysis_html
+           i.answered_at, q.type, q.stem, q.stem_html, q.answer, q.analysis, q.analysis_html,
+           {_marked_exists("q.id", "i.user_id")} AS marked,
+           {_favorited_exists("q.id", "i.user_id")} AS favorited
       FROM practice_items i
       JOIN questions q ON q.id = i.question_id
      WHERE i.session_id = :sid
@@ -638,6 +668,10 @@ async def get_session(db: AsyncSession, *, user_id: int, session_id: int) -> Ses
                 ),
                 analysis=(r["analysis"] if reveal else None),
                 analysis_html=(r["analysis_html"] if reveal else None),
+                # ★ 用户级（题目级）状态 —— 与 `question_marks` / `favorites` 对账，
+                #   **不是** `practice_items.marked`（那是卷面内标记，未接线）。
+                marked=bool(r["marked"]),
+                favorited=bool(r["favorited"]),
             )
         )
 
@@ -666,22 +700,27 @@ async def get_session(db: AsyncSession, *, user_id: int, session_id: int) -> Ses
 #:   后者让参数在"NULL / 数字"之间摇摆，而 `asyncpg` 要靠类型推参数 ——
 #:   这正是坑 73 那一族（裸参数推不出类型）。**能免则免**：两条常量，各自绑定明确的类型。
 #: ★ 两条的差异**只有** `AND w.subject_id = :sub` 一行，其余逐字相同。
-_WRONG_BASE_SQL = """
+_WRONG_BASE_SQL = f"""
     SELECT w.question_id, w.subject_id, w.chapter_id, w.wrong_count, w.retry_correct,
            w.mastered_level, w.last_wrong_at,
            s.name AS subject_name, ch.name AS chapter_name,
-           q.type, q.stem
+           q.type, q.stem,
+           {_marked_exists("w.question_id")} AS marked
       FROM wrong_questions w
       JOIN questions q  ON q.id = w.question_id
       LEFT JOIN subjects s ON s.id = w.subject_id
       LEFT JOIN chapters ch ON ch.id = w.chapter_id
      WHERE w.user_id = :uid AND w.is_removed = false
+       -- ★ `:mo` 为 NULL / false ⇒ 不过滤（`:mo IS NOT TRUE` 与 `NOT :mo` 的差别在这里：
+       --   后者在 NULL 时是 NULL ⇒ 整个 WHERE 变 NULL ⇒ **一行都不返**）
+       AND (:mo IS NOT TRUE OR {_marked_exists("w.question_id")})
 """
 
 _SELECT_WRONG_PAGE = text(
     _WRONG_BASE_SQL + " ORDER BY w.last_wrong_at DESC, w.question_id DESC LIMIT :lim OFFSET :off"
 ).bindparams(
     bindparam("uid", type_=BigInteger),
+    bindparam("mo", type_=Boolean),
     bindparam("lim", type_=Integer),
     bindparam("off", type_=Integer),
 )
@@ -693,18 +732,26 @@ _SELECT_WRONG_PAGE_BY_SUBJECT = text(
 ).bindparams(
     bindparam("uid", type_=BigInteger),
     bindparam("sub", type_=BigInteger),
+    bindparam("mo", type_=Boolean),
     bindparam("lim", type_=Integer),
     bindparam("off", type_=Integer),
 )
 
 _COUNT_WRONG = text(
-    "SELECT count(*) AS n FROM wrong_questions w WHERE w.user_id = :uid AND w.is_removed = false"
-).bindparams(bindparam("uid", type_=BigInteger))
+    f"SELECT count(*) AS n FROM wrong_questions w "
+    "WHERE w.user_id = :uid AND w.is_removed = false "
+    f"AND (:mo IS NOT TRUE OR {_marked_exists('w.question_id')})"
+).bindparams(bindparam("uid", type_=BigInteger), bindparam("mo", type_=Boolean))
 
 _COUNT_WRONG_BY_SUBJECT = text(
-    "SELECT count(*) AS n FROM wrong_questions w "
-    "WHERE w.user_id = :uid AND w.is_removed = false AND w.subject_id = :sub"
-).bindparams(bindparam("uid", type_=BigInteger), bindparam("sub", type_=BigInteger))
+    f"SELECT count(*) AS n FROM wrong_questions w "
+    "WHERE w.user_id = :uid AND w.is_removed = false AND w.subject_id = :sub "
+    f"AND (:mo IS NOT TRUE OR {_marked_exists('w.question_id')})"
+).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("sub", type_=BigInteger),
+    bindparam("mo", type_=Boolean),
+)
 
 #: 分面：科目分布。★★ **恒为全量**，不随 `subject_id` 收缩 —— 见 `list_wrong` 里的注释：
 #:   分面的作用正是「**让你看见还能切到哪**」，收缩之后就切不过去了（p2c2 走查抓到的真缺陷）。
@@ -745,6 +792,7 @@ async def list_wrong(
     *,
     user_id: int,
     subject_id: int | None = None,
+    marked_only: bool = False,
     page: int = 1,
     page_size: int = WRONG_PAGE_DEFAULT,
 ) -> WrongListOut:
@@ -767,9 +815,16 @@ async def list_wrong(
     off = (page - 1) * page_size
 
     if subject_id is None:
-        total = int((await db.execute(_COUNT_WRONG, {"uid": user_id})).scalar() or 0)
+        total = int(
+            (await db.execute(_COUNT_WRONG, {"uid": user_id, "mo": marked_only})).scalar() or 0
+        )
         rows = (
-            (await db.execute(_SELECT_WRONG_PAGE, {"uid": user_id, "lim": page_size, "off": off}))
+            (
+                await db.execute(
+                    _SELECT_WRONG_PAGE,
+                    {"uid": user_id, "mo": marked_only, "lim": page_size, "off": off},
+                )
+            )
             .mappings()
             .all()
         )
@@ -777,7 +832,10 @@ async def list_wrong(
     else:
         total = int(
             (
-                await db.execute(_COUNT_WRONG_BY_SUBJECT, {"uid": user_id, "sub": subject_id})
+                await db.execute(
+                    _COUNT_WRONG_BY_SUBJECT,
+                    {"uid": user_id, "sub": subject_id, "mo": marked_only},
+                )
             ).scalar()
             or 0
         )
@@ -785,17 +843,13 @@ async def list_wrong(
             (
                 await db.execute(
                     _SELECT_WRONG_PAGE_BY_SUBJECT,
-                    {"uid": user_id, "sub": subject_id, "lim": page_size, "off": off},
-                )
-            )
-            .mappings()
-            .all()
-        )
-        rows = (
-            (
-                await db.execute(
-                    _SELECT_WRONG_PAGE_BY_SUBJECT,
-                    {"uid": user_id, "sub": subject_id, "lim": page_size, "off": off},
+                    {
+                        "uid": user_id,
+                        "sub": subject_id,
+                        "mo": marked_only,
+                        "lim": page_size,
+                        "off": off,
+                    },
                 )
             )
             .mappings()
@@ -819,6 +873,7 @@ async def list_wrong(
                 chapter_name=r["chapter_name"],
                 type=str(r["type"]),
                 stem=str(r["stem"]),
+                marked=bool(r["marked"]),
                 wrong_count=int(r["wrong_count"]),
                 retry_correct=int(r["retry_correct"]),
                 mastered_level=int(r["mastered_level"]),
@@ -1251,8 +1306,225 @@ async def submit_answer(
     )
 
 
+# ============================================================ 收藏 / 标记（P2c-4）
+
+
+#: 题目必须**可见**才允许标记 / 收藏 —— 否则会留下指向"用户看不到的题"的脏标记，
+#: 而那种脏标记在列表里**表现成一个空题干**（比报错更难查）。
+_SELECT_QUESTION_USABLE = text(
+    "SELECT q.id, q.subject_id FROM questions q "
+    "WHERE q.id = :qid AND q.status = 'published' AND q.is_deleted = false"
+).bindparams(bindparam("qid", type_=BigInteger))
+
+#: ★ 幂等：`ON CONFLICT DO NOTHING` ⇒ 重复 PUT **净零变更**（连 `created_at` 都不动）。
+#:   判据 = 硬约定 C 的"**目标状态已达成**"。
+_INSERT_FAVORITE = text(
+    "INSERT INTO favorites (id, user_id, target_type, target_id, subject_id) "
+    "VALUES (:id, :uid, 'question', :qid, :sub) "
+    "ON CONFLICT (user_id, target_type, target_id) DO NOTHING"
+).bindparams(
+    bindparam("id", type_=BigInteger),
+    bindparam("uid", type_=BigInteger),
+    bindparam("qid", type_=BigInteger),
+    bindparam("sub", type_=BigInteger),
+)
+
+_DELETE_FAVORITE = text(
+    "DELETE FROM favorites WHERE user_id = :uid AND target_type = 'question' AND target_id = :qid"
+).bindparams(bindparam("uid", type_=BigInteger), bindparam("qid", type_=BigInteger))
+
+_INSERT_MARK = text(
+    "INSERT INTO question_marks (id, user_id, question_id, subject_id) "
+    "VALUES (:id, :uid, :qid, :sub) "
+    "ON CONFLICT (user_id, question_id) DO NOTHING"
+).bindparams(
+    bindparam("id", type_=BigInteger),
+    bindparam("uid", type_=BigInteger),
+    bindparam("qid", type_=BigInteger),
+    bindparam("sub", type_=BigInteger),
+)
+
+_DELETE_MARK = text(
+    "DELETE FROM question_marks WHERE user_id = :uid AND question_id = :qid"
+).bindparams(bindparam("uid", type_=BigInteger), bindparam("qid", type_=BigInteger))
+
+_SELECT_FLAGS = text(
+    f"SELECT {_marked_exists('q.id')} AS marked, {_favorited_exists('q.id')} AS favorited "
+    "FROM questions q WHERE q.id = :qid"
+).bindparams(bindparam("qid", type_=BigInteger), bindparam("uid", type_=BigInteger))
+
+
+async def _assert_question_usable(db: AsyncSession, *, question_id: int) -> int:
+    """返 `subject_id`。题目不存在 / 未发布 / 已软删 ⇒ **`40401`**（不是 403）。"""
+    row = (await db.execute(_SELECT_QUESTION_USABLE, {"qid": question_id})).mappings().first()
+    if row is None:
+        raise not_found("这道题不存在或已下架", 40401)
+    return int(row["subject_id"])
+
+
+async def get_flags(db: AsyncSession, *, user_id: int, question_id: int) -> dict[str, bool]:
+    """读一道题的两个状态。**题目不存在 ⇒ 两个都 false**（读路径不报错，硬约定 A）。"""
+    row = (await db.execute(_SELECT_FLAGS, {"qid": question_id, "uid": user_id})).mappings().first()
+    if row is None:
+        return {"marked": False, "favorited": False}
+    return {"marked": bool(row["marked"]), "favorited": bool(row["favorited"])}
+
+
+async def set_flag(
+    db: AsyncSession, *, user_id: int, question_id: int, kind: str, on: bool
+) -> dict[str, bool]:
+    """置 / 清「收藏」或「标记」。**幂等**（判据 = 目标状态已达成），返回**两个**状态。
+
+    ★ 为什么返回两个：前端两个按钮共用一次响应，省一次往返；
+      而且"我点了收藏，标记还在吗"这个问题**只有后端知道**（它们是两行数据）。
+    """
+    subject_id = await _assert_question_usable(db, question_id=question_id)
+    new_id = next_id()
+    if kind == "favorite":
+        stmt = _INSERT_FAVORITE if on else _DELETE_FAVORITE
+        params = (
+            {"id": new_id, "uid": user_id, "qid": question_id, "sub": subject_id}
+            if on
+            else {"uid": user_id, "qid": question_id}
+        )
+    elif kind == "mark":
+        stmt = _INSERT_MARK if on else _DELETE_MARK
+        params = (
+            {"id": new_id, "uid": user_id, "qid": question_id, "sub": subject_id}
+            if on
+            else {"uid": user_id, "qid": question_id}
+        )
+    else:  # pragma: no cover —— 路由层的 Literal 已经卡住，这里是 service 被直接调用时的兜底
+        raise bad_request(f"未知的标记类型：{kind}", 40001)
+    await db.execute(stmt, params)
+    # 同 `create_session`：`get_db` **不自动 commit** ⇒ 漏了这一句会"接口成功但查不到"。
+    await db.commit()
+    return await get_flags(db, user_id=user_id, question_id=question_id)
+
+
+#: 两个列表的**题源**（其余完全一样 ⇒ 只有 FROM 不同，别的都共用）。
+_COLLECTION_SRC = {
+    "favorite": (
+        "(SELECT target_id AS qid, created_at FROM favorites"
+        " WHERE user_id = :uid AND target_type = 'question')"
+    ),
+    "mark": "(SELECT question_id AS qid, created_at FROM question_marks WHERE user_id = :uid)",
+}
+
+_COLLECTION_COLS = (
+    "SELECT q.id AS question_id, q.subject_id, q.chapter_id, q.type, q.stem, q.stem_html,"
+    "       s.name AS subject_name, ch.name AS chapter_name,"
+    "       src.created_at AS collected_at,"
+    f"       {_marked_exists('q.id')} AS marked,"
+    f"       {_favorited_exists('q.id')} AS favorited"
+)
+
+_COLLECTION_TAIL = (
+    "  JOIN questions q  ON q.id = src.qid"
+    "  LEFT JOIN subjects s  ON s.id = q.subject_id"
+    "  LEFT JOIN chapters ch ON ch.id = q.chapter_id"
+    " WHERE q.status = 'published' AND q.is_deleted = false"
+    "   AND (:sid IS NULL OR q.subject_id = :sid)"
+)
+
+
+def _collection_sql(kind: str, tail: str) -> str:
+    return f"{_COLLECTION_COLS} FROM {_COLLECTION_SRC[kind]} src {_COLLECTION_TAIL}{tail}"
+
+
+_COLLECT_PAGE = {
+    k: text(
+        _collection_sql(k, " ORDER BY src.created_at DESC, q.id DESC LIMIT :lim OFFSET :off")
+    ).bindparams(
+        bindparam("uid", type_=BigInteger),
+        bindparam("sid", type_=BigInteger),
+        bindparam("lim", type_=Integer),
+        bindparam("off", type_=Integer),
+    )
+    for k in _COLLECTION_SRC
+}
+
+_COLLECT_COUNT = {
+    k: text(f"SELECT count(*) AS n FROM {_COLLECTION_SRC[k]} src {_COLLECTION_TAIL}").bindparams(
+        bindparam("uid", type_=BigInteger), bindparam("sid", type_=BigInteger)
+    )
+    for k in _COLLECTION_SRC
+}
+
+#: 分面：**恒为全量**（不随 `subject_id` 收缩）—— 与错题本**同一条判据**
+#: （`list_wrong` 里那段：分面的作用正是"让你看见还能切到哪"，收缩之后就切不过去了）。
+_COLLECT_FACETS = {
+    k: text(
+        "SELECT q.subject_id, COALESCE(s.name, '未归类') AS name, count(*) AS n"
+        f" FROM {_COLLECTION_SRC[k]} src"
+        "  JOIN questions q ON q.id = src.qid"
+        "  LEFT JOIN subjects s ON s.id = q.subject_id"
+        " WHERE q.status = 'published' AND q.is_deleted = false"
+        " GROUP BY 1, 2 ORDER BY 3 DESC, 1"
+    ).bindparams(bindparam("uid", type_=BigInteger))
+    for k in _COLLECTION_SRC
+}
+
+
+async def list_collections(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    kind: str,
+    subject_id: int | None = None,
+    page: int = 1,
+    page_size: int = WRONG_PAGE_DEFAULT,
+) -> CollectionListOut:
+    """收藏 / 标记列表（两个列表**同形状**，只有题源不同）。
+
+    ★ `kind`：`favorite` = 我收藏的；`mark` = 我标记的。
+      ★★ **为什么"标记"也要有列表**：标记可以打在**从没错过**的题上，那种题**不在错题本里**
+         ⇒ 只做"错题本筛已标记"的话，用户会问"**我标的题去哪看**"。
+    ★ 分面**恒为全量**（与错题本同一条判据 —— 见 `list_wrong` 的注释里那段教训）。
+    ★ 只列**可见**的题（`published` 且未软删）：题目下架后**标记保留**、但列表里不出现；
+      过滤放在查询侧 ⇒ 题目恢复后它自然回来（不是"删掉标记"）。
+    """
+    if kind not in _COLLECTION_SRC:
+        raise bad_request(f"未知的列表类型：{kind}", 40001)
+    page = max(1, int(page))
+    page_size = max(1, min(WRONG_PAGE_MAX, int(page_size)))
+    off = (page - 1) * page_size
+    params = {"uid": user_id, "sid": subject_id, "lim": page_size, "off": off}
+    total = int((await db.execute(_COLLECT_COUNT[kind], params)).scalar() or 0)
+    rows = (await db.execute(_COLLECT_PAGE[kind], params)).mappings().all()
+    facets = (await db.execute(_COLLECT_FACETS[kind], params)).mappings().all()
+    return CollectionListOut(
+        kind=kind,
+        total=total,
+        page=page,
+        page_size=page_size,
+        subjects=[
+            WrongSubjectOut(subject_id=f["subject_id"], name=str(f["name"]), count=int(f["n"]))
+            for f in facets
+        ],
+        items=[
+            CollectionItemOut(
+                question_id=r["question_id"],
+                subject_id=r["subject_id"],
+                subject_name=r["subject_name"],
+                chapter_name=r["chapter_name"],
+                type=str(r["type"]),
+                stem=str(r["stem"]),
+                stem_html=r["stem_html"],
+                collected_at=r["collected_at"],
+                marked=bool(r["marked"]),
+                favorited=bool(r["favorited"]),
+            )
+            for r in rows
+        ],
+    )
+
+
 __all__ = [
     "GRADABLE_TYPES",
+    "get_flags",
+    "list_collections",
+    "set_flag",
     "PARTIAL_CREDIT_RATIO",
     "create_session",
     "finish_session",
