@@ -2131,6 +2131,236 @@ async def drive_p2c4(args: argparse.Namespace) -> dict[str, object]:
 
     return report
 
+async def drive_p2c5(args: argparse.Namespace) -> dict[str, object]:
+    """P2c-5 场景：**笔记**（用户 × 题目）。
+
+    验收路径（用户口径）：写一条笔记 → 我的页能列出。
+
+    | # | 判据 | 没有它会怎样 |
+    |---|---|---|
+    | ① | ★ 「✎ 笔记」按钮**初始** `data-note-count="0"`，展开是空态 | 少了初始态，"写了"与"本来就有一条"长得一样（假绿） |
+    | ② | 写一条 ⇒ 面板里 1 条 + 徽标变 1 | —— |
+    | ③ | ★★ **刷新后笔记还在**（先跳回那道题） | 只改前端 state 的实现也能过 ② |
+    | ④ | ★★ 编辑 ⇒ 内容变、**条数仍是 1** | "编辑其实插了一条新的"也能过"内容变了" |
+    | ⑤ | ★ 我的 → 笔记页**列得出**，且带题干摘要 | —— |
+    | ⑥ | ★★ 删除 ⇒ 列表里消失 **且回答题页徽标归 0** | 只删了列表那一行、"库里还在"照样过 |
+
+    ★ ②③ 与 ④⑥ 都是**成对**的（硬约定 J）：只验一头，另一头的实现全绿。
+    """
+    report: dict[str, object] = {}
+    content = "排除法：先看明显错的选项"
+    edited = "排除法：先看明显错的选项（改过）"
+
+    async def new_session(b: "cdp_browser.Browser") -> str:
+        await b.goto_ready(f"{args.web_base}/practice")
+        await b.wait_for(
+            "document.querySelectorAll('main button[aria-pressed]').length > 0",
+            timeout=40,
+            label="科目列表加载完成",
+        )
+        await b.click("main button[aria-pressed]", nth=0)
+        await b.wait_for(_PRACTICE_CHAPTERS_AVAILABLE_JS, timeout=40, label="章节列表加载完成")
+        await b.click("main section:nth-of-type(2) ul li button:not([disabled])", nth=0)
+        await b.wait_for(
+            "location.pathname.startsWith('/practice/session/')", timeout=60, label="进答题页"
+        )
+        # ★★ 客户端跳转（`router.push`）之后**也要等 hydrate** —— `goto_ready` 的等待
+        #    只在整页 `goto` 时跑过；不等的话点击**石沉大海且不报错**（坑 101）。
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await b.wait_for(
+            "document.querySelectorAll('main ul li button').length > 0", timeout=40, label="有选项"
+        )
+        url = await b.eval("location.pathname")
+        need(isinstance(url, str) and url.startswith("/practice/session/"), f"URL 不对：{url!r}")
+        return url
+
+    async def current_qid(b: "cdp_browser.Browser") -> str:
+        qid = await b.eval(
+            "(() => { const el = document.querySelector('[data-sheet-grid] "
+            "button[data-cell-state=\"current\"]'); "
+            "return el ? el.getAttribute('data-cell-qid') : null; })()"
+        )
+        need(isinstance(qid, str) and qid != "", f"读不到当前题的 qid：{qid!r}")
+        return qid
+
+    async def note_count(b: "cdp_browser.Browser") -> str:
+        return str(
+            await b.eval(
+                "document.querySelector('[data-note-open]').getAttribute('data-note-count')"
+            )
+        )
+
+    async def open_panel(b: "cdp_browser.Browser") -> None:
+        if await b.eval("document.querySelector('[data-note-panel]') === null"):
+            await b.click("[data-note-open]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-note-panel]') !== null", timeout=30, label="笔记面板展开"
+        )
+
+    async def note_ids(b: "cdp_browser.Browser") -> list[str]:
+        got = await b.eval(
+            "Array.from(document.querySelectorAll('[data-note-list] [data-note-id]'))"
+            ".map((a) => a.getAttribute('data-note-id'))"
+        )
+        return list(got) if isinstance(got, list) else []
+
+    async def jump_to(b: "cdp_browser.Browser", qid: str) -> None:
+        """把游标移到指定的那道题。
+
+        ★ 断点恢复落在**第一道未答的题**，不是"你刚操作的那道"（批次 2 实测）
+          ⇒ 断言前必须自己跳回去，不能假设它还在那儿。
+        """
+        if await current_qid(b) == qid:
+            return
+        await b.click("[data-sheet-open]", nth=0)
+        await b.wait_for(
+            f"document.querySelector('[data-sheet-grid] button[data-cell-qid=\"{qid}\"]') !== null",
+            timeout=30,
+            label="答题卡里有这道题",
+        )
+        await b.click(f"[data-sheet-grid] button[data-cell-qid=\"{qid}\"]", nth=0)
+        await b.wait_for(
+            "(() => { const el = document.querySelector('[data-sheet-grid] "
+            "button[data-cell-state=\"current\"]'); "
+            f"return el !== null && el.getAttribute('data-cell-qid') === '{qid}'; }})()",
+            timeout=30,
+            label="游标跳到那道题",
+        )
+
+    async with cdp_browser.Browser(width=VIEW_W, height=VIEW_H, mobile=True) as b:
+        await do_login(b, args)
+
+        # ---------------- ① 按钮在、计数 0、面板空态 ----------------
+        say("① 进答题页 ⇒ 「✎ 笔记」按钮在，计数**初始为 0**（可证伪锚）")
+        url = await new_session(b)
+        await b.wait_for(
+            "document.querySelector('[data-note-open]') !== null", timeout=30, label="有笔记按钮"
+        )
+        got = await note_count(b)
+        need(got == "0", f"★ 还没写过，计数就该是 0，实际 {got!r}（这是下面「变 1」的可证伪锚）")
+        q1 = await current_qid(b)
+        await open_panel(b)
+        await b.wait_for(
+            "document.querySelector('[data-note-empty=\"none\"]') !== null",
+            timeout=30,
+            label="空态「这道题还没有笔记」",
+        )
+        report["initial"] = "按钮 data-note-count=0；面板空态「这道题还没有笔记」"
+
+        # ---------------- ② 写一条 ----------------
+        say("② 写一条笔记 ⇒ 面板里 1 条 + 徽标变 1")
+        await b.type_text("[data-note-input]", content)
+        await b.click("[data-note-submit]", nth=0)
+        await b.wait_for(
+            "document.querySelectorAll('[data-note-list] [data-note-id]').length === 1",
+            timeout=40,
+            label="面板里出现 1 条",
+        )
+        ids = await note_ids(b)
+        note_id = ids[0]
+        # ★ 正文用 `includes` 而不是全等：这里的文案是纯 CJK、不含引号 ⇒ `!r` 出来的
+        #   JS 单引号字面量一定合法（换成含引号的内容要改成 JSON.stringify）。
+        need(
+            await b.eval(
+                f"document.querySelector('[data-note-content=\"{note_id}\"]')"
+                f".innerText.includes({content!r})"
+            ),
+            "刚写的正文应原样显示在面板里",
+        )
+        await b.wait_for(
+            "document.querySelector('[data-note-open]').getAttribute('data-note-count') === '1'",
+            timeout=30,
+            label="徽标变 1",
+        )
+        report["created"] = f"1 条（id={note_id}），徽标=1"
+
+        # ---------------- ③ 刷新后还在 ----------------
+        say("③ 刷新页面 ⇒ **跳回那道题**，笔记仍在（不是只改了前端 state）")
+        await b.goto_ready(f"{args.web_base}{url}")
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await b.wait_for(
+            "document.querySelector('[data-note-open]') !== null", timeout=40, label="按钮在"
+        )
+        await jump_to(b, q1)
+        need(await note_count(b) == "1", "刷新后徽标仍是 1（否则说明它只活在前端 state 里）")
+        await open_panel(b)
+        await b.wait_for(
+            "document.querySelectorAll('[data-note-list] [data-note-id]').length === 1",
+            timeout=40,
+            label="刷新后笔记还在",
+        )
+        report["persisted"] = "刷新后跳回那道题，笔记仍 1 条、徽标=1"
+
+        # ---------------- ④ 编辑仍是 1 条 ----------------
+        say("④ 编辑 ⇒ 内容变了、**条数仍是 1**（拦「编辑其实插了一条」）")
+        await b.click(f"[data-note-edit=\"{note_id}\"]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-note-edit-input]') !== null", timeout=30, label="编辑框出现"
+        )
+        # 先全选，再打字 ⇒ 是**替换**而不是追加（否则断言"内容变了"会假绿）
+        await b.eval(
+            "(() => { const el = document.querySelector('[data-note-edit-input]'); "
+            "el.focus(); el.select(); return true; })()"
+        )
+        await b.type_text("[data-note-edit-input]", edited)
+        await b.click("[data-note-edit-save]", nth=0)
+        await b.wait_for(
+            f"document.querySelector('[data-note-content=\"{note_id}\"]')"
+            f".innerText.includes({edited!r})",
+            timeout=40,
+            label="正文已更新",
+        )
+        need(
+            await b.eval("document.querySelectorAll('[data-note-list] [data-note-id]').length") == 1,
+            "★★ 编辑**不是新增** ⇒ 条数必须还是 1（这条专门拦「编辑其实插了一条新的」）",
+        )
+        report["edited_still_one"] = "编辑后正文变、条数仍 1"
+
+        # ---------------- ⑤ 我的 → 笔记页列得出 ----------------
+        say("⑤ 我的 → 我的笔记 ⇒ 列得出它（带题干摘要）")
+        await b.goto_ready(f"{args.web_base}/me")
+        await b.wait_for(
+            "document.querySelector('[data-entry=\"notes\"]') !== null",
+            timeout=40,
+            label="我的页有笔记入口",
+        )
+        await b.click("[data-entry=\"notes\"]", nth=0)
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await b.wait_for(
+            "document.querySelector('[data-note-list]') !== null", timeout=40, label="笔记页有列表"
+        )
+        rows = await b.eval(
+            "Array.from(document.querySelectorAll('[data-note-list] [data-note-row]'))"
+            ".map((a) => a.getAttribute('data-note-row'))"
+        )
+        need(rows == [note_id], f"笔记列表应是 [{note_id}]：{rows!r}")
+        need(
+            await b.eval(f"document.querySelector('[data-note-stem=\"{note_id}\"]') !== null"),
+            "列表每行该带题干摘要（列表的用处是**认出那是哪道题**）",
+        )
+        report["list_page"] = f"笔记页列出 {note_id}（带题干）"
+
+        # ---------------- ⑥ 删除 ⇒ 列表与徽标都归零 ----------------
+        say("⑥ 删除 ⇒ 列表里消失，且回答题页徽标**归 0**")
+        await b.click(f"[data-note-del=\"{note_id}\"]", nth=0)
+        await b.wait_for(
+            "document.querySelector('[data-note-empty]') !== null", timeout=40, label="列表空态"
+        )
+        need(
+            await b.eval("document.querySelectorAll('[data-note-row]').length") == 0,
+            "删除后那一行必须消失",
+        )
+        await b.goto_ready(f"{args.web_base}{url}")
+        await b.wait_hydrated(timeout=args.hydrate_timeout)
+        await jump_to(b, q1)
+        need(
+            await note_count(b) == "0",
+            "★★ 删干净了 ⇒ 答题页徽标必须回到 0（只看列表的话，「库里还在」照样能过）",
+        )
+        report["deleted_zero"] = "笔记页消失 + 答题页徽标归 0"
+
+    return report
+
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -2145,7 +2375,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scenario",
         default="login",
-        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3", "p2c4"],
+        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3", "p2c4", "p2c5"],
         help="login = P1 登录闭环；p2a = Tab + 注册 + 引导；"
         "p2b1 = 刷题数据流（选章节 → 建练习 → 答题判分 → 刷新仍在 → 按钮切题）；"
         "p2c1 = 交卷 → 结果页（总分/正确率/用时/知识点）+ 空卷必须显示「—」；"
@@ -2228,6 +2458,7 @@ def main(argv: list[str] | None = None) -> int:
             "p2c2": drive_p2c2,
             "p2c3": drive_p2c3,
             "p2c4": drive_p2c4,
+            "p2c5": drive_p2c5,
         }
         report = asyncio.run(drivers[args.scenario](args))
     except Failure as e:
@@ -2258,16 +2489,21 @@ def main(argv: list[str] | None = None) -> int:
         say(f"  ✅ {k} = {v}")
     say(
         (
-            "✅ 走查全部通过（场景 p2c4：答题页标记 + 收藏 → 刷新仍在 → 答题卡 marked 态"
-            " → 错题本只看已标记（2 选 1）→ 收藏页取消后消失）"
-            if args.scenario == "p2c4"
+            "✅ 走查全部通过（场景 p2c5：答题页写笔记 → 刷新仍在 → 编辑仍是 1 条"
+            " → 我的页列得出 → 删除后列表与徽标都归零）"
+            if args.scenario == "p2c5"
             else (
-                "✅ 走查全部通过（场景 p2c3：错题本 → 重练这道题 → 用揭示的答案答对 → 回错题本看见「已重练 ✓」）"
-                if args.scenario == "p2c3"
-                else "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
+                "✅ 走查全部通过（场景 p2c4：答题页标记 + 收藏 → 刷新仍在 → 答题卡 marked 态"
+                " → 错题本只看已标记（2 选 1）→ 收藏页取消后消失）"
+                if args.scenario == "p2c4"
+                else (
+                    "✅ 走查全部通过（场景 p2c3：错题本 → 重练 → 用揭示的答案答对 → 回错题本见「已重练 ✓」）"
+                    if args.scenario == "p2c3"
+                    else "✅ 走查全部通过（场景 p2c2：错题本列表 → 按科目筛选对账 → 详情 → 没错过的题被拒）"
+                )
             )
         )
-        if args.scenario in ("p2c2", "p2c3", "p2c4")
+        if args.scenario in ("p2c2", "p2c3", "p2c4", "p2c5")
         else (
             "✅ 走查全部通过（场景 p2c1：答 2 题 → 交卷 → 结果页四样数 + 空卷显示「—」）"
             if args.scenario == "p2c1"

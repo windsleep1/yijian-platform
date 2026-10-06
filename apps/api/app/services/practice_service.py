@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import BigInteger, Boolean, Integer, String, bindparam, text
@@ -22,6 +23,9 @@ from app.core.errors import bad_request, conflict, not_found
 from app.core.idgen import next_id
 from app.schemas.answer import judge_bool
 from app.schemas.c_end import (
+    NoteListItemOut,
+    NoteListOut,
+    NoteOut,
     AnswerResultOut,
     CollectionItemOut,
     CollectionListOut,
@@ -72,6 +76,32 @@ def _favorited_exists(qref: str, uref: str = ":uid") -> str:
         f" WHERE fv.user_id = {uref} AND fv.target_type = 'question'"
         f" AND fv.target_id = {qref})"
     )
+
+
+def _in_wrong_book_exists(qref: str, uref: str = ":uid") -> str:
+    """「这道题在我的**错题本**里吗」—— 收藏 / 标记列表**能不能链到错题详情页**靠它。
+
+    ★ 为什么需要它（批次 2 遗留的一个真缺陷）：列表每一行都链到 `/practice/wrong/{qid}`，
+      而那个页面**要求错题本里有这道题**（没有 ⇒ `404`）⇒
+      **「收藏了但从没错过」的题点开就报错**。判据 = 只有它为真才渲染成链接。
+    """
+    return (
+        "EXISTS (SELECT 1 FROM wrong_questions wq"
+        f" WHERE wq.user_id = {uref} AND wq.question_id = {qref} AND wq.is_removed = false)"
+    )
+
+
+def _question_available(qref: str = "q") -> str:
+    """「这道题对用户**可见**吗」—— **全文件唯一一处**写这个表达式。
+
+    ★ **必须在文件顶部**：理由同 `_marked_exists` —— 它被下面那些**模块级 SQL 常量**
+      在 f-string 里立即求值，定义在末尾会在 **import 时** NameError（实测过）。
+    ★ 为什么必须抽出来：它现在被 **5 处** SQL 用（错题本 / 收藏·标记列表 ×2 / 笔记 ×2），
+      手抄就是「同一个事实两种写法」（不变量 8）—— 哪天「可见」的定义变了
+      （比如新增 `status='archived'` 也算可读），漏掉一处**不会报错**，
+      只会让某个列表的口径和别处悄悄不一样。
+    """
+    return f"({qref}.status = 'published' AND {qref}.is_deleted = false)"
 
 
 #: 多选题"选对一半"的得分系数。全对 = 1.0，**真子集且无错选** = 0.5，其他 = 0。
@@ -589,7 +619,15 @@ _SELECT_ITEMS = text(
     SELECT i.id AS item_id, i.seq, i.question_id, i.user_answer, i.is_correct, i.score,
            i.answered_at, q.type, q.stem, q.stem_html, q.answer, q.analysis, q.analysis_html,
            {_marked_exists("q.id", "i.user_id")} AS marked,
-           {_favorited_exists("q.id", "i.user_id")} AS favorited
+           {_favorited_exists("q.id", "i.user_id")} AS favorited,
+           -- ★★ 行内列 i.user_id（**不是**另一个绑定参数）：这个查询只传 session id ——
+           --    多一个绑定参数会让**所有**取 session 详情的请求 50001（批次 2 踩过）。
+           -- ⚠️ 而**注释里也不许**出现「冒号 + 名字」：`text()` 不做注释剥离，照样会把它
+           --    登记成一个绑定参数（本批实测踩到，见坑 103）—— 症状同样是 50001，
+           --    而这条 SQL 看起来完全正常。有 `test_sql_text_hygiene.py` 兜着。
+           (SELECT count(*) FROM notes nt
+             WHERE nt.user_id = i.user_id AND nt.target_type = 'question'
+               AND nt.target_id = i.question_id AND nt.is_deleted = false) AS note_count
       FROM practice_items i
       JOIN questions q ON q.id = i.question_id
      WHERE i.session_id = :sid
@@ -672,6 +710,7 @@ async def get_session(db: AsyncSession, *, user_id: int, session_id: int) -> Ses
                 #   **不是** `practice_items.marked`（那是卷面内标记，未接线）。
                 marked=bool(r["marked"]),
                 favorited=bool(r["favorited"]),
+                note_count=int(r["note_count"] or 0),
             )
         )
 
@@ -705,6 +744,7 @@ _WRONG_BASE_SQL = f"""
            w.mastered_level, w.last_wrong_at,
            s.name AS subject_name, ch.name AS chapter_name,
            q.type, q.stem,
+           {_question_available("q")} AS question_available,
            {_marked_exists("w.question_id")} AS marked
       FROM wrong_questions w
       JOIN questions q  ON q.id = w.question_id
@@ -874,6 +914,7 @@ async def list_wrong(
                 type=str(r["type"]),
                 stem=str(r["stem"]),
                 marked=bool(r["marked"]),
+                question_available=bool(r["question_available"]),
                 wrong_count=int(r["wrong_count"]),
                 retry_correct=int(r["retry_correct"]),
                 mastered_level=int(r["mastered_level"]),
@@ -1312,7 +1353,7 @@ async def submit_answer(
 #: 题目必须**可见**才允许标记 / 收藏 —— 否则会留下指向"用户看不到的题"的脏标记，
 #: 而那种脏标记在列表里**表现成一个空题干**（比报错更难查）。
 _SELECT_QUESTION_USABLE = text(
-    "SELECT q.id, q.subject_id FROM questions q "
+    "SELECT q.id, q.subject_id, q.chapter_id FROM questions q "
     "WHERE q.id = :qid AND q.status = 'published' AND q.is_deleted = false"
 ).bindparams(bindparam("qid", type_=BigInteger))
 
@@ -1354,12 +1395,17 @@ _SELECT_FLAGS = text(
 ).bindparams(bindparam("qid", type_=BigInteger), bindparam("uid", type_=BigInteger))
 
 
-async def _assert_question_usable(db: AsyncSession, *, question_id: int) -> int:
-    """返 `subject_id`。题目不存在 / 未发布 / 已软删 ⇒ **`40401`**（不是 403）。"""
+async def _assert_question_usable(db: AsyncSession, *, question_id: int) -> Mapping[str, Any]:
+    """题目不存在 / 未发布 / 已软删 ⇒ **`40401`**（不是 403）；否则返它那一行。
+
+    ★ 返**整行**（`id` / `subject_id` / `chapter_id`）而不是只返 `subject_id`：
+      笔记要 `chapter_id` 冗余一份，而**可见性条件只许有一处写法**（不变量 8）——
+      再写一条同样的 `WHERE` 就是「同一个事实两种写法」，迟早分叉。
+    """
     row = (await db.execute(_SELECT_QUESTION_USABLE, {"qid": question_id})).mappings().first()
     if row is None:
         raise not_found("这道题不存在或已下架", 40401)
-    return int(row["subject_id"])
+    return row
 
 
 async def get_flags(db: AsyncSession, *, user_id: int, question_id: int) -> dict[str, bool]:
@@ -1378,7 +1424,15 @@ async def set_flag(
     ★ 为什么返回两个：前端两个按钮共用一次响应，省一次往返；
       而且"我点了收藏，标记还在吗"这个问题**只有后端知道**（它们是两行数据）。
     """
-    subject_id = await _assert_question_usable(db, question_id=question_id)
+    #: ★★ **守卫只挡「新增」**（约定 T，2026-10-06）：
+    #:   题目下架后，用户**既看不到**自己的标记/收藏（列表不再过滤，见 `_COLLECTION_TAIL`）、
+    #:   **也必须能把它撤掉** —— 而取消走的是**同一个**守卫，会把「我的东西」锁死在库里。
+    #:   ⇒ 「取消」只要求**归属**（`WHERE user_id = :uid` 已经写在 SQL 里），不要求题目可见。
+    #:   ★ 副作用（有意）：`DELETE /practice/marks/{不存在的题}` 现在返 200 而不是 40401 ——
+    #:     它只动**我自己**的行、且「目标状态已达成」，同时**不再泄露「这个 question_id 存不存在」**。
+    subject_id = (
+        int((await _assert_question_usable(db, question_id=question_id))["subject_id"]) if on else 0
+    )
     new_id = next_id()
     if kind == "favorite":
         stmt = _INSERT_FAVORITE if on else _DELETE_FAVORITE
@@ -1416,15 +1470,18 @@ _COLLECTION_COLS = (
     "       s.name AS subject_name, ch.name AS chapter_name,"
     "       src.created_at AS collected_at,"
     f"       {_marked_exists('q.id')} AS marked,"
-    f"       {_favorited_exists('q.id')} AS favorited"
+    f"       {_favorited_exists('q.id')} AS favorited,"
+    f"       {_question_available('q')} AS question_available,"
+    f"       {_in_wrong_book_exists('q.id')} AS in_wrong_book"
 )
 
 _COLLECTION_TAIL = (
     "  JOIN questions q  ON q.id = src.qid"
     "  LEFT JOIN subjects s  ON s.id = q.subject_id"
     "  LEFT JOIN chapters ch ON ch.id = q.chapter_id"
-    " WHERE q.status = 'published' AND q.is_deleted = false"
-    "   AND (:sid IS NULL OR q.subject_id = :sid)"
+    #: ★★ 约定 T：**不**按题目可见性过滤 —— 题目下架后那道题**仍然列出来**，
+    #:   只是 `question_available=false`（前端标「题目已下架」）。
+    " WHERE (:sid IS NULL OR q.subject_id = :sid)"
 )
 
 
@@ -1459,7 +1516,8 @@ _COLLECT_FACETS = {
         f" FROM {_COLLECTION_SRC[k]} src"
         "  JOIN questions q ON q.id = src.qid"
         "  LEFT JOIN subjects s ON s.id = q.subject_id"
-        " WHERE q.status = 'published' AND q.is_deleted = false"
+        #: ★ 与列表**同一条口径**（约定 T）：分面也不按可见性收缩 —— 否则"下架那几道"
+        #:   会从科目计数里凭空少掉，而用户点进去又看得到。
         " GROUP BY 1, 2 ORDER BY 3 DESC, 1"
     ).bindparams(bindparam("uid", type_=BigInteger))
     for k in _COLLECTION_SRC
@@ -1481,8 +1539,12 @@ async def list_collections(
       ★★ **为什么"标记"也要有列表**：标记可以打在**从没错过**的题上，那种题**不在错题本里**
          ⇒ 只做"错题本筛已标记"的话，用户会问"**我标的题去哪看**"。
     ★ 分面**恒为全量**（与错题本同一条判据 —— 见 `list_wrong` 的注释里那段教训）。
-    ★ 只列**可见**的题（`published` 且未软删）：题目下架后**标记保留**、但列表里不出现；
-      过滤放在查询侧 ⇒ 题目恢复后它自然回来（不是"删掉标记"）。
+    ★★ **约定 T（2026-10-06）：「我的内容」不随「平台内容」的生命周期变化。**
+      题目下架后，我收藏/标记过的那道题**仍然列在这里**，只是 `question_available=false`
+      （前端标「题目已下架」）—— **平台可以下架题目，但不能让用户写下的东西消失**。
+      ★ 本批改掉了旧口径（原来是过滤掉）：那时它有两个后果，都不出声 ——
+        ① 那道题的收藏**从列表里无声消失**；② 用户**连取消都做不到**
+        （`set_flag` 的取消走同一条可见性守卫）。
     """
     if kind not in _COLLECTION_SRC:
         raise bad_request(f"未知的列表类型：{kind}", 40001)
@@ -1514,15 +1576,292 @@ async def list_collections(
                 collected_at=r["collected_at"],
                 marked=bool(r["marked"]),
                 favorited=bool(r["favorited"]),
+                question_available=bool(r["question_available"]),
+                in_wrong_book=bool(r["in_wrong_book"]),
             )
             for r in rows
         ],
     )
 
 
+# ============================================================ 笔记（P2c-5）
+#
+# ★★ 约定 T（2026-10-06）：「我的内容」（笔记 / 收藏 / 标记 / 错题）**不随「平台内容」
+#    （题目 / 课程）的生命周期变化** —— 平台可以下架题目，但**不能让用户写下的东西消失**。
+#    ⇒ 本段的**读**路径一律**不**按 `q.status` / `q.is_deleted` 过滤；题目下架只体现在
+#      出参 `question_available=false` 上（前端标「题目已下架」）。
+#    ★ 但**新增**笔记仍要求题目可见（见 `create_note`）—— 那道门管的是"将来"，
+#      不是对"已经写下的东西"的追溯。两件事不矛盾。
+#    ★★ 另一个副产品：这里 JOIN 一律用 **LEFT JOIN**。用 INNER 的话，题目**硬删**时
+#      那条笔记会**整行消失**（而不是显示成"已下架"）—— 约定就被绕过去了。
+
+#: 本题**我的**笔记。**不分页** —— 面板里就那么几条，分页只会多一次往返。
+_SELECT_NOTES_OF_QUESTION = text(
+    f"""
+    SELECT n.id, n.target_id AS question_id, n.content, n.created_at, n.updated_at,
+           {_question_available("q")} AS question_available
+      FROM notes n
+      LEFT JOIN questions q ON q.id = n.target_id
+     WHERE n.user_id = :uid AND n.target_type = 'question' AND n.target_id = :qid
+       AND n.is_deleted = false
+     ORDER BY n.created_at, n.id
+    """
+).bindparams(bindparam("uid", type_=BigInteger), bindparam("qid", type_=BigInteger))
+
+_NOTE_BASE_SQL = f"""
+    SELECT n.id, n.target_id AS question_id, n.content, n.created_at, n.updated_at,
+           {_question_available("q")} AS question_available,
+           n.subject_id, s.name AS subject_name, ch.name AS chapter_name,
+           q.type, q.stem
+      FROM notes n
+      LEFT JOIN questions q  ON q.id = n.target_id
+      LEFT JOIN subjects s   ON s.id = n.subject_id
+      LEFT JOIN chapters ch  ON ch.id = n.chapter_id
+     WHERE n.user_id = :uid AND n.target_type = 'question' AND n.is_deleted = false
+"""
+
+#: ⚠️ 同 `_WRONG_BASE_SQL`：**写两条**而不是 `(:sub IS NULL OR …)` —— 后者让参数在
+#:   NULL / 数字之间摇摆，`asyncpg` 推不出类型（坑 73 那一族）。两条的差异**只有一行**。
+_SELECT_NOTES_PAGE = text(
+    _NOTE_BASE_SQL + " ORDER BY n.created_at DESC, n.id DESC LIMIT :lim OFFSET :off"
+).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("lim", type_=Integer),
+    bindparam("off", type_=Integer),
+)
+
+_SELECT_NOTES_PAGE_BY_SUBJECT = text(
+    _NOTE_BASE_SQL
+    + "   AND n.subject_id = :sub"
+    + " ORDER BY n.created_at DESC, n.id DESC LIMIT :lim OFFSET :off"
+).bindparams(
+    bindparam("uid", type_=BigInteger),
+    bindparam("sub", type_=BigInteger),
+    bindparam("lim", type_=Integer),
+    bindparam("off", type_=Integer),
+)
+
+#: 计数与列表**共用同一段 WHERE**（只差 `AND n.subject_id = :sub`）——
+#: 抄一遍就会出现"列表 5 条、总数 6 条"这种**不报错**的错。
+_NOTE_COUNT_SQL = (
+    "SELECT count(*) AS n FROM notes n "
+    "WHERE n.user_id = :uid AND n.target_type = 'question' AND n.is_deleted = false"
+)
+_COUNT_NOTES = text(_NOTE_COUNT_SQL).bindparams(bindparam("uid", type_=BigInteger))
+_COUNT_NOTES_BY_SUBJECT = text(_NOTE_COUNT_SQL + " AND n.subject_id = :sub").bindparams(
+    bindparam("uid", type_=BigInteger), bindparam("sub", type_=BigInteger)
+)
+
+#: 分面：科目分布。★★ **恒为全量**，不随 `subject_id` 收缩 —— 同错题本那条判据
+#:   （分面的作用正是"让你看见还能切到哪"，收缩之后就切不过去了；p2c2 走查抓到的真缺陷）。
+_SELECT_NOTE_FACETS = text(
+    """
+    SELECT n.subject_id, COALESCE(s.name, '未归类') AS name, count(*) AS n
+      FROM notes n
+      LEFT JOIN subjects s ON s.id = n.subject_id
+     WHERE n.user_id = :uid AND n.target_type = 'question' AND n.is_deleted = false
+     GROUP BY 1, 2
+     ORDER BY 3 DESC, 1
+    """
+).bindparams(bindparam("uid", type_=BigInteger))
+
+#: 归属查询：**故意不过滤 `is_deleted`** —— 编辑/删除要先分清"这条是不是我的、
+#: 现在什么状态"。★ 这个"不带过滤"是**唯一**一处特例，读列表一律要带（见上面几条）。
+_SELECT_NOTE_OWNED = text(
+    "SELECT n.id, n.is_deleted FROM notes n "
+    "WHERE n.id = :nid AND n.user_id = :uid AND n.target_type = 'question'"
+).bindparams(bindparam("nid", type_=BigInteger), bindparam("uid", type_=BigInteger))
+
+_SELECT_NOTE_BY_ID = text(
+    f"""
+    SELECT n.id, n.target_id AS question_id, n.content, n.created_at, n.updated_at,
+           {_question_available("q")} AS question_available
+      FROM notes n
+      LEFT JOIN questions q ON q.id = n.target_id
+     WHERE n.id = :nid AND n.user_id = :uid AND n.target_type = 'question'
+    """
+).bindparams(bindparam("nid", type_=BigInteger), bindparam("uid", type_=BigInteger))
+
+#: `is_public` / `like_count` / `position_sec` / `is_deleted` / 两个时间戳**全走默认值** ——
+#:   本批不碰公开笔记，也不写卷面时间戳（那是视频笔记的事）。
+_INSERT_NOTE = text(
+    "INSERT INTO notes (id, user_id, target_type, target_id, subject_id, chapter_id, content) "
+    "VALUES (:id, :uid, 'question', :qid, :sub, :ch, :content)"
+).bindparams(
+    bindparam("id", type_=BigInteger),
+    bindparam("uid", type_=BigInteger),
+    bindparam("qid", type_=BigInteger),
+    bindparam("sub", type_=BigInteger),
+    bindparam("ch", type_=BigInteger),
+)
+
+#: ★★ **不写 `updated_at`**：那是 `trg_notes_updated` 触发器的职责。
+#:   写路径再赋一次值 = 「一个字段两种写法」（不变量 8）—— 两个写者谁赢看运气。
+_UPDATE_NOTE_CONTENT = text(
+    "UPDATE notes SET content = :content "
+    "WHERE id = :nid AND user_id = :uid AND target_type = 'question' AND is_deleted = false"
+).bindparams(bindparam("nid", type_=BigInteger), bindparam("uid", type_=BigInteger))
+
+_SOFT_DELETE_NOTE = text(
+    "UPDATE notes SET is_deleted = true "
+    "WHERE id = :nid AND user_id = :uid AND target_type = 'question' AND is_deleted = false"
+).bindparams(bindparam("nid", type_=BigInteger), bindparam("uid", type_=BigInteger))
+
+
+def _note_out(r: Mapping[str, Any]) -> NoteOut:
+    return NoteOut(
+        id=r["id"],
+        question_id=r["question_id"],
+        content=str(r["content"]),
+        question_available=bool(r["question_available"]),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+    )
+
+
+def _note_item_out(r: Mapping[str, Any]) -> NoteListItemOut:
+    return NoteListItemOut(
+        id=r["id"],
+        question_id=r["question_id"],
+        content=str(r["content"]),
+        question_available=bool(r["question_available"]),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+        subject_id=r["subject_id"],
+        subject_name=r["subject_name"],
+        chapter_name=r["chapter_name"],
+        type=str(r["type"]) if r["type"] is not None else None,
+        stem=str(r["stem"]) if r["stem"] is not None else None,
+    )
+
+
+async def list_notes_of_question(
+    db: AsyncSession, *, user_id: int, question_id: int
+) -> list[NoteOut]:
+    """这道题下**我的**笔记（不分页）。
+
+    ★ **不校验题目可见性、题目不存在也不报 404**（硬约定 A：只读函数不得夹带比读接口
+      更严的准入）—— 题目下架后用户照样要能看见自己写过什么；而题目 id 不存在时返空列表，
+      **也不泄露"这个 id 存不存在"**。
+    """
+    rows = (
+        (await db.execute(_SELECT_NOTES_OF_QUESTION, {"uid": user_id, "qid": question_id}))
+        .mappings()
+        .all()
+    )
+    return [_note_out(r) for r in rows]
+
+
+async def list_notes(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    subject_id: int | None = None,
+    page: int = 1,
+    page_size: int = WRONG_PAGE_DEFAULT,
+) -> NoteListOut:
+    """我的笔记列表（跨题）。**分页 + 科目筛选**；分面**恒为全量**。"""
+    page = max(1, int(page))
+    page_size = max(1, min(WRONG_PAGE_MAX, int(page_size)))
+    params: dict[str, Any] = {
+        "uid": user_id,
+        "lim": page_size,
+        "off": (page - 1) * page_size,
+    }
+    if subject_id is None:
+        total = int((await db.execute(_COUNT_NOTES, params)).scalar() or 0)
+        rows = (await db.execute(_SELECT_NOTES_PAGE, params)).mappings().all()
+    else:
+        params["sub"] = subject_id
+        total = int((await db.execute(_COUNT_NOTES_BY_SUBJECT, params)).scalar() or 0)
+        rows = (await db.execute(_SELECT_NOTES_PAGE_BY_SUBJECT, params)).mappings().all()
+    facets = (await db.execute(_SELECT_NOTE_FACETS, {"uid": user_id})).mappings().all()
+    return NoteListOut(
+        total=total,
+        page=page,
+        page_size=page_size,
+        subjects=[
+            WrongSubjectOut(subject_id=f["subject_id"], name=str(f["name"]), count=int(f["n"]))
+            for f in facets
+        ],
+        items=[_note_item_out(r) for r in rows],
+    )
+
+
+async def create_note(db: AsyncSession, *, user_id: int, question_id: int, content: str) -> NoteOut:
+    """在这道题下写一条笔记。
+
+    ★ **只有「新增」要求题目可见**（与标记 / 收藏同一口径）：不能对"看不到的题"写东西
+      —— 那种笔记在列表里会指向一道**打不开的题**。
+    ★ 而**已经写下**的笔记，在题目下架后**照样可读、可改、可删**（约定 T）。
+      这两句不矛盾：门管的是"将来"，不是追溯。
+    """
+    ctx = await _assert_question_usable(db, question_id=question_id)
+    note_id = next_id()
+    await db.execute(
+        _INSERT_NOTE,
+        {
+            "id": note_id,
+            "uid": user_id,
+            "qid": question_id,
+            "sub": int(ctx["subject_id"]),
+            "ch": ctx["chapter_id"],
+            "content": content,
+        },
+    )
+    # `get_db` **不自动 commit** ⇒ 漏了这句会"接口成功但查不到"（不变量 7）。
+    await db.commit()
+    row = (
+        (await db.execute(_SELECT_NOTE_BY_ID, {"nid": note_id, "uid": user_id})).mappings().first()
+    )
+    if row is None:  # pragma: no cover —— 刚写的行查不到就是出事了
+        raise not_found("笔记不存在", 40401)
+    return _note_out(row)
+
+
+async def update_note(db: AsyncSession, *, user_id: int, note_id: int, content: str) -> NoteOut:
+    """改一条笔记的正文。
+
+    ★ 别人的 / 不存在的 / **已经删掉的** ⇒ 一律 **40401**，**同一句话、同一个响应** ——
+      区分开就等于告诉调用方"这条存在，只是不是你的"。
+    """
+    owned = (await db.execute(_SELECT_NOTE_OWNED, {"nid": note_id, "uid": user_id})).first()
+    if owned is None or bool(owned[1]):
+        raise not_found("笔记不存在", 40401)
+    await db.execute(_UPDATE_NOTE_CONTENT, {"nid": note_id, "uid": user_id, "content": content})
+    await db.commit()
+    row = (
+        (await db.execute(_SELECT_NOTE_BY_ID, {"nid": note_id, "uid": user_id})).mappings().first()
+    )
+    if row is None:  # pragma: no cover
+        raise not_found("笔记不存在", 40401)
+    return _note_out(row)
+
+
+async def delete_note(db: AsyncSession, *, user_id: int, note_id: int) -> None:
+    """删一条笔记（**软删** `notes.is_deleted`）。
+
+    ★ **幂等**：判据 = 硬约定 C 的「**目标状态已达成**」—— 已经删掉的再删**净零变更**、
+      仍返成功（前端连点两下不该看到一次红色报错）。
+    ★ 别人的 / 不存在的 ⇒ **40401**（不是 403）。这里的归属查询**故意不过滤**
+      `is_deleted`，否则"已删"与"不是我的"会分不开。
+    """
+    owned = (await db.execute(_SELECT_NOTE_OWNED, {"nid": note_id, "uid": user_id})).first()
+    if owned is None:
+        raise not_found("笔记不存在", 40401)
+    if bool(owned[1]):
+        return  # 已经是"删掉了"这个状态 ⇒ 什么都不用做
+    await db.execute(_SOFT_DELETE_NOTE, {"nid": note_id, "uid": user_id})
+    await db.commit()
+
+
 __all__ = [
     "GRADABLE_TYPES",
+    "create_note",
+    "delete_note",
     "get_flags",
+    "list_notes",
+    "list_notes_of_question",
     "list_collections",
     "set_flag",
     "PARTIAL_CREDIT_RATIO",
@@ -1537,4 +1876,5 @@ __all__ = [
     "normalize_user_value",
     "public_answer",
     "submit_answer",
+    "update_note",
 ]

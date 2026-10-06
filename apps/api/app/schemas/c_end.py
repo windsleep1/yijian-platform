@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from app.schemas.types import BigIntStr
 
@@ -175,6 +175,9 @@ class SessionItemOut(BaseModel):
     answer: dict[str, Any] | None = None
     analysis: str | None = None
     analysis_html: str | None = None
+    #: ★ 这道题下我写了几条笔记（`notes` 未软删）。**一次查询出**（见 `_SELECT_ITEMS`），
+    #:   不是每题一次 —— 20 题就是 20 次往返（N+1）。
+    note_count: int = 0
 
 
 class SessionProgressOut(BaseModel):
@@ -315,6 +318,8 @@ class WrongItemOut(BaseModel):
     last_wrong_at: datetime | None = None
     #: ★ 我标记过它吗（`question_marks`）—— 错题本的「已标记」筛选用它。
     marked: bool = False
+    #: ★★ 约定 T：题目下架后这一行**仍然在**，这里给 false（前端标「题目已下架」、禁掉「重练」）。
+    question_available: bool = True
 
 
 class WrongListOut(BaseModel):
@@ -344,6 +349,12 @@ class CollectionItemOut(BaseModel):
     #: ★ 两个状态**都给**（一道题可以既收藏又标记）—— 前端两个页签共用一次响应。
     marked: bool = False
     favorited: bool = False
+    #: ★★ 约定 T：题目下架后这一行**仍然在**，这里给 false（前端标「题目已下架」、取消按钮仍可用）。
+    #: ★ 这道题在我的**错题本**里吗 —— 决定列表那一行**能不能链到** `/practice/wrong/{qid}`。
+    #:   实测缺陷（批次 2）：那个页面要求错题本里有这道题（无 ⇒ 404），而**收藏了但从没错过**
+    #:   的题很常见 ⇒ 原来每行都渲染成链接，等于**一半的点开是报错页**。
+    in_wrong_book: bool = False
+    question_available: bool = True
 
 
 class CollectionListOut(BaseModel):
@@ -370,6 +381,68 @@ class FlagOut(BaseModel):
     question_id: BigIntStr
     marked: bool = False
     favorited: bool = False
+
+
+# ============================================================ 笔记（P2c-5）
+
+#: 笔记正文的**产品**上限（`strip()` 之后）。★ 与 `notes.content TEXT` 无关 —— 那是 DB 上限；
+#: 不设这条的话前端能存进"一条只有空格的卡片"，而它在列表里**看起来像加载失败**。
+NOTE_MAX_LEN = 2000
+
+#: ★ `strip_whitespace=True` + `min_length=1` ⇒ **只有空格 = 空** ⇒ 由 pydantic 返 **422**，
+#:   不用业务代码去判空（同一个规则只写一遍：这里）。
+NoteContent = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=NOTE_MAX_LEN)
+]
+
+
+class NoteCreateIn(BaseModel):
+    content: NoteContent
+
+
+class NoteUpdateIn(BaseModel):
+    content: NoteContent
+
+
+class NoteOut(BaseModel):
+    """一条笔记（写操作的返回、以及「本题的笔记」用）。"""
+
+    id: BigIntStr
+    question_id: BigIntStr
+    content: str
+    #: ★★ 约定 T：题目下架后这条笔记**照样给**，这里为 `false`（前端标「题目已下架」）。
+    question_available: bool = True
+    created_at: datetime
+    updated_at: datetime
+    #: ★ `updated_at` 由触发器 `trg_notes_updated` 维护 —— 应用侧**不写**（不变量 8）。
+
+
+class NoteListItemOut(NoteOut):
+    """列表里的一行：比 `NoteOut` 多"这道题长什么样"—— 列表的用处是**认出那是哪道题**。
+
+    ★ 与 `WrongItemOut` / `CollectionItemOut` 一样**刻意不带选项与答案**：
+      一页 20 条把选项也带上，首屏就白等几百 KB。
+    """
+
+    subject_id: BigIntStr | None = None
+    subject_name: str | None = None
+    chapter_name: str | None = None
+    type: str | None = None
+    stem: str | None = None
+
+
+class NoteListOfQuestionOut(BaseModel):
+    """「这道题下的笔记」—— 不分页，所以没有 total / page。"""
+
+    items: list[NoteOut] = []
+
+
+class NoteListOut(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    subjects: list[WrongSubjectOut] = []
+    items: list[NoteListItemOut] = []
 
 
 class WrongDetailOut(BaseModel):

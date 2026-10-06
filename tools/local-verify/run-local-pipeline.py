@@ -80,7 +80,7 @@ PREFLIGHT = REPO_DEFAULT / "tools" / "preflight.sh"
 #: ★ **哪些场景需要题库**：必须**显式登记** —— 第一版写的是"不灌题库"（登录闭环不需要题目），
 #:   于是 P2b-1 第一次跑就撞上"章节全是 0 题"，而那个症状**长得像产品 bug**，白跑 3 轮。
 #:   ⇒ 新场景若要用题，**忘了登记就会红**（而不是安静地跳过）。
-SCENARIOS_NEEDING_QUESTIONS = frozenset({"p2b1", "p2c1", "p2c2", "p2c3", "p2c4"})
+SCENARIOS_NEEDING_QUESTIONS = frozenset({"p2b1", "p2c1", "p2c2", "p2c3", "p2c4", "p2c5"})
 
 
 def say(msg: str) -> None:
@@ -680,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
         #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`）。
         #    ⚠️ 漏掉"这里"的症状：`invalid choice: 'p2c3'` + **退出码 2、1 秒结束**
         #      —— 看上去像"走查没跑起来"，不像配置错（实测踩过两次：p2b1 / p2c3）。
-        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3", "p2c4"],
+        choices=["login", "p2a", "p2b1", "p2c1", "p2c2", "p2c3", "p2c4", "p2c5"],
         help="走查场景：login（P1 登录闭环）/ p2a（Tab + 注册 + 引导）/ "
         "p2b1（刷题数据流：选章节 → 答题判分 → 刷新仍在）/ "
         "p2c1（交卷 → 结果页 + 空卷显示「—」）/ p2c2（错题本：列表/筛选/详情/那扇门）"

@@ -150,6 +150,8 @@ export type SessionItem = {
   answer: { value: unknown[] } | null;
   analysis: string | null;
   analysis_html: string | null;
+  /** ★ 这道题下我写了几条笔记（`notes` 未软删）—— 答题页「✎ 笔记（N）」的徽标用它。 */
+  note_count: number;
 };
 
 /** 结果页的一个知识点条（`schemas/c_end.py` 的 `KpStatOut`）。 */
@@ -214,6 +216,12 @@ export type WrongItem = {
   last_wrong_at: string | null;
   /** ★ 我标记过它吗（`question_marks`）—— 错题本「已标记」筛选用它。 */
   marked: boolean;
+  /**
+   * ★★ 约定 T：题目下架后这一行**仍然在**（列表不再过滤），这里为 `false`。
+   * 前端据此标「题目已下架」并**禁用重练** —— 重练要建 session，而建 session 的题源
+   * **会**过滤掉下架的题 ⇒ 点了只会拿到一个 `40401`。
+   */
+  question_available: boolean;
 };
 
 /** 收藏 / 标记列表的一行（`schemas/c_end.py` 的 `CollectionItemOut`）。
@@ -230,6 +238,14 @@ export type CollectionItem = {
   collected_at: string;
   marked: boolean;
   favorited: boolean;
+  /** ★★ 约定 T：题目下架后这一行**仍然在**，这里为 `false`（标「题目已下架」，取消按钮仍可用）。 */
+  question_available: boolean;
+  /**
+   * ★ 这道题在我的**错题本**里吗 —— 决定这一行**能不能链到** `/practice/wrong/{qid}`。
+   * 那个页面**要求错题本里有这道题**（没有 ⇒ 404），而「收藏了但从没错过」很常见
+   * ⇒ 原来每行都渲染成链接，等于一半的点开是报错页（批次 2 遗留，本批修）。
+   */
+  in_wrong_book: boolean;
 };
 
 /** `GET /practice/favorites?kind=`（`schemas/c_end.py` 的 `CollectionListOut`）。 */
@@ -242,6 +258,42 @@ export type CollectionList = {
   /** ★ 分面**恒为全量**（不随筛选收缩）—— 与错题本同一条判据。 */
   subjects: WrongSubject[];
   items: CollectionItem[];
+};
+
+/** 一条笔记（`schemas/c_end.py` 的 `NoteOut`）。 */
+export type Note = {
+  id: string;
+  question_id: string;
+  content: string;
+  /** ★★ 约定 T：题目下架后这条笔记**照样给**，这里为 `false`（标「题目已下架」）。 */
+  question_available: boolean;
+  created_at: string;
+  /** ★ 由触发器 `trg_notes_updated` 维护 —— 前端**只读**，不要本地推算。 */
+  updated_at: string;
+};
+
+/** 笔记列表的一行（`NoteListItemOut`）：比 `Note` 多「这道题长什么样」。 */
+export type NoteListItem = Note & {
+  subject_id: string | null;
+  subject_name: string | null;
+  chapter_name: string | null;
+  type: string | null;
+  stem: string | null;
+};
+
+/** `GET /practice/notes`（`NoteListOut`）。 */
+export type NoteList = {
+  total: number;
+  page: number;
+  page_size: number;
+  /** ★ 分面**恒为全量**（与错题本 / 收藏同一条判据）。 */
+  subjects: WrongSubject[];
+  items: NoteListItem[];
+};
+
+/** `GET /practice/questions/{qid}/notes`（`NoteListOfQuestionOut`）。**不分页**。 */
+export type NoteListOfQuestion = {
+  items: Note[];
 };
 
 /** 标记 / 收藏写入后的**两个**状态（`schemas/c_end.py` 的 `FlagOut`）。 */

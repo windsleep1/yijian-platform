@@ -231,6 +231,7 @@ export default function WrongBookPage() {
             <li
               key={it.question_id}
               data-wrong-item={it.question_id}
+              data-question-available={it.question_available ? "1" : "0"}
               className="rounded-xl border border-line p-4"
             >
               <Link
@@ -241,6 +242,15 @@ export default function WrongBookPage() {
                 <p className="line-clamp-2 text-sm leading-6">{it.stem}</p>
                 <p className="mt-2 text-xs text-sub">
                   <span className="font-medium text-red-600">错 {it.wrong_count} 次</span>
+                  {/* ★★ 约定 T：题目下架后这行**仍然在**，标出来 —— 并禁用它右边的「重练」 */}
+                  {!it.question_available && (
+                    <span
+                      data-question-gone="1"
+                      className="ml-1 rounded bg-neutral-100 px-1.5 py-0.5 text-neutral-500"
+                    >
+                      题目已下架
+                    </span>
+                  )}
                   {it.retry_correct > 0 && <span> · 重练答对 {it.retry_correct} 次</span>}
                   {it.marked && (
                     <span
@@ -260,11 +270,11 @@ export default function WrongBookPage() {
                 <button
                   type="button"
                   data-retry={it.question_id}
-                  disabled={starting}
+                  disabled={starting || !it.question_available}
                   onClick={() => void retry([it.question_id])}
                   className="min-h-touch flex-1 rounded-lg border border-brand text-xs font-medium text-brand disabled:opacity-40"
                 >
-                  重练这道题
+                  {it.question_available ? "重练这道题" : "题目已下架"}
                 </button>
                 {it.retry_correct > 0 && (
                   <span

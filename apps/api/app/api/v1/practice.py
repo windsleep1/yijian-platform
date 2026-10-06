@@ -29,6 +29,11 @@ from fastapi import APIRouter, Path, Query
 from app.core.deps import CurrentUserDep, DbSession
 from app.core.response import Envelope, ok
 from app.schemas.c_end import (
+    NoteCreateIn,
+    NoteListOfQuestionOut,
+    NoteListOut,
+    NoteOut,
+    NoteUpdateIn,
     AnswerIn,
     CollectionListOut,
     FlagOut,
@@ -262,7 +267,11 @@ async def favorite_question(
     "/favorites/{question_id}",
     response_model=Envelope[FlagOut],
     summary="取消收藏（**幂等**）",
-    description="清掉收藏。**没收藏过也返成功**（`DELETE` 影响 0 行 = 目标状态已达成）。",
+    description=(
+        "清掉收藏。**没收藏过也返成功**（`DELETE` 影响 0 行 = 目标状态已达成）。\n\n"
+        "★★ **取消不要求题目可见**（约定 T）：题目下架后你**仍然能撤掉它** ——\n"
+        "否则那条记录就**卡死在你的列表里**（既看不见、又删不掉）。"
+    ),
 )
 async def unfavorite_question(
     db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
@@ -292,6 +301,10 @@ async def mark_question(
     "/marks/{question_id}",
     response_model=Envelope[FlagOut],
     summary="取消标记（**幂等**）",
+    description=(
+        "清掉标记。**没标记过也返成功**（`DELETE` 影响 0 行 = 目标状态已达成）。\n\n"
+        "★★ **取消不要求题目可见**（约定 T）：题目下架后你**仍然能撤掉它**。"
+    ),
 )
 async def unmark_question(
     db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
@@ -312,7 +325,9 @@ async def unmark_question(
         "「**我标的题去哪看**」。\n"
         "- 按 `collected_at` 倒序（最近放的在前）；\n"
         "- `subject_id` 可选；`subjects` 分面**恒为全量**（与错题本同一条判据）；\n"
-        "- 只列**可见**的题：题目下架后标记**保留**、但这里不出现（过滤在查询侧 ⇒ 恢复后自然回来）。"
+        "- ★★ **约定 T**：题目下架后，我收藏/标记过的那道题**仍然列在这里**，\n"
+        "  只是 `question_available=false`（前端标「题目已下架」）——\n"
+        "  **平台可以下架题目，但不能让用户写下的东西消失**。"
     ),
 )
 async def list_collections(
@@ -330,5 +345,119 @@ async def list_collections(
         subject_id=subject_id,
         page=page,
         page_size=page_size,
+    )
+    return ok(data.model_dump())
+
+
+# ==================================================== 笔记（P2c-5）
+
+
+@router.get(
+    "/questions/{question_id}/notes",
+    response_model=Envelope[NoteListOfQuestionOut],
+    summary="这道题下我的笔记（不分页）",
+    description=(
+        "★★ **不因题目下架而隐藏**（约定 T）：题目下架后这里**照样返回**，\n"
+        "每条带 `question_available=false`。\n\n"
+        "- **题目 id 不存在 ⇒ 空列表**（不报 404 —— 读路径不夹带比读更严的准入）；\n"
+        "- **不分页**：面板里就那么几条，分页只会多一次往返；\n"
+        "- 按 `created_at` 升序（先写的在前，像一条时间线）。"
+    ),
+)
+async def list_question_notes(
+    db: DbSession, me: CurrentUserDep, question_id: int = Path(description="题目 id")
+) -> dict:
+    notes = await practice_service.list_notes_of_question(
+        db, user_id=me.id, question_id=question_id
+    )
+    return ok(NoteListOfQuestionOut(items=notes).model_dump())
+
+
+@router.post(
+    "/questions/{question_id}/notes",
+    response_model=Envelope[NoteOut],
+    summary="写一条笔记",
+    description=(
+        "在这道题下写一条笔记。★ **一题可以有多条** —— `notes` 表本来就没有唯一索引，\n"
+        "而且 `position_sec`（视频时间戳笔记）天然是多条；「编辑」作用在**单条**上，\n"
+        "所以不存在「我改的是不是我刚写的那条」这种问题。\n\n"
+        "- 题目必须 **`published` 且未软删**，否则 `40401`（**不是 403**）；\n"
+        "- `content` `strip()` 后非空、≤ 2000 字，否则 **422**（空笔记会渲染成一张空白卡片）；\n"
+        "- `updated_at` 由触发器维护，**不接受传入**。"
+    ),
+)
+async def create_note(
+    body: NoteCreateIn,
+    db: DbSession,
+    me: CurrentUserDep,
+    question_id: int = Path(description="题目 id"),
+) -> dict:
+    note = await practice_service.create_note(
+        db, user_id=me.id, question_id=question_id, content=body.content
+    )
+    return ok(note.model_dump())
+
+
+@router.put(
+    "/notes/{note_id}",
+    response_model=Envelope[NoteOut],
+    summary="改一条笔记",
+    description=(
+        "改正文。**别人的 / 不存在的 / 已经删掉的 ⇒ 一律 `40401`**（同一句话、同一个响应）\n"
+        "—— 区分开就等于告诉调用方「这条存在，只是不是你的」。\n\n"
+        "★ **不要求题目可见**（约定 T）：这道题下架了，我写下的笔记我照样能改。"
+    ),
+)
+async def update_note(
+    body: NoteUpdateIn,
+    db: DbSession,
+    me: CurrentUserDep,
+    note_id: int = Path(description="笔记 id"),
+) -> dict:
+    note = await practice_service.update_note(
+        db, user_id=me.id, note_id=note_id, content=body.content
+    )
+    return ok(note.model_dump())
+
+
+@router.delete(
+    "/notes/{note_id}",
+    response_model=Envelope[dict],
+    summary="删一条笔记（**软删 · 幂等**）",
+    description=(
+        "软删（`notes.is_deleted = true`，**行还在**）。\n\n"
+        "- **幂等**：已经删掉的再删**净零变更**、仍返成功（判据 =「目标状态已达成」）；\n"
+        "- 别人的 / 不存在的 ⇒ `40401`（**不是 403**）；\n"
+        "- ★ **不要求题目可见**（约定 T）。"
+    ),
+)
+async def delete_note(
+    db: DbSession, me: CurrentUserDep, note_id: int = Path(description="笔记 id")
+) -> dict:
+    await practice_service.delete_note(db, user_id=me.id, note_id=note_id)
+    return ok({"note_id": str(note_id)})
+
+
+@router.get(
+    "/notes",
+    response_model=Envelope[NoteListOut],
+    summary="我的笔记列表（分页 + 科目筛选）",
+    description=(
+        "跨题的「我的笔记」。\n\n"
+        "- 按 `created_at` 倒序（最近写的在前）；\n"
+        "- `subject_id` 可选；`subjects` 分面**恒为全量**（与错题本 / 收藏同一条判据）；\n"
+        "- ★★ **约定 T**：题目下架后那条笔记**仍然列在这里**（`question_available=false`）；\n"
+        "- ★ 每条都带 `stem` —— 列表的用处是**认出那是哪道题**。"
+    ),
+)
+async def list_notes(
+    db: DbSession,
+    me: CurrentUserDep,
+    subject_id: int | None = Query(None, description="按科目筛选（不传 = 全部）"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+) -> dict:
+    data = await practice_service.list_notes(
+        db, user_id=me.id, subject_id=subject_id, page=page, page_size=page_size
     )
     return ok(data.model_dump())

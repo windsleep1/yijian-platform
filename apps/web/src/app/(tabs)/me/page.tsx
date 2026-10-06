@@ -119,6 +119,16 @@ export default function MePage() {
         <span className="text-sub">→</span>
       </Link>
 
+      {/* ★ 我的笔记（P2c-5）—— 同按 IA（`docs/02` 页 36）放 `/me/*` 下。 */}
+      <Link
+        href="/me/notes"
+        data-entry="notes"
+        className="min-h-touch mt-3 flex w-full items-center justify-between rounded-lg border border-line px-4 font-medium"
+      >
+        <span>我的笔记</span>
+        <span className="text-sub">→</span>
+      </Link>
+
       <Link
         href="/onboarding"
         className="min-h-touch mt-4 flex w-full items-center justify-center rounded-lg border border-line font-medium"

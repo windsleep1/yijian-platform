@@ -5,7 +5,14 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, request } from "@/lib/api";
-import type { AnswerResult, FlagState, PracticeSession, SessionItem } from "@/lib/types";
+import type {
+  AnswerResult,
+  FlagState,
+  Note,
+  NoteListOfQuestion,
+  PracticeSession,
+  SessionItem,
+} from "@/lib/types";
 
 /**
  * 答题页（**P2b-1：显示当前题 → 选择 → 提交判分 → 显示解析**；
@@ -344,6 +351,125 @@ export default function PracticeSessionPage() {
    *   不去重新 GET 整个 session：那是"刷新数据"，与"用户动作"是两件事（硬约定 S）。
    * ★ `PUT` 置上 / `DELETE` 取消，两者都**幂等** ⇒ 连点两次的净效果与一次相同。
    */
+  /* ==================== 笔记（P2c-5）====================
+   * ★★ 入口做成**就地展开的面板**，不跳页。判据：跳到 `/me/notes` 再回来会
+   *   **丢掉当前未提交的选择**（`picked` / `revealed` 是**页面内**状态）——
+   *   那是用户能感觉到的状态丢失，而面板只影响自己的那一块。
+   *
+   * ★ 与 `toggleFlag` 同一条：写完之后**只就地更新**（用响应里的值），
+   *   不重新 GET 整个 session —— 「刷新数据」与「用户动作」是两件事（硬约定 S）。
+   */
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+  const [noteErr, setNoteErr] = useState("");
+  //: 正在编辑哪一条 + 它的草稿。同时只允许一条（简化状态，也让「编辑」的语义无歧义）。
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+
+  /** 就地更新**当前题**的 `note_count`（不重新 GET）。 */
+  const bumpNoteCount = (next: number) => {
+    setSess((s) =>
+      s === null || current === null
+        ? s
+        : {
+            ...s,
+            items: s.items.map((x) =>
+              x.item_id === current.item_id ? { ...x, note_count: Math.max(0, next) } : x,
+            ),
+          },
+    );
+  };
+
+  /** 换题就**收起面板并清空本地笔记** —— 否则上一题的笔记会挂在下一题下面（很难发现的错位）。 */
+  useEffect(() => {
+    setNotesOpen(false);
+    setNotes([]);
+    setEditingId(null);
+    setNoteDraft("");
+    setNoteErr("");
+  }, [cursor]);
+
+  const toggleNotes = async () => {
+    if (current === null || noteBusy) return;
+    if (notesOpen) {
+      setNotesOpen(false);
+      return;
+    }
+    setNotesOpen(true);
+    setNoteErr("");
+    setEditingId(null);
+    try {
+      const d = await request<NoteListOfQuestion>(
+        `/practice/questions/${current.question_id}/notes`,
+      );
+      setNotes(d.items);
+      bumpNoteCount(d.items.length);
+    } catch (e) {
+      setNoteErr(errText(e));
+    }
+  };
+
+  const addNote = async () => {
+    if (current === null || noteBusy) return;
+    const content = noteDraft.trim();
+    if (content === "") return; // 与后端 `min_length=1` 同一条规则的前端镜像
+    setNoteBusy(true);
+    setNoteErr("");
+    try {
+      const created = await request<Note>(`/practice/questions/${current.question_id}/notes`, {
+        method: "POST",
+        body: { content },
+      });
+      // ★ 用**响应里那条**追加，不是前端拼一个 —— 前端拼的 `id` / `updated_at` 一定是假的。
+      setNotes((ns) => [...ns, created]);
+      bumpNoteCount(notes.length + 1);
+      setNoteDraft("");
+    } catch (e) {
+      setNoteErr(errText(e));
+    } finally {
+      setNoteBusy(false); // 成功也复位：草稿已清空 ⇒ 空草稿把按钮挡住，不会重复写
+    }
+  };
+
+  const saveEdit = async (noteId: string) => {
+    if (noteBusy) return;
+    const content = editDraft.trim();
+    if (content === "") return;
+    setNoteBusy(true);
+    setNoteErr("");
+    try {
+      const updated = await request<Note>(`/practice/notes/${noteId}`, {
+        method: "PUT",
+        body: { content },
+      });
+      // ★ 条数**不变** —— 这是编辑不是新增（E2E 有一条断言专门盯这个）。
+      setNotes((ns) => ns.map((x) => (x.id === noteId ? updated : x)));
+      setEditingId(null);
+    } catch (e) {
+      setNoteErr(errText(e));
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+
+  const removeNote = async (noteId: string) => {
+    if (noteBusy) return;
+    setNoteBusy(true);
+    setNoteErr("");
+    try {
+      await request(`/practice/notes/${noteId}`, { method: "DELETE" });
+      setNotes((ns) => ns.filter((x) => x.id !== noteId));
+      bumpNoteCount(notes.length - 1);
+      setEditingId((cur) => (cur === noteId ? null : cur));
+    } catch (e) {
+      setNoteErr(errText(e));
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+
   const toggleFlag = useCallback(
     async (path: "marks" | "favorites") => {
       if (!current || flagBusy) return;
@@ -598,6 +724,140 @@ export default function PracticeSessionPage() {
                 >
                   {current.favorited ? "★ 已收藏" : "☆ 收藏"}
                 </button>
+              </div>
+
+              {/* ★ 笔记（P2c-5）—— 就地展开，不跳页（理由见上面 NOTES_STATE 的抬头）。
+                  ★ IA（`docs/02`）的动作条顺序是 `[☆收藏][✎笔记][⚑报错][答题卡]`；
+                    「报错」全仓**尚未实现**，所以这里就在 收藏 之后紧跟 笔记。 */}
+              <div className="mt-3">
+                <button
+                  type="button"
+                  data-note-open
+                  data-note-count={current.note_count}
+                  disabled={noteBusy}
+                  onClick={() => void toggleNotes()}
+                  className={`min-h-touch w-full rounded-xl border text-sm disabled:opacity-40 ${
+                    current.note_count > 0 ? "border-line font-medium" : "border-line text-sub"
+                  }`}
+                >
+                  {notesOpen
+                    ? "收起笔记"
+                    : `✎ 笔记${current.note_count > 0 ? `（${current.note_count}）` : ""}`}
+                </button>
+
+                {notesOpen && (
+                  <div data-note-panel className="mt-2 rounded-xl border border-line p-3">
+                    {noteErr && (
+                      <p data-note-error className="mb-2 text-xs text-red-600">
+                        {noteErr}
+                      </p>
+                    )}
+
+                    <textarea
+                      data-note-input
+                      value={noteDraft}
+                      onChange={(e) => setNoteDraft(e.target.value)}
+                      rows={3}
+                      placeholder="就这道题写点什么…"
+                      className="w-full rounded-lg border border-line p-2 text-sm"
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        data-note-submit
+                        disabled={noteBusy || noteDraft.trim() === ""}
+                        onClick={() => void addNote()}
+                        className="min-h-touch flex-1 rounded-lg border border-brand text-xs font-medium text-brand disabled:opacity-40"
+                      >
+                        {noteBusy ? "处理中…" : "保存笔记"}
+                      </button>
+                      <span className="text-xs text-sub">{noteDraft.trim().length} / 2000</span>
+                    </div>
+
+                    {notes.length === 0 ? (
+                      <p
+                        data-note-empty="none"
+                        className="mt-3 rounded-lg border border-dashed border-line p-3 text-xs text-sub"
+                      >
+                        这道题还没有笔记。
+                      </p>
+                    ) : (
+                      <ul data-note-list className="mt-3 space-y-2">
+                        {notes.map((n) => (
+                          <li
+                            key={n.id}
+                            data-note-id={n.id}
+                            className="rounded-lg border border-line p-2"
+                          >
+                            {editingId === n.id ? (
+                              <>
+                                <textarea
+                                  data-note-edit-input
+                                  value={editDraft}
+                                  onChange={(e) => setEditDraft(e.target.value)}
+                                  rows={3}
+                                  className="w-full rounded-lg border border-line p-2 text-sm"
+                                />
+                                <div className="mt-2 flex gap-2">
+                                  <button
+                                    type="button"
+                                    data-note-edit-save
+                                    disabled={noteBusy || editDraft.trim() === ""}
+                                    onClick={() => void saveEdit(n.id)}
+                                    className="min-h-touch flex-1 rounded-lg border border-brand text-xs font-medium text-brand disabled:opacity-40"
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-note-edit-cancel
+                                    disabled={noteBusy}
+                                    onClick={() => setEditingId(null)}
+                                    className="min-h-touch flex-1 rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <p
+                                  data-note-content={n.id}
+                                  className="text-sm whitespace-pre-wrap break-words"
+                                >
+                                  {n.content}
+                                </p>
+                                <div className="mt-2 flex gap-2">
+                                  <button
+                                    type="button"
+                                    data-note-edit={n.id}
+                                    disabled={noteBusy}
+                                    onClick={() => {
+                                      setEditingId(n.id);
+                                      setEditDraft(n.content);
+                                    }}
+                                    className="min-h-touch flex-1 rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                                  >
+                                    编辑
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-note-del={n.id}
+                                    disabled={noteBusy}
+                                    onClick={() => void removeNote(n.id)}
+                                    className="min-h-touch flex-1 rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}

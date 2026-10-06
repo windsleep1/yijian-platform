@@ -208,18 +208,23 @@ export default function FavoritesPage() {
 
       {data !== null && data.items.length > 0 && (
         <ul data-collect-list className="mt-4 space-y-3">
-          {data.items.map((it) => (
-            <li
-              key={it.question_id}
-              data-collect-row={it.question_id}
-              className="rounded-xl border border-line p-4"
-            >
-              <Link href={`/practice/wrong/${it.question_id}`} className="block">
+          {data.items.map((it) => {
+            const inner = (
+              <>
                 <p className="line-clamp-2 text-sm leading-6">{it.stem}</p>
                 <p className="mt-2 text-xs text-sub">
                   {it.subject_name && <span>{it.subject_name}</span>}
                   {it.chapter_name && <span> · {it.chapter_name}</span>}
                   {it.collected_at && <span> · {when(it.collected_at)}</span>}
+                  {/* ★★ 约定 T：题目下架后这一行**仍然在**，标出来让用户知道**为什么点不开**。 */}
+                  {!it.question_available && (
+                    <span
+                      data-question-gone="1"
+                      className="ml-1 rounded bg-neutral-100 px-1.5 py-0.5 text-neutral-500"
+                    >
+                      题目已下架
+                    </span>
+                  )}
                   {/* ★ 另一个状态也显示出来 —— 一道题可以既收藏又标记 */}
                   {kind === "favorite" && it.marked && (
                     <span className="ml-1 rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">
@@ -232,18 +237,37 @@ export default function FavoritesPage() {
                     </span>
                   )}
                 </p>
-              </Link>
-              <button
-                type="button"
-                data-collect-remove={it.question_id}
-                disabled={busy}
-                onClick={() => void remove(it.question_id)}
-                className="min-h-touch mt-3 w-full rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+              </>
+            );
+            return (
+              <li
+                key={it.question_id}
+                data-collect-row={it.question_id}
+                data-question-available={it.question_available ? "1" : "0"}
+                className="rounded-xl border border-line p-4"
               >
-                {meta.remove}
-              </button>
-            </li>
-          ))}
+                {/* ★★ **只有错题本里有这道题才渲染成链接**（`in_wrong_book`）：
+                    目标页 `/practice/wrong/{qid}` 要求 `wrong_questions` 里有一行，没有就 **404**
+                    —— 而「收藏了但从没错过」的题很常见 ⇒ 原来每行都是链接，一半的点开是报错页。 */}
+                {it.in_wrong_book ? (
+                  <Link href={`/practice/wrong/${it.question_id}`} className="block">
+                    {inner}
+                  </Link>
+                ) : (
+                  <div className="block">{inner}</div>
+                )}
+                <button
+                  type="button"
+                  data-collect-remove={it.question_id}
+                  disabled={busy}
+                  onClick={() => void remove(it.question_id)}
+                  className="min-h-touch mt-3 w-full rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                >
+                  {meta.remove}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
 

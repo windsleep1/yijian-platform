@@ -4767,3 +4767,42 @@ psql --dbname="<url>" -v ON_ERROR_STOP=1 -f ...          # ✅ 等价
 （两处原本都写着连接串在前 —— **是我写的，照做的人必然踩**）；
 本机 psql = `%USERPROFILE%\.workbuddy\binaries\pg\pg16\Library\bin\psql.exe`
 （没进 PATH，所以裸敲 `psql` 会报「无法识别」—— 那是第二个独立的坑）。
+
+## 103. ★★ `text()` **不剥离 SQL 注释** —— 注释里的「冒号 + 名字」会变成真绑定参数（2026-10-06）
+
+**现象**：给 `GET /practice/sessions/{id}` 的 SQL 加一列，顺手在 SQL 里写了行注释解释它：
+
+```
+           {_favorited_exists("q.id", "i.user_id")} AS favorited,
+           -- 行内列 i.user_id（不是 :uid）：这个查询只传 session id ——
+           (SELECT count(*) FROM notes ...) AS note_count
+```
+
+结果：**碰这条 SQL 的接口全部 50001**，而 **SQL 本身完全正确**。
+
+**根因**：`sqlalchemy.text()` 扫 `:name` 时**不剥离 `--` 注释**：
+
+```
+>>> t = text("SELECT :sid AS a -- 这里提到 :uid 一下\nFROM x")
+>>> sorted(t._bindparams)
+['sid', 'uid']        ← 注释里的那个也登记进来了
+```
+
+⇒ 执行时只传 `{"sid": ...}` ⇒ **缺参数** ⇒ 50001。
+
+**为什么症状指向错方向**：① SQL 看起来完全正常；② 报错只是"服务内部错误"；
+③ 挂的是一个**你没改的接口**（`create_session` 正常、`get_session` 挂）——
+实测里先怀疑建表顺序、再怀疑绑定参数个数，最后才想到注释本身。
+
+**解法**：SQL 注释里**别写「冒号 + 名字」**。要提参数就写成「参数 uid」这种不带冒号的描述。
+★ **不要**去"运行时剥注释"：那会改变 `text()` 的既有行为，修在一处、漏在别处；
+正解是**写的时候就不允许**。
+
+**判据（已做成机械检查）**：`apps/api/tests/test_sql_text_hygiene.py`
+—— 遍历 `apps/api/app/**/*.py` 里所有 `text(...)`，断言
+**注释里的 `:name` 集合 − 代码里的 `:name` 集合 = 空集**。
+★ 它自带**对照格**：注释里提到**真参数**（`:sid`）**不该**报红 ——
+只验"有冒号就报"的话，下一次正常注释就会被误报（硬约定 J 的成对判据）。
+
+**同族**：坑 100（同一个事实写在多处 ⇒ 别靠记得，写成机械检查）；区别是那条防"漏改"，这条防"**多写**"。
+
