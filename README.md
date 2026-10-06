@@ -234,7 +234,7 @@ yijian-platform/
 │       ├─ src/lib/                   # api 客户端、types、permission（MODULE_ENTRIES）、
 │       │                             #   question / import 领域逻辑
 │       └─ docs/
-│           ├─ B端联调坑.md            # 101 条实战坑（现象 → 根因 → 解法 → 落点）
+│           ├─ B端联调坑.md            # 102 条实战坑（现象 → 根因 → 解法 → 落点）
 │           ├─ screenshots/batch4/     # Batch 4 端到端截图 13 张
 │           ├─ screenshots/batch6/     # Batch 6 端到端截图 18 张
 │           ├─ screenshots/batch7-pass2a/        # /exams 列表 + 详情编辑 + 归档恢复（14 张）

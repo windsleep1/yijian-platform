@@ -4720,6 +4720,50 @@ PWA 收尾要验"**断网打开不白屏**"。探针第一版：给**页面** ta
 `tools/local-verify/probe-pwa-offline.py::attach_sw_target`（连 SW target，并**在 SW 上下文里**
 自测一次 `fetch` 真失败）；`docs/28` §10.2；`MEMORY` 的「错误信念」那条下面。
 
+---
 
+## 102. ★★ 这个 `psql` 构建：**位置参数之后的选项会被静默丢弃**（2026-10-06）
 
+**现象**：往 Neon 补一条迁移，照「先给连接串、再给选项」的写法：
 
+```
+psql "postgresql://user:pw@host/db?sslmode=require" -v ON_ERROR_STOP=1 -f db/migrations/x.sql
+```
+
+得到的**不是报错**，而是三行 warning 加一个提示符：
+
+```
+psql: warning: extra command-line argument "ON_ERROR_STOP=1" ignored
+psql: warning: extra command-line argument "-f" ignored
+psql: warning: extra command-line argument "db/migrations/x.sql" ignored
+…（SSL 连接成功）
+neondb=>
+```
+
+**它会连上库、给你一个交互提示符** —— 看上去像「跑起来了」，实际上**一个字节都没执行**。
+最容易的误判就是「迁移跑过了」。
+
+**根因**：这个构建的 `getopt` **不在第一个非选项参数之后继续解析** ——
+位置参数（连接串）之后的 `-v` / `-f` / `-c` **全部被当成多余参数丢掉**。
+
+**解法**：**连接串放最后**（或 `--dbname=<url>`）：
+
+```
+psql -v ON_ERROR_STOP=1 -f db/migrations/x.sql "<url>"   # ✅
+psql --dbname="<url>" -v ON_ERROR_STOP=1 -f ...          # ✅ 等价
+```
+
+**判据怎么来的**（硬约定 J）：同一个 argv **只换顺序**，三处独立复现
+（Git Bash / PowerShell / 本地脚本），只有「连接串在前」出现那 3 条 ignored。
+★ 注意这是**顺序**问题、**不是 shell 的锅**：PowerShell 与 Git Bash 表现**逐字一致**。
+
+★★ **但它可能只是这台机器的行为**：Linux/CI 上的 gnulib getopt 默认会「打乱重排」
+（permute）⇒ **CI 绿不代表本机能跑**（**未在 Linux 上实测过**，别当结论用）。
+
+**同族**：坑 100（同一个事实写在不同地方 ⇒ 别靠记忆，要能证伪）；
+区别是那条是「配置写错」，这条是「**命令看着写对了、却被静默削掉一半**」。
+
+**落点**：`db/migrations/20261004-01-question-marks.sql` 抬头、`docs/30` §9.4
+（两处原本都写着连接串在前 —— **是我写的，照做的人必然踩**）；
+本机 psql = `%USERPROFILE%\.workbuddy\binaries\pg\pg16\Library\bin\psql.exe`
+（没进 PATH，所以裸敲 `psql` 会报「无法识别」—— 那是第二个独立的坑）。
