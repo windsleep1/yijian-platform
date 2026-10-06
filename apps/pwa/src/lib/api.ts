@@ -40,6 +40,7 @@ import {
   metaSet,
   openDb,
   STORES,
+  todayInShanghai,
   tx,
   wipeAll,
   type StoreName,
@@ -212,6 +213,9 @@ export type BankSummary = {
   questions: number;
   options: number;
   knowledge_points: number;
+  /** ★ 科目数（= `meta.by_subject` 的键数）—— 「题库信息」卡要显示它。
+   *  `meta.totals` 里**没有**这一项（它只有 questions / options / knowledge_points）。 */
+  subjects: number;
 };
 
 /** 当前已导入的题库摘要；没导入过返 `null`。 */
@@ -224,6 +228,7 @@ export async function bankSummary(): Promise<BankSummary | null> {
     questions: bank.totals.questions,
     options: bank.totals.options,
     knowledge_points: bank.totals.knowledge_points,
+    subjects: Object.keys(bank.by_subject ?? {}).length,
   };
 }
 
@@ -1385,6 +1390,228 @@ async function wrongDetail(qid: string): Promise<WrongDetail> {
     reason_tag: null,
     last_wrong_at: row.last_wrong_at,
   };
+}
+
+/* ============================================================ 数据备份（PWA 独有） */
+
+/**
+ * 「**用户数据**」的 store 清单 —— **不含题库**。
+ *
+ * ★ 这是**一处定义**：导出与导入都遍历它（两处各写一份必然漂）。
+ * ★ 什么算"用户数据"：**我产生的**（答题记录 / 错题 / 收藏 / 标记 / 笔记）。
+ *   什么不算：
+ *   · `subjects` / `chapters` / `kps` / `questions` —— 那是题库，可由 `pwa-bank.json`
+ *     重新导入（5.85 MB）；塞进备份会让文件巨大，而"能打开看"正是备份的价值之一；
+ *   · `meta` —— 它存的是**题库**指纹与导入哨兵，属于题库侧（不是"我的东西"）。
+ */
+export const USER_DATA_STORES = [
+  "sessions",
+  "items",
+  "wrong",
+  "marks",
+  "favorites",
+  "notes",
+] as const;
+
+/** 备份文件的形状。★ `format` 是**用途标识** —— 导错文件时要能**立刻说清**是哪一种。 */
+export type UserDataBundle = {
+  format: "yijian-pwa-userdata";
+  format_version: number;
+  exported_at: string;
+  /** ★ 导出时的题库指纹：**导入时必须与本机题库一致**（题对不上号的记录没有意义）。 */
+  bank_version: string;
+  /** 各 store 行数（导入后**对账**用 —— 没有它就只能"看着像导成功了"）。 */
+  counts: Partial<Record<(typeof USER_DATA_STORES)[number], number>>;
+  data: Partial<Record<(typeof USER_DATA_STORES)[number], unknown[]>>;
+};
+
+/**
+ * 备份文件的建议名。
+ *
+ * ★ 用 `todayInShanghai()` 而不是 `toISOString().slice(0,10)`：后者是 **UTC 日期** ——
+ *   晚上 8 点之后导出的备份会**少一天**，而且只在跨零点前后看得出来。
+ *   （与项目「日界按 `Asia/Shanghai`」的红线同一条。）
+ */
+export function backupFileName(at: Date = new Date()): string {
+  return `yijian-pwa-data-${todayInShanghai(at)}.json`;
+}
+
+/** 备份格式的版本。★ **与题库的 `schema_version` 是两件事**：一个管数据形状、一个管题库形状。 */
+const USERDATA_FORMAT_VERSION = 1;
+
+/**
+ * 导出**用户数据**（**不含题库**）。
+ *
+ * ★ 返回**纯对象**（不是 Blob）：页面自己决定怎么落盘（下载 / 展示 / 复制），
+ *   而"数据里有什么"这件事只在这里定义一次。
+ */
+export async function exportUserData(): Promise<UserDataBundle> {
+  const bank = await metaGet<BankMeta>("bank");
+  if (bank === null) {
+    throw notFound("还没有题库 —— 先到「导入题库」导入题库，再来备份数据。");
+  }
+  const data: UserDataBundle["data"] = {};
+  const cnt: UserDataBundle["counts"] = {};
+  for (const s of USER_DATA_STORES) {
+    const rows = await idbAll<unknown>(s);
+    data[s] = rows;
+    cnt[s] = rows.length;
+  }
+  return {
+    format: "yijian-pwa-userdata",
+    format_version: USERDATA_FORMAT_VERSION,
+    exported_at: nowIso(),
+    bank_version: bank.bank_version,
+    counts: cnt,
+    data,
+  };
+}
+
+/** `peekUserData()` 的结果 —— 只读元信息，**不写库**。
+ *  ★ `bank_matches` 不是"错误"，是**现状**：不匹配时页面要能提前告诉用户
+ *    "这份备份属于别的题库"，而不是等他点了"确认覆盖"才报错。
+ */
+export type UserDataMeta = {
+  format_version: number;
+  exported_at: string;
+  bank_version: string;
+  counts: Record<string, number>;
+  /** 与**当前**题库是否同一个（导入的硬前提）。 */
+  bank_matches: boolean;
+};
+
+/**
+ * 只读元信息（**不写库**）—— 二次确认之前用它。
+ *
+ * ★ 顺序很重要：**先看再问、问完才写**。反过来的话，"用户选了文件"这一个动作
+ *   就已经把库清掉了 —— 而他可能只是选错了文件。
+ *   （与 `/setup` 的 `peekBankMeta(file)` 同一个模式。）
+ */
+export async function peekUserData(file: File): Promise<UserDataMeta> {
+  let raw: Partial<UserDataBundle>;
+  try {
+    raw = JSON.parse(await file.text());
+  } catch {
+    throw new ApiError(40001, "这个文件不是 JSON，或者已经损坏。", "", 400);
+  }
+  if (raw?.format !== "yijian-pwa-userdata") {
+    throw new ApiError(
+      40001,
+      "这不是数据备份文件。如果你要换题库，请走「我的 → 题库信息 → 换题库」。",
+      "",
+      400,
+    );
+  }
+  const bank = await metaGet<BankMeta>("bank");
+  const counts: Record<string, number> = {};
+  for (const s of USER_DATA_STORES) {
+    const rows = raw.data?.[s];
+    counts[s] = Array.isArray(rows) ? rows.length : -1; // -1 = 这一段缺失（导入时会被拒）
+  }
+  return {
+    format_version: Number(raw.format_version ?? 0),
+    exported_at: String(raw.exported_at ?? ""),
+    bank_version: String(raw.bank_version ?? ""),
+    counts,
+    bank_matches: bank !== null && raw.bank_version === bank.bank_version,
+  };
+}
+
+/**
+ * 只清**用户数据**的 6 个 store（**不碰题库**）。
+ *
+ * ★ 为什么不复用 `db.ts::wipeAll()`：它清**全部** store（含 `questions` 等）
+ *   —— "恢复用户数据"不该顺带把题库删掉（那要重新导 5.85 MB，还要求版本一致）。
+ */
+async function wipeUserData(): Promise<void> {
+  const names = [...USER_DATA_STORES] as StoreName[];
+  await tx(names, "readwrite", (g) => {
+    for (const n of names) g(n).clear();
+  });
+}
+
+/**
+ * 导入用户数据（**整体替换**，不是合并）。
+ *
+ * ★ **为什么是整体替换**：合并的语义**没法定义** —— 同一条笔记在备份与当前各有一份时
+ *   "谁的胜"？按时间？那"我在备份之后删掉的收藏"就会复活。**说不出规则的合并 = 迟早出错。**
+ *   ⇒ 调用方**必须先做二次确认**，且确认框要**写清会覆盖什么**（文案见 `me/backup` 页）。
+ *
+ * ⚠️ 本函数**不负责**问"是否真的要覆盖" —— 二次确认是 **UI 的职责**
+ *   （与 `importBank(file, onProgress, force)` 同一个约定：数据层不做交互）。
+ */
+export async function importUserData(file: File): Promise<{ counts: Record<string, number> }> {
+  let raw: Partial<UserDataBundle>;
+  try {
+    raw = JSON.parse(await file.text());
+  } catch {
+    throw new ApiError(40001, "这个文件不是 JSON，或者已经损坏。", "", 400);
+  }
+  if (raw?.format !== "yijian-pwa-userdata") {
+    // ★ 导错文件是最常见的失误 —— 文案要**指出正确的入口**，不是"格式错误"四个字
+    throw new ApiError(
+      40001,
+      "这不是数据备份文件。如果你要换题库，请走「我的 → 题库信息 → 换题库」。",
+      "",
+      400,
+    );
+  }
+  if (raw.format_version !== USERDATA_FORMAT_VERSION) {
+    throw new ApiError(
+      40001,
+      `备份格式版本是 ${raw.format_version}，本应用只认识 ${USERDATA_FORMAT_VERSION}。`,
+      "",
+      400,
+    );
+  }
+  const bank = await metaGet<BankMeta>("bank");
+  if (bank === null) {
+    throw new ApiError(40001, "还没有题库 —— 先导入题库，再恢复数据。", "", 400);
+  }
+  if (raw.bank_version !== bank.bank_version) {
+    // ★★ 这一条**必须拦**：备份里的 `question_id` 指向的是**另一个题库** ⇒
+    //   导进去会得到一堆"题已不在"的孤儿记录 —— **不报错**，但列表里全是空题干。
+    throw new ApiError(
+      40901,
+      "这份备份属于**另一个题库**（或题库版本不同），当前题库对不上号。" +
+        "请先导入与备份时相同的题库，再恢复数据。",
+      "",
+      409,
+    );
+  }
+
+  const data = raw.data ?? {};
+  for (const s of USER_DATA_STORES) {
+    if (!Array.isArray(data[s])) {
+      throw new ApiError(40001, `备份里缺少「${s}」这一段，文件可能不完整。`, "", 400);
+    }
+  }
+
+  // ① 清空**用户数据**（题库不动）
+  await wipeUserData();
+  // ② 分批写（**每个 store 一个事务**）。任一失败 ⇒ 抛错 —— 此时库里是**空的**，
+  //    调用方要能看出"没成功"（而不是以为成功了）。
+  for (const s of USER_DATA_STORES) {
+    const rows = data[s] as unknown[];
+    for (let i = 0; i < rows.length; i += IMPORT_CHUNK) {
+      await idbPutMany(s, rows.slice(i, i + IMPORT_CHUNK));
+    }
+  }
+  // ③ 对账 —— **逐 store** 比（只比总数的话"会话少 1 条、items 多 1 条"能互相抵消）
+  const after = await counts();
+  const mismatch: string[] = [];
+  for (const s of USER_DATA_STORES) {
+    const want = raw.counts?.[s];
+    if (typeof want === "number" && after[s] !== want) {
+      mismatch.push(`${s}：备份 ${want} 条、写入后 ${after[s]} 条`);
+    }
+  }
+  if (mismatch.length > 0) {
+    throw new ApiError(40001, `恢复对账没通过：${mismatch.join("；")}`, "", 400);
+  }
+  const out: Record<string, number> = {};
+  for (const s of USER_DATA_STORES) out[s] = after[s];
+  return { counts: out };
 }
 
 /** 打开数据库（首页/自检用）。页面不该直接碰它，但"有没有库"这件事要能问。 */

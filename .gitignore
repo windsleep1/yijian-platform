@@ -89,7 +89,11 @@ tmp/
 Thumbs.db
 
 # 备份
-backup/
+# ★ 原为 `backup/`（**无前导斜杠**）—— 那会匹配**任意层级**的 backup 目录，
+#   把源码目录 `apps/pwa/src/app/(tabs)/me/backup/` 一起吞掉；而 `git status` 里
+#   它就像**不存在**，**不报错**（2026-10-06 实测：一整条 PWA 页面因此没进仓库）。
+#   ⇒ 收紧成**根锚定**：只忽略仓库根下的 backup 目录（那才是「数据备份目录」的位置）。
+/backup/
 *.dump
 
 # 编辑器

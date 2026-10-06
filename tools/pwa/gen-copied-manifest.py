@@ -49,17 +49,16 @@ FORK: dict[str, tuple[str, str, str]] = {
         "`grep -c 'auth/me' apps/pwa/src/app/(tabs)/page.tsx` → 0",
         "永久",
     ),
-    "src/app/(tabs)/practice/page.tsx": (
-        "少一个「错题本」入口：那一行在 C 端链到 `/practice/wrong`，"
-        "而这条路由在 `apps/pwa/src/app` 下**不存在**（该页属 B-2）"
-        "—— 渲染一个指向不存在路由的入口，点开是 404，比没有入口更糟",
-        "`apps/pwa/src/app/practice/wrong` 目录不存在（该路由尚未建）",
-        "B-2 建好错题本页后，本文件将**逐字节相同**",
-    ),
     "package.json": (
         "包名 / 端口 / 描述不同（3002），且**不消费** `packages/api-core`"
         "（那个包是认证链路的唯一实现，本应用没有认证链路）",
         "`grep -c 'api-core' apps/pwa/package.json` → 0",
+        "永久",
+    ),
+    "src/app/(tabs)/me/page.tsx": (
+        "C 端那页是「资料 + 引导 + 退出登录」，**全是账号相关**；本应用没有账号"
+        "（单机单用户）⇒ 换成本地该有的三样：收藏/标记、笔记、数据备份与题库信息",
+        "`grep -c 'auth-store\\|auth/me' apps/pwa/src/app/(tabs)/me/page.tsx` → 0",
         "永久",
     ),
     "tsconfig.json": (
@@ -83,6 +82,11 @@ ONLY: dict[str, tuple[str, str]] = {
     ),
     "src/app/setup/page.tsx": (
         "导入题库 + 换题库的二次确认 —— C 端的题库在服务端，没有「导入」这件事",
+        "永久",
+    ),
+    "src/app/(tabs)/me/backup/page.tsx": (
+        "数据备份（导出/导入**用户数据**）—— C 端的数据在服务端，"
+        "没有「备份成一个文件」这件事（它的备份 = 数据库备份）",
         "永久",
     ),
     "src/favicon.ico": ("Next 默认图标占位（若存在）", "永久"),

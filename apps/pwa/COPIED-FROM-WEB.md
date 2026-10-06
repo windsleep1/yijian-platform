@@ -19,7 +19,7 @@
 
 ---
 
-## 1. 逐字节相同（21 个）—— C 端一改，这里就红，提醒你同步
+## 1. 逐字节相同（22 个）—— C 端一改，这里就红，提醒你同步
 
 | 文件（`apps/pwa/` 与 `apps/web/` 下同路径） | sha256[:16] |
 |---|---|
@@ -35,6 +35,7 @@
 | `public/offline.html` | `d4343b91a918a531` |
 | `src/app/(tabs)/me/favorites/page.tsx` | `cc153de9111f97cf` |
 | `src/app/(tabs)/me/notes/page.tsx` | `57f09c9e20bc46eb` |
+| `src/app/(tabs)/practice/page.tsx` | `7f815474515afc21` |
 | `src/app/globals.css` | `0e14476ef0f44d95` |
 | `src/app/manifest.ts` | `e74091c86dff4327` |
 | `src/app/practice/session/[id]/page.tsx` | `a29b0aa6cc4ec1a0` |
@@ -65,17 +66,17 @@
 - **判据（怎么验）**：`apps/pwa/src/middleware.ts` 不存在（test ! -f）
 - **是否收敛**：永久
 
+### `src/app/(tabs)/me/page.tsx`
+
+- **理由**：C 端那页是「资料 + 引导 + 退出登录」，**全是账号相关**；本应用没有账号（单机单用户）⇒ 换成本地该有的三样：收藏/标记、笔记、数据备份与题库信息
+- **判据（怎么验）**：`grep -c 'auth-store\|auth/me' apps/pwa/src/app/(tabs)/me/page.tsx` → 0
+- **是否收敛**：永久
+
 ### `src/app/(tabs)/page.tsx`
 
 - **理由**：C 端首页读 `/auth/me` 的 profile、并按 `onboarded_at` 决定是否送去引导；本应用没有账号与引导 ⇒ 首页改问**题库状态**（有没有导入过）
 - **判据（怎么验）**：`grep -c 'auth/me' apps/pwa/src/app/(tabs)/page.tsx` → 0
 - **是否收敛**：永久
-
-### `src/app/(tabs)/practice/page.tsx`
-
-- **理由**：少一个「错题本」入口：那一行在 C 端链到 `/practice/wrong`，而这条路由在 `apps/pwa/src/app` 下**不存在**（该页属 B-2）—— 渲染一个指向不存在路由的入口，点开是 404，比没有入口更糟
-- **判据（怎么验）**：`apps/pwa/src/app/practice/wrong` 目录不存在（该路由尚未建）
-- **是否收敛**：B-2 建好错题本页后，本文件将**逐字节相同**
 
 ### `src/app/layout.tsx`
 
@@ -95,10 +96,11 @@
 - **判据（怎么验）**：`grep -c 'api-core' apps/pwa/tsconfig.json` → 0
 - **是否收敛**：永久
 
-## 3. 只在 PWA 存在（3 个）
+## 3. 只在 PWA 存在（4 个）
 
 | 文件 | 为什么 C 端没有对应物 | 是否收敛 |
 |---|---|---|
+| `src/app/(tabs)/me/backup/page.tsx` | 数据备份（导出/导入**用户数据**）—— C 端的数据在服务端，没有「备份成一个文件」这件事（它的备份 = 数据库备份） | 永久 |
 | `src/app/setup/page.tsx` | 导入题库 + 换题库的二次确认 —— C 端的题库在服务端，没有「导入」这件事 | 永久 |
 | `src/lib/db.ts` | IndexedDB 的 schema 与读写助手 —— C 端没有数据层（它在服务端），无处可抄 | 永久 |
 | `src/lib/grade.mjs` | 判分的**哑比较**实现。★ 它不是 C 端 `grade()` 的复制品，而是「包已归一」前提下的等价实现 —— 等价性由 `tools/pwa/parity.py` 逐条对拍守住 | 永久 |
@@ -197,6 +199,12 @@
       "identical": true
     },
     {
+      "to": "src/app/(tabs)/practice/page.tsx",
+      "from": "src/app/(tabs)/practice/page.tsx",
+      "sha256": "7f815474515afc21",
+      "identical": true
+    },
+    {
       "to": "src/app/globals.css",
       "from": "src/app/globals.css",
       "sha256": "0e14476ef0f44d95",
@@ -274,18 +282,18 @@
       "converge": "永久"
     },
     {
+      "to": "src/app/(tabs)/me/page.tsx",
+      "from": "src/app/(tabs)/me/page.tsx",
+      "reason": "C 端那页是「资料 + 引导 + 退出登录」，**全是账号相关**；本应用没有账号（单机单用户）⇒ 换成本地该有的三样：收藏/标记、笔记、数据备份与题库信息",
+      "check": "`grep -c 'auth-store\\|auth/me' apps/pwa/src/app/(tabs)/me/page.tsx` → 0",
+      "converge": "永久"
+    },
+    {
       "to": "src/app/(tabs)/page.tsx",
       "from": "src/app/(tabs)/page.tsx",
       "reason": "C 端首页读 `/auth/me` 的 profile、并按 `onboarded_at` 决定是否送去引导；本应用没有账号与引导 ⇒ 首页改问**题库状态**（有没有导入过）",
       "check": "`grep -c 'auth/me' apps/pwa/src/app/(tabs)/page.tsx` → 0",
       "converge": "永久"
-    },
-    {
-      "to": "src/app/(tabs)/practice/page.tsx",
-      "from": "src/app/(tabs)/practice/page.tsx",
-      "reason": "少一个「错题本」入口：那一行在 C 端链到 `/practice/wrong`，而这条路由在 `apps/pwa/src/app` 下**不存在**（该页属 B-2）—— 渲染一个指向不存在路由的入口，点开是 404，比没有入口更糟",
-      "check": "`apps/pwa/src/app/practice/wrong` 目录不存在（该路由尚未建）",
-      "converge": "B-2 建好错题本页后，本文件将**逐字节相同**"
     },
     {
       "to": "src/app/layout.tsx",
@@ -310,6 +318,11 @@
     }
   ],
   "pwa_only": [
+    {
+      "to": "src/app/(tabs)/me/backup/page.tsx",
+      "why": "数据备份（导出/导入**用户数据**）—— C 端的数据在服务端，没有「备份成一个文件」这件事（它的备份 = 数据库备份）",
+      "converge": "永久"
+    },
     {
       "to": "src/app/setup/page.tsx",
       "why": "导入题库 + 换题库的二次确认 —— C 端的题库在服务端，没有「导入」这件事",
