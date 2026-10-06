@@ -3,7 +3,7 @@
 #
 # ★ 它能跑几道（2026-09-27 实测，不是推测）
 #
-#   门禁有 **13 类**；CI 里是 **18 道步骤**（前端 5 类 × `apps/admin` + `apps/web`，
+#   门禁有 **13 类**；CI 里是 **23 道步骤**（前端 5 类 × `apps/admin` + `apps/web` + `apps/pwa`，
 #   权威清单 = `check-invariants.py` 的 `REQUIRED_GATES`）。本地**能跑 12 类**（①~⑫），只差 ⑬ `build`：
 #
 #   ⚠️ 其中 **⑤ pytest / ⑥ 覆盖率 不归本脚本跑**（本脚本不碰数据库）——
@@ -332,16 +332,6 @@ run_gate_apps() {
             printf '  ⏭ %s：无 node_modules（补：cd apps/%s && npm ci）\n' "$app" "$app"
             continue
         fi
-        # ★ ⑪ 的 `format:check:shared` 是**按 app 可选**的：它查的是"该 app **之外**的共享文件"
-        #   （`packages/api-core` 与 `tools/` 下的检查脚本）。个人 PWA 不消费那个包
-        #   （它没有认证链路）⇒ 它**不声明**这个脚本。
-        #   ⇒ 不声明 = **跳过并写明"少查了"**，不是失败。
-        #   ⚠️ **只对这一道放开**：若放开到所有脚本，某个 app 删掉 `lint` 就会静默跳过 ⑨ ——
-        #      那是真的放水（"依赖缺失 = 大声跳过"的前提是"它本来就该在"）。
-        if [ "$script" = "format:check:shared" ] && ! grep -q '"format:check:shared"' "$repo/apps/$app/package.json"; then
-            printf '  ⏭ %s：没有声明 `format:check:shared`（该 app 之外没有共享文件要查）\n' "$app"
-            continue
-        fi
         printf '  ── %s ──\n' "$app"
         ran=$((ran + 1))
         [ -n "$pre" ] && "$pre" "$app"
@@ -416,7 +406,7 @@ ELAPSED=$(( $(date +%s) - T0 ))
 
 cat <<MATRIX
 
-════════ 门禁覆盖：本地 vs CI（13 **类**；CI 里是 18 道步骤）════════
+════════ 门禁覆盖：本地 vs CI（13 **类**；CI 里是 23 道步骤）════════
  范围：$MDESC
 
   门禁（权威清单 = tools/local-verify/check-invariants.py）        本地  CI
@@ -437,7 +427,7 @@ cat <<MATRIX
   ─────────────────────────────────────────────────────────────  ────  ────
   本次：✅ 本地跑过通过 $npass · 📋 由别的工具跑过 $nproxy · ⏭ 明确跳过 $nskip · ❌ 失败 $nfail
         （**类**数；⑨~⑬ 每类含 $APPS 各一遍）
-  CI 侧：18 道步骤（后端 6 + 反向检查 1 + 共享包单测 1 + 前端 5 类 × 2 app）｜ 总耗时 ${ELAPSED}s
+  CI 侧：23 道步骤（后端 6 + 反向检查 1 + 共享包单测 1 + 前端 5 类 × 3 app）｜ 总耗时 ${ELAPSED}s
 
   ⇒ **"不是 ❌" 的有 $nnotfail 道，但它们含义不同**：
      ✅ = 我跑了、通过 ｜ 📋 = 我知道谁跑了、它通过了（引用结论）｜ ⏭ = **没跑**（不算"过"）

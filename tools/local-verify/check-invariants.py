@@ -75,12 +75,16 @@ REPO = Path(__file__).resolve().parents[2]
 #: 想偷偷把门槛调低，就得先改一个名叫"基线"的常量（而不是改一个不起眼的数字）。
 FAIL_UNDER_BASELINE = 94.40
 
-#: 门禁清单（**18 道**）。名字逐字取自 `.github/workflows/ci.yml` 的 `name:`。
+#: 门禁清单（**23 道**）。名字逐字取自 `.github/workflows/ci.yml` 的 `name:`。
 #: ⚠️ 历史口径说的"7 道"是 2026-09 早期的：后来加了诊断自检 / 反向检查 / 共享包单测 /
 #: `format:check:shared` / `build` / **不变量自检** ⇒ 13 道；
-#: 2026-09-27（P1）加 `apps/web` 的 5 道 ⇒ **18 道**。
-#: ★ 为什么 C 端要**单独 5 道**而不是"复用 admin 的"：每个 app 有自己的
-#:   `package.json`/lock/node_modules（不做 npm workspaces）⇒ 装依赖本来就分两次。
+#: 2026-09-27（P1）加 `apps/web` 的 5 道 ⇒ **18 道**；
+#: 2026-10-06（B-1/BL-27）加 `apps/pwa` 的 5 道 ⇒ **23 道**。
+#: ★ 为什么每个前端 app 要**单独 5 道**而不是"复用前一个 app 的"：每个 app 有自己的
+#:   `package.json`/lock/node_modules（不做 npm workspaces）⇒ 装依赖本来就分次。
+#: ★ 加 `apps/pwa` 那 5 道的理由（用户 2026-10-06）：**不加就只是"我加了个新 app"这句纸面事实**
+#:   —— 它的 lint / tsc / build 没人跑，代码可能**悄悄坏掉**，而 `apps/*` 是**自动发现**的
+#:   （`tools/preflight.sh` 按目录扫描）⇒ 本地能覆盖，CI 却漏着，两边口径不一致。
 REQUIRED_GATES: list[tuple[str, str]] = [
     ("后端", "CI 诊断段自检（拦截式）"),
     ("后端", "不变量自检（拦截式）"),
@@ -101,6 +105,12 @@ REQUIRED_GATES: list[tuple[str, str]] = [
     ("前端 · C 端", "web · npm run format:check:shared（拦截式）"),
     ("前端 · C 端", "web · tsc --noEmit（拦截式）"),
     ("前端 · C 端", "web · npm run build（拦截式，可编译性门禁）"),
+    # ---- 个人 PWA（apps/pwa）—— 名字带 `pwa · ` 前缀 ----
+    ("前端 · 个人 PWA", "pwa · npm run lint（拦截式）"),
+    ("前端 · 个人 PWA", "pwa · npm run format:check（拦截式）"),
+    ("前端 · 个人 PWA", "pwa · npm run format:check:shared（拦截式）"),
+    ("前端 · 个人 PWA", "pwa · tsc --noEmit（拦截式）"),
+    ("前端 · 个人 PWA", "pwa · npm run build（拦截式，可编译性门禁）"),
 ]
 
 _results: list[tuple[bool, str]] = []

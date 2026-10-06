@@ -199,7 +199,7 @@ yijian-platform/
 │   ├─ 21-待办清单.md                  # BL 清单（每条：编号 + 触发条件 + 检查点）
 │   ├─ 22-C端-方案.md                  # C 端全量方案（IA / 页面 / 数据流）
 │   ├─ 23-文档与现实对照清单.md        # 文档里的「声称」逐条对账（每批收尾扫）
-│   ├─ 24-C端首批-范围冻结.md          # C 端首批边界（含门禁口径 13 类 / 18 道）
+│   ├─ 24-C端首批-范围冻结.md          # C 端首批边界（含门禁口径 13 类 / 23 道）
 │   ├─ 25-宿主删除保护.md              # 会被拦的删除一律 rename 到 .trash/
 │   ├─ 26-作品集收尾清单.md            # 截图 / README / 视频 / 部署 + 执行清单
 │   ├─ 27-部署指南.md                  # Neon + Render + Vercel 从零到访问成功
@@ -246,7 +246,7 @@ yijian-platform/
 │       ├─ src/middleware.ts           #   第一层守卫（只看提示位 cookie；**不是安全边界**）
 │       └─ docs/screenshots/          #   C 端走查截图（`docs/26` §1 A.2）
 ├─ packages/api-core/                 # **认证链路唯一实现**（前端两个 app 共用）
-├─ .github/workflows/ci.yml           # CI 门禁：3 个 job（后端 / 管理端 / C 端）· 18 道全拦截式
+├─ .github/workflows/ci.yml           # CI 门禁：4 个 job（后端 / 管理端 / C 端 / 个人 PWA）· 23 道全拦截式
 ├─ ruff.toml                          # ruff 配置（只开默认集 E4/E7/E9/F，不含风格规则）
 ├─ tools/local-verify/                # 本地联调：起服务 / 走查 / 门禁 / 变异 / 探针 / 截图
 ├─ db/
@@ -662,7 +662,7 @@ powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -NoCov
   —— 列表过滤防的是"翻到"，防不了"猜到"（`B端联调坑.md` 坑 48 / 49）。
 - **② 门禁整顿（已完成）** → ESLint / Prettier / 覆盖率门槛都已补齐并**进 CI**（`docs/17`）。
   当年 `npm run lint` 是**假门禁**（脚本在、配置不在，坑 44）那笔账已清；
-  现在 CI 是 **18 道全拦截式**（口径见 `docs/24` §10.2.1）。
+  现在 CI 是 **23 道全拦截式**（口径见 `docs/24` §10.2.1）。
 - **③ 审计链补齐** → `docs/15-审计链补齐.md` 立项：`reviewed_by` / `audited_by` /
   `reviewer_id` 三处引用数全为 0 —— 状态能改，但"谁审的、什么时候审的"从没被记录。
 - **记忆曲线** → 学员练习调度算法（C 端答题记录**已落地**，具备开工条件；

@@ -114,6 +114,12 @@ def walk(root: Path) -> list[str]:
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
+        # ★ `.next*`（**前缀**，不是 `.next/`）：构建产物被"改名挪走"时会留下
+        #   `.next.bak-<ts>` 之类的兄弟目录（硬约定 R：会被拦的删除一律改 rename）。
+        #   写死 `.next/` 会漏掉它们 ⇒ 清单里冒出一堆 `pwa_only`、`--check` 当场红。
+        #   （同款坑在 `apps/web/.prettierignore` 里记过；这里第二次踩，所以写成前缀。）
+        if rel.startswith(".next"):
+            continue
         if any(rel == s or rel.startswith(s + "/") for s in SKIP):
             continue
         out.append(rel)

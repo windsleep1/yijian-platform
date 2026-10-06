@@ -763,3 +763,66 @@ jobs:
         env:
           NEXT_PUBLIC_API_BASE: https://ci-build-gate.invalid/api/v1
         run: npm run build
+  # ================================================================
+  # 个人 PWA（`apps/pwa`）—— 2026-10-06（B-1）新增
+  # ================================================================
+  #
+  # ## 为什么必须**单开一个 job**（BL-27 的原话）
+  #
+  # "现在 CI 的 18 道步骤覆盖 admin + web，pwa 是新 app —— 它的 lint / tsc / build 没跑。
+  #  这意味着 pwa 的代码可能悄悄坏掉。"
+  # 也就是说：**"我加了个新 app"不加这个 job 就只是纸面事实** ——
+  # 结构契约（不变量 12）在 CI 里，但**这个 app 自己的三件套**没人跑。
+  #
+  # ## 与 `frontend-web` 的**唯一差异**
+  #
+  #  - **不跑反向检查**：`check-auth-chain.mjs` 扫的是 `apps/<app>/src`（全部 app），
+  #    跑两遍只是浪费；它已经在 admin job 的第一步跑过，且**新版 app 一出生就在扫描范围内**。
+  #  - **不跑共享包单测**：`packages/api-core` 与 app 无关（本 app 也**不消费**它），admin job 已跑。
+  #  - **build 不带 `NEXT_PUBLIC_API_BASE`**：本 app **没有 API base**（数据在本机 IndexedDB）。
+  #    ★ 这一点值得写下来 —— 它正是"离线端"与"C 端"最本质的差别。
+  frontend-pwa:
+    name: 前端 · 个人 PWA（lint + tsc + build）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/pwa/package-lock.json
+
+      - name: 安装依赖
+        working-directory: apps/pwa
+        run: npm ci
+
+      # ---- 五道门禁：与 admin / web 同款，只是换了 app（名字带 `pwa · ` 前缀便于区分）----
+
+      - name: pwa · npm run lint（拦截式）
+        working-directory: apps/pwa
+        run: npm run lint
+
+      - name: pwa · npm run format:check（拦截式）
+        working-directory: apps/pwa
+        run: npm run format:check
+
+      # ⚠️ 本 app 这一条检查的是 `tools/pwa/_parity.mjs`（判分对拍的 node 侧）——
+      #    它在 `apps/pwa` **之外**，`prettier --check .` 覆盖不到（同 admin/web 的理由）。
+      #    ★ 实测：这一条没跑时，那个文件**从来没有任何格式门禁**（硬约定 H：没覆盖 ≠ 能过）。
+      - name: pwa · npm run format:check:shared（拦截式）
+        working-directory: apps/pwa
+        run: npm run format:check:shared
+
+      - name: pwa · tsc --noEmit（拦截式）
+        working-directory: apps/pwa
+        run: npm run typecheck
+
+      # ---- build：**"只有 build 会暴露"的那类问题的唯一闸门** ----
+      # 对这个 app 尤其关键：`next build` 才会暴露"静态预渲染时碰了 `window` / IndexedDB"
+      # （本 app 的首页与 `/setup` 在构建期会做 SSR）—— 那类问题**本地 dev 全绿**。
+      - name: pwa · npm run build（拦截式，可编译性门禁）
+        timeout-minutes: 10
+        working-directory: apps/pwa
+        run: npm run build
