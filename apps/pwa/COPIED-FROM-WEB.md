@@ -19,7 +19,7 @@
 
 ---
 
-## 1. 逐字节相同（17 个）—— C 端一改，这里就红，提醒你同步
+## 1. 逐字节相同（21 个）—— C 端一改，这里就红，提醒你同步
 
 | 文件（`apps/pwa/` 与 `apps/web/` 下同路径） | sha256[:16] |
 |---|---|
@@ -33,10 +33,14 @@
 | `public/icons/icon-512.png` | `32bed92a895a8710` |
 | `public/icons/maskable-512.png` | `f42b285d5e39fb56` |
 | `public/offline.html` | `d4343b91a918a531` |
+| `src/app/(tabs)/me/favorites/page.tsx` | `cc153de9111f97cf` |
+| `src/app/(tabs)/me/notes/page.tsx` | `57f09c9e20bc46eb` |
 | `src/app/globals.css` | `0e14476ef0f44d95` |
 | `src/app/manifest.ts` | `e74091c86dff4327` |
 | `src/app/practice/session/[id]/page.tsx` | `a29b0aa6cc4ec1a0` |
 | `src/app/practice/session/[id]/report/page.tsx` | `b06745289f262bc8` |
+| `src/app/practice/wrong/[qid]/page.tsx` | `3ec3ed85775dcfa7` |
+| `src/app/practice/wrong/page.tsx` | `11a7ce446881ddf7` |
 | `src/app/sw-register.tsx` | `fed0a8a7e1b49538` |
 | `src/lib/types.ts` | `03b3ed0edcea9c08` |
 | `tailwind.config.ts` | `862839061fed3b10` |
@@ -181,6 +185,18 @@
       "identical": true
     },
     {
+      "to": "src/app/(tabs)/me/favorites/page.tsx",
+      "from": "src/app/(tabs)/me/favorites/page.tsx",
+      "sha256": "cc153de9111f97cf",
+      "identical": true
+    },
+    {
+      "to": "src/app/(tabs)/me/notes/page.tsx",
+      "from": "src/app/(tabs)/me/notes/page.tsx",
+      "sha256": "57f09c9e20bc46eb",
+      "identical": true
+    },
+    {
       "to": "src/app/globals.css",
       "from": "src/app/globals.css",
       "sha256": "0e14476ef0f44d95",
@@ -202,6 +218,18 @@
       "to": "src/app/practice/session/[id]/report/page.tsx",
       "from": "src/app/practice/session/[id]/report/page.tsx",
       "sha256": "b06745289f262bc8",
+      "identical": true
+    },
+    {
+      "to": "src/app/practice/wrong/[qid]/page.tsx",
+      "from": "src/app/practice/wrong/[qid]/page.tsx",
+      "sha256": "3ec3ed85775dcfa7",
+      "identical": true
+    },
+    {
+      "to": "src/app/practice/wrong/page.tsx",
+      "from": "src/app/practice/wrong/page.tsx",
+      "sha256": "11a7ce446881ddf7",
       "identical": true
     },
     {
