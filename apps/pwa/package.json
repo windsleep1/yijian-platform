@@ -12,7 +12,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "// format:check:shared": "共享包与检查脚本在 apps/pwa **之外**，`prettier --check .` 覆盖不到 —— 不补这一条，它们就是**没有任何格式门禁**的盲区（硬约定 H：没覆盖 ≠ 能过）。与 apps/web / apps/admin 同款。",
-    "format:check:shared": "prettier --check --config ./prettier.config.mjs ../../tools/pwa/_parity.mjs"
+    "format:check:shared": "prettier --check --config ./prettier.config.mjs \"../../tools/pwa/**/*.mjs\""
   },
   "dependencies": {
     "next": "14.2.18",
