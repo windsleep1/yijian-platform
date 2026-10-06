@@ -59,6 +59,7 @@ import type {
   SessionReport,
   SessionProgress,
   Subject,
+  WrongDetail,
   WrongItem,
   WrongList,
   WrongSubject,
@@ -449,7 +450,15 @@ const ROUTES = [
 
   route("practice/sessions", ({ m, body }) => {
     if (m !== "POST") throw notFound("不支持的方法");
-    return createSession(body as { subject_id?: string; chapter_id?: string; count?: number });
+    return createSession(
+      body as {
+        mode?: string;
+        subject_id?: string;
+        chapter_id?: string;
+        question_ids?: string[];
+        count?: number;
+      },
+    );
   }),
   route("practice/sessions/:sid", ({ seg }) => getSession(seg[2])),
   route("practice/sessions/:sid/answer", ({ seg, body }) =>
@@ -458,9 +467,12 @@ const ROUTES = [
   route("practice/sessions/:sid/finish", ({ seg }) => finishSession(seg[2])),
   route("practice/sessions/:sid/report", ({ seg }) => sessionReport(seg[2])),
 
+  route("practice/wrong-questions", ({ query }) => listWrong(query)),
+  route("practice/wrong-questions/:qid", ({ seg }) => wrongDetail(seg[2])),
+
   route("practice/marks/:qid", ({ m, seg }) => toggleFlag(m, "marks", seg[2])),
   route("practice/favorites/:qid", ({ m, seg }) => toggleFlag(m, "favorites", seg[2])),
-  route("practice/favorites", ({ query }) => listCollections(String(query.get("kind") ?? ""))),
+  route("practice/favorites", ({ query }) => listCollections(query)),
 
   route("practice/questions/:qid/notes", ({ m, seg, body }) =>
     m === "POST" ? addNote(seg[2], body as { content?: unknown }) : listNotesOfQuestion(seg[2]),
@@ -547,6 +559,68 @@ async function listChapters(sid: string): Promise<Chapter[]> {
     .sort((a, b) => a.sort_no - b.sort_no || (a.id < b.id ? -1 : 1));
 }
 
+/** `wrong` store 的行（比出参多几个**只在本层用**的字段）。 */
+type WrongRow = {
+  question_id: string;
+  subject_id: string | null;
+  chapter_id: string | null;
+  wrong_count: number;
+  retry_correct: number;
+  mastered_level: number;
+  last_wrong_at: string;
+  /** ★ 约定 T 的对应物：软删标记（后端 `wrong_questions.is_removed`）。 */
+  removed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * 抽题：**错题重练**的题源（`mode='wrong'`）。
+ *
+ * ★ 与后端 `_WRONG_PICK_HEAD` / `_WRONG_PICK_TAIL` **逐条对应**（复制品，来源写在这儿）：
+ *
+ *     w.user_id = :uid                  → 本地库只有"我"⇒ 无对应物（§1.1 的机械判据）
+ *     w.is_removed = false              → `removed_at === null`
+ *     JOIN questions q                  → 题不在本地题库里 ⇒ 抽不到（约定 T：行还在，但点不开）
+ *     q.status = 'published'            → 同上
+ *     q.type IN (可判分题型)             → `rules.gradable_types.includes(q.type)`
+ *     (:sid IS NULL OR w.subject_id = :sid) → `opts.subjectId === null ||`
+ *     ORDER BY last_wrong_at DESC, question_id → 同一句比较
+ *
+ * ★ 指定题时**走同一条判定**（后端也只是多一条 `AND w.question_id IN :qids`）⇒
+ *   "别人的错题 / 没错过的题 / 下架的题"**即使显式传 id 也抽不到** ——
+ *   表现一致，也就**不泄露"这个 id 存不存在"**。
+ */
+async function pickWrongQuestions(opts: {
+  subjectId: string | null;
+  questionIds: string[] | null;
+  count: number;
+}): Promise<string[]> {
+  const [rows, questions, rules] = await Promise.all([
+    idbAll<WrongRow>("wrong"),
+    idbAll<QuestionRow>("questions"),
+    gradingRules(),
+  ]);
+  const qById = new Map(questions.map((q) => [q.id, q]));
+  const wanted = opts.questionIds === null ? null : new Set(opts.questionIds);
+  return rows
+    .filter((r) => {
+      if (r.removed_at !== null) return false;
+      if (opts.subjectId !== null && r.subject_id !== opts.subjectId) return false;
+      if (wanted !== null && !wanted.has(r.question_id)) return false;
+      const q = qById.get(r.question_id);
+      if (!q) return false;
+      if (q.status !== "published") return false;
+      return rules.gradable_types.includes(q.type);
+    })
+    .sort(
+      (a, b) =>
+        (a.last_wrong_at < b.last_wrong_at ? 1 : -1) || (a.question_id < b.question_id ? -1 : 1),
+    )
+    .slice(0, opts.count)
+    .map((r) => r.question_id);
+}
+
 /** 「我做过的题」集合 —— 抽题时排在后面（与后端 `_PICK_SQL` 同口径）。 */
 async function answeredQuestionIds(): Promise<Set<string>> {
   const items = await idbAll<ItemRow>("items");
@@ -556,59 +630,105 @@ async function answeredQuestionIds(): Promise<Set<string>> {
 /* ============================================================ 建练习 / 取练习 */
 
 async function createSession(body: {
+  mode?: string;
   subject_id?: string;
   chapter_id?: string;
+  question_ids?: string[];
   count?: number;
 }): Promise<{ id: string }> {
-  const sid = body.subject_id;
-  if (!sid) throw new ApiError(40001, "请先选科目", "", 400);
-  const rules = await gradingRules();
+  const mode = body.mode ?? "chapter";
+  if (mode !== "chapter" && mode !== "wrong") {
+    throw new ApiError(40001, 'mode 只能是 "chapter" 或 "wrong"', "", 400);
+  }
+  // ★★ 必填项**按 mode 分叉** —— 与后端 `SessionCreateIn._check` 同口径。
+  //   写成"进来先判"而不是散在两段里：调用方传错时**第一句话就指出是哪个参数的问题**。
+  if (mode === "chapter" && !body.subject_id) {
+    throw new ApiError(40001, "请先选科目", "", 400);
+  }
+  if (mode !== "wrong" && body.question_ids && body.question_ids.length > 0) {
+    throw new ApiError(40001, "question_ids 只在 mode='wrong' 下有意义", "", 400);
+  }
   const count = Math.max(1, Math.min(Number(body.count) || 10, 100));
+  const rules = await gradingRules();
 
-  const [all, chapters, subjects, done] = await Promise.all([
-    idbAll<QuestionRow>("questions"),
-    idbAll<ChapterRow>("chapters"),
-    idbAll<Subject>("subjects"),
-    answeredQuestionIds(),
-  ]);
-  const chapterPath = body.chapter_id
-    ? (chapters.find((c) => c.id === body.chapter_id)?.path ?? null)
-    : null;
-  const inScope = (q: QuestionRow) => {
-    if (q.subject_id !== sid) return false;
-    if (q.status !== "published") return false;
-    if (!rules.gradable_types.includes(q.type)) return false;
-    if (chapterPath === null) return true;
-    return (
-      (q.chapter_id &&
-        (chapters.find((c) => c.id === q.chapter_id)?.path ?? "").startsWith(chapterPath)) === true
-    );
-  };
-  const pool = all.filter(inScope);
-  // 排序：**没做过的在前**、同组按 id —— 与后端 `ORDER BY (uqs.id IS NOT NULL), q.id` 同口径。
-  // ★ 刻意**不随机**：C 端也是确定的。随机会让"同一章两次练习抽到的题不同"，
-  //   而 E2E 与排障都依赖"同一输入 → 同一题序"。
-  pool.sort((a, b) => {
-    const da = done.has(a.id) ? 1 : 0;
-    const db2 = done.has(b.id) ? 1 : 0;
-    return da - db2 || (a.id < b.id ? -1 : 1);
-  });
-  const chosen = pool.slice(0, count);
-  if (chosen.length === 0) {
-    throw notFound("这个章节里还没有可练习的题。", 40401);
+  // 题源与"会话标题 / subject_id"三件事**按 mode 一起定**（后端的写法也是这样的：
+  // 一个 if 里同时产出 `picked` / `title` / `chapter_id = None`）。
+  let chosen: string[];
+  let title: string;
+  let sessionSubjectId: string | null;
+  let sessionChapterId: string | null;
+
+  if (mode === "wrong") {
+    chosen = await pickWrongQuestions({
+      subjectId: body.subject_id ?? null,
+      questionIds: body.question_ids && body.question_ids.length > 0 ? body.question_ids : null,
+      count,
+    });
+    if (chosen.length === 0) {
+      // ★ 与后端**同一句话**：空错题本（= 筛选后为空）是 `40401`，
+      //   而它**不是故障** —— 所以文案必须带"怎么才能有题"。
+      throw notFound(
+        "错题本里还没有可重练的题 —— 这里只放**你自己答错过**的题，先去练习里做几道。",
+        40401,
+      );
+    }
+    title = "错题重练";
+    // ★ 跨科目重练是**合法场景**（`question_ids` 可以横跨科目）⇒ 会话的 subject_id 允许为 NULL。
+    //   后端同（`practice_sessions.subject_id` 可空）。
+    sessionSubjectId = body.subject_id ?? null;
+    sessionChapterId = null;
+  } else {
+    const sid = body.subject_id;
+    if (sid === undefined) throw new ApiError(40001, "请先选科目", "", 400);
+    const [all, chapters, subjects, done] = await Promise.all([
+      idbAll<QuestionRow>("questions"),
+      idbAll<ChapterRow>("chapters"),
+      idbAll<Subject>("subjects"),
+      answeredQuestionIds(),
+    ]);
+    const chapterPath = body.chapter_id
+      ? (chapters.find((c) => c.id === body.chapter_id)?.path ?? null)
+      : null;
+    const inScope = (q: QuestionRow) => {
+      if (q.subject_id !== sid) return false;
+      if (q.status !== "published") return false;
+      if (!rules.gradable_types.includes(q.type)) return false;
+      if (chapterPath === null) return true;
+      return (
+        (q.chapter_id &&
+          (chapters.find((c) => c.id === q.chapter_id)?.path ?? "").startsWith(chapterPath)) ===
+        true
+      );
+    };
+    const pool = all.filter(inScope);
+    // 排序：**没做过的在前**、同组按 id —— 与后端 `ORDER BY (uqs.id IS NOT NULL), q.id` 同口径。
+    // ★ 刻意**不随机**：C 端也是确定的。随机会让"同一章两次练习抽到的题不同"，
+    //   而 E2E 与排障都依赖"同一输入 → 同一题序"。
+    pool.sort((a, b) => {
+      const da = done.has(a.id) ? 1 : 0;
+      const db2 = done.has(b.id) ? 1 : 0;
+      return da - db2 || (a.id < b.id ? -1 : 1);
+    });
+    chosen = pool.slice(0, count).map((q) => q.id);
+    if (chosen.length === 0) {
+      throw notFound("这个章节里还没有可练习的题。", 40401);
+    }
+    const chapterName = body.chapter_id
+      ? (chapters.find((c) => c.id === body.chapter_id)?.name ?? null)
+      : null;
+    const subjectName = subjects.find((s) => s.id === sid)?.name ?? null;
+    title = chapterName ? `${chapterName} · 练习` : `${subjectName ?? "练习"}`;
+    sessionSubjectId = sid;
+    sessionChapterId = body.chapter_id ?? null;
   }
 
-  const chapterName = body.chapter_id
-    ? (chapters.find((c) => c.id === body.chapter_id)?.name ?? null)
-    : null;
-  const subjectName = subjects.find((s) => s.id === sid)?.name ?? null;
   const session: SessionRow = {
     id: newId("s"),
-    mode: "chapter",
+    mode,
     status: "doing",
-    subject_id: sid,
-    chapter_id: body.chapter_id ?? null,
-    title: chapterName ? `${chapterName} · 练习` : `${subjectName ?? "练习"}`,
+    subject_id: sessionSubjectId,
+    chapter_id: sessionChapterId,
+    title,
     started_at: nowIso(),
     finished_at: null,
     total: chosen.length,
@@ -616,11 +736,11 @@ async function createSession(body: {
     correct: 0,
     score: 0,
   };
-  const items: ItemRow[] = chosen.map((q, i) => ({
+  const items: ItemRow[] = chosen.map((qid, i) => ({
     item_id: newId("i"),
     session_id: session.id,
     seq: i + 1,
-    question_id: q.id,
+    question_id: qid,
     answered_at: null,
     my_value: null,
     is_correct: null,
@@ -964,10 +1084,14 @@ async function hasRow(store: StoreName, key: string): Promise<boolean> {
   return (await idbGet(store, key)) !== undefined;
 }
 
-async function listCollections(kind: string): Promise<CollectionList> {
+async function listCollections(query: URLSearchParams): Promise<CollectionList> {
+  const kind = query.get("kind") ?? "";
   if (kind !== "favorite" && kind !== "mark") {
     throw new ApiError(40001, 'kind 只能是 "favorite" 或 "mark"', "", 400);
   }
+  const page = Math.max(1, Number(query.get("page") ?? 1) || 1);
+  const size = Math.max(1, Math.min(Number(query.get("page_size") ?? 20) || 20, 100));
+  const sid = query.get("subject_id") ?? "";
   const store: StoreName = kind === "favorite" ? "favorites" : "marks";
   const [rows, questions, subjects, chapters] = await Promise.all([
     idbAll<{ question_id: string; collected_at: string }>(store),
@@ -998,14 +1122,21 @@ async function listCollections(kind: string): Promise<CollectionList> {
       in_wrong_book: await hasRow("wrong", r.question_id),
     });
   }
+  // ★ 分面**恒为全量**（先算分面，再用筛选收缩列表）—— 与后端 `list_collections` 同一条判据。
+  //   ⚠️ B-1 第一版**只取了 `kind`、把整个 query 丢掉** ⇒ 页面传的
+  //      `subject_id` / `page` / `page_size` **全部无效**：分页与科目筛选**静默失效**
+  //      （列表永远是第一页全量）。它**不报错** —— 拿到的数据"看起来合理"，
+  //      只有翻页或切科目时才看得出来。本批修（方案 §1.3 漏了这一条，见 §11 记录）。
+  const facets = facetOf(items);
+  const filtered = sid ? items.filter((x) => (x.subject_id ?? "") === sid) : items;
+  const start = (page - 1) * size;
   return {
     kind: kind === "favorite" ? "favorite" : "mark",
-    total: items.length,
-    page: 1,
-    page_size: items.length,
-    // ★ 分面**恒为全量**（与错题本同一条判据）
-    subjects: facetOf(items),
-    items,
+    total: filtered.length,
+    page,
+    page_size: size,
+    subjects: facets,
+    items: filtered.slice(start, start + size),
   };
 }
 
@@ -1138,29 +1269,50 @@ async function listNotes(query: URLSearchParams): Promise<NoteList> {
   };
 }
 
-/** 错题本（B-2 的页面用它）。B-1 不建页面，但**先在数据层实现**以免复制品分叉。 */
-export async function wrongListForFuture(): Promise<WrongList> {
-  const [rows, questions, subjects, chapters] = await Promise.all([
-    idbAll<{
-      question_id: string;
-      wrong_count: number;
-      retry_correct: number;
-      mastered_level: number;
-      last_wrong_at: string;
-    }>("wrong"),
+/**
+ * 错题本列表（B-2 的页面用它）。
+ *
+ * ★ 与后端 `list_wrong` 同口径：
+ *   · 倒序 `last_wrong_at DESC`（**最近错的在前**）—— 入口是"我刚错的那些题"；
+ *   · `subjects`（分面）**恒为全量**，即使传了 `subject_id`；
+ *     ★ 反例记在这里：后端第一版写成"只返选中科目"，理由是怕"chip 写着 3、列表 1 条"——
+ *       那个理由不成立（一条错题只属于一个科目），代价却是**切一次科目后其他 chip
+ *       从 DOM 里消失 ⇒ 切不回去**（p2c2 走查第一次跑就抓到了）。
+ *   · `marked_only` **只筛列表**、不动分面；
+ *   · 分页在 service 里**夹一次**（`page >= 1`、`page_size ∈ [1, 100]`），不靠调用方。
+ *
+ * ★ 约定 T：题目不在本地题库里（换过包 / 下架）⇒ **行仍然在**，只是 `question_available=false`。
+ *   不过滤、不删除 —— "我的内容"不随"平台内容"的生命周期变化。
+ *
+ * ⚠️ `marked` 在下面**一次性预读成 Set**（不再逐行 `await hasRow(...)`）：
+ *   循环里 `await` 会让每次迭代多一个 IDB 往返，而且**读的顺序不再由一个事务保证**。
+ *   等价改写，不是新语义。
+ */
+async function listWrong(query: URLSearchParams): Promise<WrongList> {
+  const page = Math.max(1, Number(query.get("page") ?? 1) || 1);
+  const size = Math.max(1, Math.min(Number(query.get("page_size") ?? 20) || 20, 100));
+  const sid = query.get("subject_id") ?? "";
+  // ★ C 端传的是 `marked_only: true`，而 `request()` 会 `String(v)` ⇒ 这里收到的是 `"true"`。
+  //   写成 `=== "true"` 而不是 `Boolean(...)`：后者会把字符串 `"false"` 判成真值。
+  const markedOnly = query.get("marked_only") === "true";
+  const [rows, questions, subjects, chapters, marks] = await Promise.all([
+    idbAll<WrongRow>("wrong"),
     idbAll<QuestionRow>("questions"),
     idbAll<Subject>("subjects"),
     idbAll<ChapterRow>("chapters"),
+    idbAll<{ question_id: string }>("marks"),
   ]);
   const qById = new Map(questions.map((q) => [q.id, q]));
   const subName = new Map(subjects.map((s) => [s.id, s.name]));
   const chName = new Map(chapters.map((c) => [c.id, c.name]));
-  // ★ 约定 T：题目不在本地题库里（换过包 / 下架）⇒ **行仍然在**，只是 `question_available=false`。
-  //   不过滤、不删除 —— "我的内容"不随"平台内容"的生命周期变化。
-  const alive = rows.slice().sort((a, b) => (a.last_wrong_at < b.last_wrong_at ? 1 : -1));
-  // ★ 用 `for...of` 而不是 `alive.map(async …)`：`await` 不能出现在**非 async** 的
-  //   `map` 回调里（那会编译不过），而 `map(async …)` 又会产出一堆 Promise
-  //   ⇒ 顺序无关紧要但代码难读。老老实实循环。
+  const markSet = new Set(marks.map((x) => x.question_id));
+  const alive = rows
+    .filter((r) => r.removed_at === null) // 软删过滤（后端 `w.is_removed = false`）
+    .slice()
+    .sort(
+      (a, b) =>
+        (a.last_wrong_at < b.last_wrong_at ? 1 : -1) || (a.question_id < b.question_id ? -1 : 1),
+    );
   const items: WrongItem[] = [];
   for (const r of alive) {
     const q = qById.get(r.question_id);
@@ -1175,11 +1327,64 @@ export async function wrongListForFuture(): Promise<WrongList> {
       retry_correct: r.retry_correct,
       mastered_level: r.mastered_level,
       last_wrong_at: r.last_wrong_at,
-      marked: await hasRow("marks", r.question_id),
+      marked: markSet.has(r.question_id),
       question_available: q !== undefined,
     });
   }
-  return { total: items.length, page: 1, page_size: items.length, subjects: facetOf(items), items };
+  const facets = facetOf(items);
+  let filtered = items;
+  if (sid) filtered = filtered.filter((x) => (x.subject_id ?? "") === sid);
+  if (markedOnly) filtered = filtered.filter((x) => x.marked);
+  const start = (page - 1) * size;
+  return {
+    total: filtered.length,
+    page,
+    page_size: size,
+    subjects: facets,
+    items: filtered.slice(start, start + size),
+  };
+}
+
+/**
+ * 错题详情（**含正确答案与解析**）。
+ *
+ * ★ 与后端 `get_wrong_detail` 同口径：那道题必须在**我的**错题本里、且未软删；
+ *   否则 `40401` 且**不返答案**（答案是给"已经和这道题交过手"的人的）。
+ * ★ "题不在本地题库里"也走**同一个 `40401`** —— 和后端一样**不区分**两种原因：
+ *   区分开就等于告诉调用方"这条错题存在，只是题没了"，而页面拿到的都是"打不开"。
+ */
+async function wrongDetail(qid: string): Promise<WrongDetail> {
+  const [row, q, subjects, chapters] = await Promise.all([
+    idbGet<WrongRow>("wrong", qid),
+    idbGet<QuestionRow>("questions", qid),
+    idbAll<Subject>("subjects"),
+    idbAll<ChapterRow>("chapters"),
+  ]);
+  if (!row || row.removed_at !== null || !q) {
+    throw notFound("这道题不在你的错题本里", 40401);
+  }
+  return {
+    question_id: q.id,
+    subject_id: q.subject_id,
+    subject_name: subjects.find((s) => s.id === q.subject_id)?.name ?? null,
+    chapter_name: q.chapter_id ? (chapters.find((c) => c.id === q.chapter_id)?.name ?? null) : null,
+    type: q.type,
+    stem: q.stem,
+    stem_html: q.stem_html,
+    options: q.options,
+    // ★ 不在这里做第二次"归一"：题库包在**导出时**已经归一（`canonical_doc`），
+    //   而 PWA 侧再归一 == 放一张 token 表 == 第二份判分语义（方案 §3.1 禁止）。★
+    answer: { value: q.answer.value },
+    analysis: q.analysis,
+    analysis_html: q.analysis_html,
+    wrong_count: row.wrong_count,
+    retry_correct: row.retry_correct,
+    mastered_level: row.mastered_level,
+    // ★ 恒为 null，**不是漏写**：C 端的 `reason_tag`（"错因标签"）那一列没有任何写入方，
+    //   而 PWA 的 `wrong` store 根本没有这个字段。写了才是"凭印象造一个值"。
+    reason_tag: null,
+    last_wrong_at: row.last_wrong_at,
+  };
 }
 
 /** 打开数据库（首页/自检用）。页面不该直接碰它，但"有没有库"这件事要能问。 */
