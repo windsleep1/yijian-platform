@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  /* ★ 所有 .mjs 文件也必须在 include 里：`lib/grade.mjs` 是**纯 ESM**（判分对拍要在 node 里
+     直接 import 它，见该文件抬头）。不在 include 里的话，`allowJs` 也够不到它 ⇒
+     `import … from "./grade.mjs"` 会报「找不到声明」，而**运行时是对的**（那种红最容易
+     被当成「配置噪音」而绕过 —— 一旦绕过，判分那一层就没有类型保护了）。
+     ⚠️ 这里刻意**不写那个 glob 的字面形状**：JS 的块注释以 `*` 加 `/` 结束，而
+        glob 里 `**` 紧跟着 `/` 正好构成那个序列 ⇒ **注释会被提前结束**（实测踩到，
+        prettier 报 `Unexpected token`）。这正是「注释里的东西也是内容」那一族。 */
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "**/*.mjs", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

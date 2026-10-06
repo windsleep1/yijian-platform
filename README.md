@@ -47,7 +47,7 @@ flowchart TB
     end
 
     subgraph be["Render · 容器"]
-        API["apps/api<br/>FastAPI · 77 接口 / 13 模块<br/>43 项不变量门禁 · 453 用例"]
+        API["apps/api<br/>FastAPI · 77 接口 / 13 模块<br/>50 项不变量门禁 · 464 用例"]
         CORE["packages/api-core<br/>认证链路**唯一**实现"]
     end
 

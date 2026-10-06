@@ -25,6 +25,22 @@ SW 的缓存白名单必须含静态资源、**不得含接口**，且 `sw.js` /
     不变量**不是"开工前确认一次"**，而是"**每次 push 后跑一次**" ——
     P0→P3 每推一次都可能把它们破掉。写成可执行文件才能每批收尾自动跑。
 
+第 12 条（2026-10-06 加）：**离线 PWA 的复制品清单 + 三条结构契约**。
+`apps/pwa` 的 UI 是**复制** `apps/web` 的（用户定的方案：不抽共享包）。
+复制之后"同一份 UI 两份" ⇒ 在 C 端修了 bug、PWA 没修，而且**不报错**
+（「同一个事实两种写法」那一族）。对策 = `apps/pwa/COPIED-FROM-WEB.md` 的机器可读块：
+  ① 清单**必须覆盖**每一个"两个 app 都有"的文件（漏登记 ⇒ 红）；
+  ② 标 `same` 的**必须逐字节相同**；
+  ③ 标 `fork` 的**理由必须可判定** —— 要指名一个具体依赖或数据差异，且能被一条命令验证。
+     ★ 反面写法（直接判红）：`有意简化` / `暂时这样` / `后续再改` / `先复制过来`
+       —— **它们能套在任何一个文件上**，等于没有理由。
+另有三条结构契约（都是"声明式的、不报错"那类）：
+  a. `apps/pwa/src/lib/api.ts` 里**不许出现 `fetch(`** —— 它是"数据源换成 IndexedDB"的判据；
+  b. `apps/pwa/public/sw.js` 的预缓存清单里**不许出现数据文件**（题库包 / questions）
+     —— 否则 SW 与 IndexedDB 各存一份，换题库后两份不一致（症状：导入成功但题目还是旧的）；
+  c. `apps/pwa` 的**判分不许自带字面量规则**（只许从包的 `meta.grading_rules` 读）。
+方案 = `docs/32-个人PWA-方案.md`（§2.1 复制品门禁 / §2.2 SW 与 IndexedDB 的分工）。
+
 判据来源：`docs/24-C端首批-范围冻结.md` §8；第 6 条 → `docs/25-宿主删除保护.md`。
 
 设计约束
@@ -46,6 +62,7 @@ CLI
 from __future__ import annotations
 
 import ast
+import json
 import re
 import struct
 import sys
@@ -979,6 +996,190 @@ def _e2e_registry(text: str) -> set[str]:
     return _e2e_names(text[i:j])
 
 
+def check_copy_manifest() -> None:
+    print("[12] 离线 PWA 的复制品清单 + 三条结构契约（不变量 12）")
+
+    import hashlib
+
+    offline = "apps/pwa"
+    manifest_rel = f"{offline}/COPIED-FROM-WEB.md"
+    path = REPO / manifest_rel
+    if not path.is_file():
+        bad(f"缺 `{manifest_rel}` —— 没有它，`{offline}` 的复制品没有任何覆盖检查")
+        return
+
+    blocks = re.findall(r"```json\s*\n(.*?)```", path.read_text(encoding="utf-8"), flags=re.S)
+    if not blocks:
+        bad(f"`{manifest_rel}` 里没有 ```json 代码块 —— 门禁读不到清单，会静默变成假绿")
+        return
+    try:
+        data = json.loads(blocks[-1])
+    except json.JSONDecodeError as e:
+        bad(f"`{manifest_rel}` 的 json 块解析失败：{e}")
+        return
+
+    same = data.get("copied_identical", [])
+    fork = data.get("copied_fork", [])
+    only = data.get("pwa_only", [])
+
+    # ---- ② 标 same 的必须**逐字节相同** ----
+    drifted: list[str] = []
+    missing: list[str] = []
+    for e in same:
+        a = REPO / "apps" / "web" / e["from"]
+        b = REPO / offline / e["to"]
+        if not a.is_file():
+            missing.append(f"{e['from']}（C 端源文件已不在）")
+            continue
+        if not b.is_file():
+            missing.append(f"{e['to']}（PWA 侧文件已不在）")
+            continue
+        if hashlib.sha256(a.read_bytes()).digest() != hashlib.sha256(b.read_bytes()).digest():
+            drifted.append(f"{e['to']}")
+    if missing:
+        bad(f"清单里登记为逐字节相同的文件不见了：{missing}")
+    elif drifted:
+        bad(
+            f"这些文件登记为**逐字节相同**、实际已经分叉：{drifted}。"
+            "⇒ 要么把 C 端的改动同步过去，要么把它改登记为 fork 并写清可判定的理由"
+        )
+    else:
+        ok(f"逐字节相同的 {len(same)} 个文件**确实一致**（sha256 实算，不信清单里的值）")
+
+    # ---- ③ fork 的理由必须可判定 ----
+    forbidden = (
+        "有意简化",
+        "暂时这样",
+        "暂时先",
+        "后续再改",
+        "以后再改",
+        "先复制过来",
+        "先这样",
+        "待改",
+    )
+    bad_reason: list[str] = []
+    for e in fork:
+        reason = str(e.get("reason", "")).strip()
+        check = str(e.get("check", "")).strip()
+        if not reason or not check:
+            bad_reason.append(f"{e['to']}（缺理由或缺判据）")
+            continue
+        hit = [w for w in forbidden if w in reason]
+        if hit:
+            bad_reason.append(f"{e['to']}（理由里有 {hit} —— 那种理由能套在任何一个文件上）")
+    for e in only:
+        if not str(e.get("why", "")).strip():
+            bad_reason.append(f"{e['to']}（pwa_only 也要写理由）")
+    if bad_reason:
+        bad(f"分叉理由不合格：{bad_reason}")
+    else:
+        ok(f"{len(fork)} 个分叉的理由都指名了具体差异，且都给了可验判据；{len(only)} 个 pwa_only 也有理由")
+
+    # ---- ① 覆盖：两个 app 都有的文件，**一条都不许漏登记** ----
+    #: ★ 与 `tools/pwa/gen-copied-manifest.py` 的 SKIP **必须同集**（锁文件由 npm 生成、
+    #:   各 app 本来就不同，逐字节比它没有意义）。这**不是**"两处必须一致"的约定 ——
+    #:   它是同一份判断第二次被用到，所以两处都写清理由；谁改都得两边看。
+    skip = {"next-env.d.ts", "tsconfig.tsbuildinfo", "package-lock.json", "COPIED-FROM-WEB.md"}
+    registered = {e["to"] for e in same} | {e["to"] for e in fork}
+
+    def walk(root: str) -> set[str]:
+        out: set[str] = set()
+        base = REPO / root
+        if not base.is_dir():
+            return out
+        for p in base.rglob("*"):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(base).as_posix()
+            if rel in skip or rel.startswith(".next") or "node_modules" in rel:
+                continue
+            out.add(rel)
+        return out
+
+    both = (walk("apps/web") & walk(offline)) - {e["from"] for e in same} - registered
+    if both:
+        bad(
+            f"这些文件在 `apps/web` 与 `{offline}` 下**同名共存**，却没登记在清单里：{sorted(both)}。"
+            "★ 这正是「复制了但忘了登记」的形状 —— 它会让『C 端改了、PWA 没改』永远不被发现"
+        )
+    else:
+        ok("两个 app 共有的文件**全部已登记**（没有「复制了没登记」的漏网）")
+
+    # ---- a) api.ts 不许出现 fetch( ----
+    api_rel = f"{offline}/src/lib/api.ts"
+    api_src = REPO / api_rel
+    if not api_src.is_file():
+        bad(f"缺 `{api_rel}` —— 离线端的数据层，无处可查")
+    else:
+        # ★ 先剥注释：本文件抬头就整段解释着"为什么不用 fetch"（不剥就是假绿）
+        stripped = _strip_js_comments(api_src.read_text(encoding="utf-8"))
+        if "fetch(" in stripped:
+            bad(
+                f"`{api_rel}` 里去掉了注释仍能找到 `fetch(` —— "
+                "离线端的**唯一**数据源应当是 IndexedDB（方案 §2.2）"
+            )
+        else:
+            ok(f"`{api_rel}` 里没有 `fetch(` —— 数据源确实换成了 IndexedDB")
+
+    # ---- b) sw.js 的预缓存清单不许含数据文件 ----
+    sw_rel = f"{offline}/public/sw.js"
+    sw_src = REPO / sw_rel
+    if not sw_src.is_file():
+        bad(f"缺 `{sw_rel}`")
+    else:
+        s = _strip_js_comments(sw_src.read_text(encoding="utf-8"))
+        entries = re.findall(r"""["'`](/[^"'`]*)["'`]""", s)
+        data_like = [e for e in entries if re.search(r"bank|questions|\.sql", e, flags=re.I)]
+        if data_like:
+            bad(
+                f"`{sw_rel}` 里出现了数据文件 {data_like} —— SW 与 IndexedDB 会**各存一份**，"
+                "换题库后两份不一致（症状：导入成功但题目还是旧的，**不报错**）"
+            )
+        else:
+            ok(f"`{sw_rel}` 只缓存应用壳（{len(entries)} 条路径，无任何数据文件）")
+
+    # ---- c) 判分不许自带字面量规则 ----
+    grade_rel = f"{offline}/src/lib/grade.mjs"
+    grade_src = REPO / grade_rel
+    if not grade_src.is_file():
+        bad(f"缺 `{grade_rel}` —— 判分的哑比较实现")
+    else:
+        g = _strip_js_comments(grade_src.read_text(encoding="utf-8"))
+        if "partial_credit_ratio" not in g:
+            bad(f"`{grade_rel}` 里读不到 `partial_credit_ratio` —— 阈值没有随包下发？")
+        elif re.search(r"\b0\.[0-9]+\b", g):
+            hit = re.findall(r"\b0\.[0-9]+\b", g)
+            bad(
+                f"`{grade_rel}` 里出现了字面量比例 {hit} —— 判分必须**从包的 meta 读**规则，"
+                "不许自带（方案 §3.1：PWA 侧没有可决定的东西）"
+            )
+        else:
+            ok(f"`{grade_rel}` 从包的 `meta.grading_rules` 读规则，没有任何字面量阈值")
+
+    # ---- d) 清单必须**是生成的**（不是手改的）----
+    #
+    # ★★ 这条是变异验证抓出来的真缺口（2026-10-06）：清单里同一个事实写了**两遍**
+    #    —— 人读的表格 + 机器读的 JSON 块。只比 JSON 的话，手改**表格**不会红
+    #    （两侧各说各话）；而手改 JSON 又能绕过"理由必须可判定"。
+    #    ⇒ 唯一干净的解法是让它是**生成的**：磁盘内容必须 == 生成脚本此刻的输出。
+    check_py = REPO / "tools" / "pwa" / "gen-copied-manifest.py"
+    if not check_py.is_file():
+        bad(f"缺 `{check_py.relative_to(REPO).as_posix()}` —— 无法判断清单是不是手改的")
+    else:
+        import subprocess
+
+        p = subprocess.run(
+            [sys.executable, str(check_py), "--check"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if p.returncode == 0:
+            ok("清单**是最新的**（与生成脚本逐字节一致 ⇒ 理由只有一处，手改会被抓到）")
+        else:
+            bad(f"{manifest_rel} 不是最新的：{p.stdout.strip() or p.stderr.strip()}")
+
+
 def check_e2e_scenarios() -> None:
     print("[11] E2E 场景清单**三处必须一致**（不变量 11）—— 加场景漏一处，会静默或直接跑不起来")
 
@@ -1049,6 +1250,7 @@ def main() -> int:
     check_answer_single_source()
     check_public_route_entrypoints()
     check_pwa_contract()
+    check_copy_manifest()
     check_e2e_scenarios()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]

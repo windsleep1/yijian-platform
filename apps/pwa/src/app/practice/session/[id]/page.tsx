@@ -1,0 +1,973 @@
+"use client";
+
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { ApiError, request } from "@/lib/api";
+import type {
+  AnswerResult,
+  FlagState,
+  Note,
+  NoteListOfQuestion,
+  PracticeSession,
+  SessionItem,
+} from "@/lib/types";
+
+/**
+ * 答题页（**P2b-1：显示当前题 → 选择 → 提交判分 → 显示解析**；
+ * **P2b-2a：上一题 / 下一题 按钮切题**）。
+ *
+ * 路由在 `(tabs)` **之外**：答题应该是整屏的，底下挂一条 Tab 栏只会让人误点走
+ * （而且走了之后"当前进度"的语义就含混了）。这与 `/onboarding` 的处理一致。
+ *
+ * ★★ **"刷新后还在"是怎么成立的**（验收判据之一）：
+ *   页面 id 在 URL 里（`/practice/session/<id>`），刷新只会重新 `GET` 一次同一条记录；
+ *   而"落点"由后端的 `current_item_id` 决定 —— 前端**不自己存游标**。
+ *   判据：把 localStorage 清干净再刷新，仍然落在同一题（游标不在前端）。
+ *
+ *   切题之后**刷新会回到服务端的落点**（不是你看的那一题）—— 这是**有意的**：
+ *   落点 = "第一道还没答的题"，是**断点恢复**的语义；而你看哪一题是**会话内的临时状态**，
+ *   它不该被持久化（否则"复习某道旧题"会把断点也带走）。
+ *
+ * ★ **幂等与"重复提交"**：如果这一题**已经答过**（`item.answered`），
+ *   页面直接渲染既有结果，**不提供再次提交** —— 后端也拦（幂等分支零写入），
+ *   两层都在，是因为"前端能点"与"后端能接"是两件事。
+ */
+
+function errText(e: unknown): string {
+  if (e instanceof ApiError) {
+    return `${e.message}（${e.code}${e.traceId ? ` · ${e.traceId}` : ""}）`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** 判分结果。"刚提交的"与"刷新后从题目里读回来的"归一成同一个形状。 */
+type Revealed = {
+  is_correct: boolean;
+  score: number;
+  answer: unknown[];
+  analysis: string | null;
+  /** 刚提交、且后端告诉我们它其实早就答过（`idempotent`）。 */
+  idempotent: boolean;
+};
+
+function fromItem(it: SessionItem): Revealed | null {
+  if (!it.answered) return null;
+  return {
+    is_correct: it.is_correct === true,
+    score: it.score ?? 0,
+    answer: it.answer?.value ?? [],
+    analysis: it.analysis,
+    idempotent: false,
+  };
+}
+
+function show(v: unknown): string {
+  if (typeof v === "boolean") return v ? "正确" : "错误";
+  return String(v);
+}
+
+/** 已选值 → 提交体。**判断题传布尔、选择题传标号数组**（后端按题型校验）。 */
+function toValue(it: SessionItem, picked: string[], judge: boolean | null): unknown[] | null {
+  if (it.type === "judge") return judge === null ? null : [judge];
+  if (it.type === "single") return picked.length === 1 ? picked : null;
+  if (it.type === "multiple") return picked.length > 0 ? [...picked].sort() : null;
+  return null;
+}
+
+/** 答题卡里一格的状态。**优先级：当前 > 标记 > 已做 > 未做**（收在一处，全站唯一入口）。 */
+type CellKind = "current" | "marked" | "done" | "todo";
+
+const CELL_CLS: Record<CellKind, string> = {
+  current: "border-brand bg-brand text-white",
+  marked: "border-amber-400 bg-amber-100 text-amber-800",
+  done: "border-brand/30 bg-brand/10 text-brand",
+  todo: "border-line bg-white text-sub",
+};
+
+const CELL_LABEL: Record<CellKind, string> = {
+  current: "当前",
+  marked: "标记",
+  done: "已做",
+  todo: "未做",
+};
+
+/**
+ * ★ **「标记」已接线（P2c-4，2026-10-04）** —— 用户级（**题目级**）标记的**唯一真相**是
+ *   `question_marks`，**不是** `practice_items.marked`（那张表有 `session_id` ⇒ 它只是
+ *   「**这次练习的卷面标记**」，且全仓没有任何接口读它或写它）。
+ *
+ *   ⇒ 在练习 A 标的题，打开练习 B 的**同一道题**也显示已标记（**跨会话一致**）；
+ *     用旧列会得到"错题本说已标记、答题卡说未标记" —— 同一个事实两种说法。
+ *
+ * ★ 接线点就是 `cellKind()` 里那一行 `if (it.marked) return "marked"` —— **全站唯一一处**。
+ *   收藏**不进答题卡**：它不属于「卷面」，只在下面的动作区（四态保持不变）。
+ */
+
+export default function PracticeSessionPage() {
+  const { id } = useParams<{ id: string }>();
+  const [sess, setSess] = useState<PracticeSession | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [judge, setJudge] = useState<boolean | null>(null);
+  const [revealed, setRevealed] = useState<Revealed | null>(null);
+  // ★ 交卷**不可逆**（交完不能再改答案）⇒ 用**页面内**的二次确认，不用 window.confirm：
+  //   它会阻塞主线程、在无头浏览器里还要额外处理对话框事件；
+  //   而「确认」这一步本身是可以被断言的**状态**（`data-confirm` 就是给走查的锚）。
+  const [confirming, setConfirming] = useState(false);
+  //: 标记 / 收藏的待定态（硬约定 D：待定期间按钮必须 disabled）。
+  const [flagBusy, setFlagBusy] = useState(false);
+  const router = useRouter();
+  /**
+   * ★★ **当前题由它定，不由 `sess.current_item_id` 现算** —— 这是本轮修掉的一个真 bug。
+   *
+   * 游标只在**首次加载**时定一次：断点恢复 = 回到第一道没答的题。
+   * 提交之后**不重定** —— 第一版是"提交后刷新 session，游标由后端现算"，
+   * 于是答完第 1 题、页面**立刻跳到第 2 题**：判分结论与解析一闪而过，
+   * **用户根本看不到解析**（而"显示解析"正是本批的验收判据之一）。
+   *
+   * 判据：**"刷新数据"与"移动游标"是两件事** —— 进度（已答 N/M）该跟着后端走，
+   * 游标该跟着用户的操作走。把它们绑在同一个状态上，就会出现这种"数据对了、界面错了"。
+   * （切题是 P2b-2 的事；到那时**由用户动作**改游标，而不是由一次 fetch 的副产品改。）
+   */
+  const [cursor, setCursor] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id) return;
+    let alive = true;
+    setBusy(true);
+    request<PracticeSession>(`/practice/sessions/${id}`)
+      .then((d) => {
+        if (!alive) return;
+        setSess(d);
+        setCursor(
+          d.current_item_id ??
+            d.items.find((x) => !x.answered)?.item_id ??
+            d.items[0]?.item_id ??
+            null,
+        );
+      })
+      .catch((e) => alive && setErr(errText(e)))
+      .finally(() => alive && setBusy(false));
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+
+  const current: SessionItem | null =
+    sess === null || cursor === null
+      ? null
+      : (sess.items.find((it) => it.item_id === cursor) ?? sess.items[0] ?? null);
+
+  // 换题就清空选择与结果 —— 否则上一题的解析会挂在这一题下面（很难发现的错位）。
+  // ⚠️ 依赖是 `cursor`（**用户动作**），不是 `sess` —— 提交后那次 refresh 不该重置界面。
+  useEffect(() => {
+    setPicked([]);
+    setJudge(null);
+    setRevealed(current ? fromItem(current) : null);
+    // current 是由 cursor + sess 派生的；用 cursor 当依赖才不会每次 refresh 都重置
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cursor, sess?.id]);
+
+  /**
+   * ★ **切题（P2b-2a）** —— 游标只由**用户动作**改。三个刻意的选择：
+   *
+   * ① **不发请求**：切题是本地状态变化，改的只是"用户在看哪一题"；
+   *    进度（已答 N/M）仍然只由**提交**驱动 ⇒ 两者独立更新（硬约定 S）。
+   *    判据：点几次上一题/下一题，"已答 N/M"**一个数字都不该动**。
+   * ② 边界**不循环**：第 1 题的「上一题」、最后一题的「下一题」**显式 disabled** ——
+   *    在用户那里，"点了没反应"与"这个按钮不能点"是两件不同的事。
+   * ③ `busy` 期间**禁掉**：否则请求还在飞、游标已经走了，回来会把结果挂到**另一题**下面。
+   */
+  const idx =
+    sess === null || cursor === null ? -1 : sess.items.findIndex((it) => it.item_id === cursor);
+  const canPrev = idx > 0 && !busy;
+  const canNext = sess !== null && idx >= 0 && idx < sess.items.length - 1 && !busy;
+  const go = useCallback(
+    (delta: number) => {
+      if (sess === null || idx < 0) return;
+      const next = sess.items[idx + delta];
+      if (next) setCursor(next.item_id);
+    },
+    [sess, idx],
+  );
+
+  /* ==================== 滑动切题（P2b-2a 后半）====================
+   * 与按钮切题**同一个语义**：只改本地游标，**不发请求、不动进度**（硬约定 S）。
+   *
+   * 四条判据（都在下面的代码里有对应处）：
+   * ① **阈值**：`max(屏宽 25%, 80px)`。太小 ⇒ 误触；太大 ⇒ 用户以为没反应。
+   * ② **方向判定**：`|dx| > |dy| * 1.5` 才算切题；否则那是用户在**滚题目**。
+   *    ⚠️ 只判"谁大"不够 —— 斜着滑时 `|dx|` 常常只大一点点，那种情况该判成滚动。
+   * ③ **视觉反馈**：滑动中 `translateX` **跟着手指走**；松手超阈值 ⇒ 滑出并切题，
+   *    未超 ⇒ 弹回。**没有反馈，用户不知道生效了没**。
+   * ④ **只对触摸设备启用**：桌面**不**把鼠标拖动当切题（只保留按钮）。
+   */
+  const [touchable, setTouchable] = useState(false);
+  const [dragX, setDragX] = useState(0);
+  const [animating, setAnimating] = useState(false);
+  const touch = useRef<{ x0: number; y0: number; axis: "?" | "x" | "y"; dx: number } | null>(null);
+
+  useEffect(() => {
+    setTouchable(window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window);
+  }, []);
+
+  const swipeThreshold = () => Math.max(window.innerWidth * 0.25, 80);
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (!touchable || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    touch.current = { x0: t.clientX, y0: t.clientY, axis: "?", dx: 0 };
+    setAnimating(false);
+    setDragX(0);
+  };
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    const st = touch.current;
+    if (!st || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const dx = t.clientX - st.x0;
+    const dy = t.clientY - st.y0;
+    if (st.axis === "?") {
+      if (Math.abs(dx) > Math.abs(dy) * 1.5 && Math.abs(dx) > 10) st.axis = "x";
+      else if (Math.abs(dy) > 10) st.axis = "y";
+      else return; // 还没走够，先不定方向
+    }
+    if (st.axis !== "x") return; // 纵向 ⇒ 让浏览器滚页面，我们不管
+    st.dx = dx;
+    setDragX(dx);
+  };
+
+  const onTouchEnd = () => {
+    const st = touch.current;
+    touch.current = null;
+    if (!st || st.axis !== "x") return;
+    const w = window.innerWidth;
+    const thresh = swipeThreshold();
+    const out = Math.round(w * 0.45);
+    setAnimating(true);
+    if (st.dx <= -thresh && canNext) {
+      setDragX(-out);
+      window.setTimeout(() => {
+        go(1);
+        setDragX(0);
+      }, 160);
+    } else if (st.dx >= thresh && canPrev) {
+      setDragX(out);
+      window.setTimeout(() => {
+        go(-1);
+        setDragX(0);
+      }, 160);
+    } else {
+      setDragX(0); // 未超阈值 ⇒ **弹回**
+    }
+  };
+
+  /* ==================== 答题卡（P2b-2b）====================
+   * 底部滑出 · 5 列网格 · 四态配色 · 点题号跳题。
+   * ★ 与切题**同一个语义**：点题号**只改本地游标**（硬约定 S），不发请求、不动进度。
+   */
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const cellKind = (it: SessionItem): CellKind => {
+    if (it.item_id === cursor) return "current";
+    // ★★ **BL-21 接线点（全站唯一一处）** —— P2c-4 已接上。
+    //    `marked` 来自 `question_marks`（**题目级**、跨会话一致），
+    //    不是 `practice_items.marked`（卷面内、未接线）。
+    if (it.marked) return "marked";
+    return it.answered ? "done" : "todo";
+  };
+  const jumpTo = useCallback((itemId: string) => {
+    setCursor(itemId);
+    setSheetOpen(false);
+  }, []);
+
+  /** 交卷：`POST .../finish` ⇒ 跳结果页。**用时由服务端算**，前端不传任何时间。 */
+  const finish = useCallback(async () => {
+    if (!id) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await request<{ id: string }>(`/practice/sessions/${id}/finish`, { method: "POST" });
+      router.push(`/practice/session/${id}/report`);
+    } catch (e) {
+      setErr(errText(e));
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  }, [id, router]);
+
+  const toggle = useCallback(
+    (label: string) => {
+      if (revealed || busy) return;
+      setPicked((prev) =>
+        current?.type === "multiple"
+          ? prev.includes(label)
+            ? prev.filter((x) => x !== label)
+            : [...prev, label]
+          : [label],
+      );
+    },
+    [revealed, busy, current?.type],
+  );
+
+  const submit = useCallback(async () => {
+    if (!current || !sess || busy || revealed) return;
+    const value = toValue(current, picked, judge);
+    if (value === null) {
+      setErr("请先选择一个答案");
+      return;
+    }
+    setErr("");
+    setBusy(true);
+    try {
+      const r = await request<AnswerResult>(`/practice/sessions/${sess.id}/answer`, {
+        method: "POST",
+        body: { item_id: current.item_id, value },
+      });
+      setRevealed({
+        is_correct: r.is_correct,
+        score: r.score,
+        answer: r.correct_answer.value,
+        analysis: r.analysis,
+        idempotent: r.idempotent,
+      });
+      // 提交后**同步刷新一次 session** —— 进度（已答 X/N）与"下一道该答哪题"
+      // 都由后端说了算，前端不自己推（两处各自推算必然会漂）。
+      setSess(await request<PracticeSession>(`/practice/sessions/${sess.id}`));
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [current, sess, busy, revealed, picked, judge]);
+
+  /**
+   * 切换「标记」/「收藏」（P2c-4）。
+   *
+   * ★ 成功后**只就地更新这两个字段**（值来自响应，不是前端自己推的）——
+   *   不去重新 GET 整个 session：那是"刷新数据"，与"用户动作"是两件事（硬约定 S）。
+   * ★ `PUT` 置上 / `DELETE` 取消，两者都**幂等** ⇒ 连点两次的净效果与一次相同。
+   */
+  /* ==================== 笔记（P2c-5）====================
+   * ★★ 入口做成**就地展开的面板**，不跳页。判据：跳到 `/me/notes` 再回来会
+   *   **丢掉当前未提交的选择**（`picked` / `revealed` 是**页面内**状态）——
+   *   那是用户能感觉到的状态丢失，而面板只影响自己的那一块。
+   *
+   * ★ 与 `toggleFlag` 同一条：写完之后**只就地更新**（用响应里的值），
+   *   不重新 GET 整个 session —— 「刷新数据」与「用户动作」是两件事（硬约定 S）。
+   */
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+  const [noteErr, setNoteErr] = useState("");
+  //: 正在编辑哪一条 + 它的草稿。同时只允许一条（简化状态，也让「编辑」的语义无歧义）。
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+
+  /** 就地更新**当前题**的 `note_count`（不重新 GET）。 */
+  const bumpNoteCount = (next: number) => {
+    setSess((s) =>
+      s === null || current === null
+        ? s
+        : {
+            ...s,
+            items: s.items.map((x) =>
+              x.item_id === current.item_id ? { ...x, note_count: Math.max(0, next) } : x,
+            ),
+          },
+    );
+  };
+
+  /** 换题就**收起面板并清空本地笔记** —— 否则上一题的笔记会挂在下一题下面（很难发现的错位）。 */
+  useEffect(() => {
+    setNotesOpen(false);
+    setNotes([]);
+    setEditingId(null);
+    setNoteDraft("");
+    setNoteErr("");
+  }, [cursor]);
+
+  const toggleNotes = async () => {
+    if (current === null || noteBusy) return;
+    if (notesOpen) {
+      setNotesOpen(false);
+      return;
+    }
+    setNotesOpen(true);
+    setNoteErr("");
+    setEditingId(null);
+    try {
+      const d = await request<NoteListOfQuestion>(
+        `/practice/questions/${current.question_id}/notes`,
+      );
+      setNotes(d.items);
+      bumpNoteCount(d.items.length);
+    } catch (e) {
+      setNoteErr(errText(e));
+    }
+  };
+
+  const addNote = async () => {
+    if (current === null || noteBusy) return;
+    const content = noteDraft.trim();
+    if (content === "") return; // 与后端 `min_length=1` 同一条规则的前端镜像
+    setNoteBusy(true);
+    setNoteErr("");
+    try {
+      const created = await request<Note>(`/practice/questions/${current.question_id}/notes`, {
+        method: "POST",
+        body: { content },
+      });
+      // ★ 用**响应里那条**追加，不是前端拼一个 —— 前端拼的 `id` / `updated_at` 一定是假的。
+      setNotes((ns) => [...ns, created]);
+      bumpNoteCount(notes.length + 1);
+      setNoteDraft("");
+    } catch (e) {
+      setNoteErr(errText(e));
+    } finally {
+      setNoteBusy(false); // 成功也复位：草稿已清空 ⇒ 空草稿把按钮挡住，不会重复写
+    }
+  };
+
+  const saveEdit = async (noteId: string) => {
+    if (noteBusy) return;
+    const content = editDraft.trim();
+    if (content === "") return;
+    setNoteBusy(true);
+    setNoteErr("");
+    try {
+      const updated = await request<Note>(`/practice/notes/${noteId}`, {
+        method: "PUT",
+        body: { content },
+      });
+      // ★ 条数**不变** —— 这是编辑不是新增（E2E 有一条断言专门盯这个）。
+      setNotes((ns) => ns.map((x) => (x.id === noteId ? updated : x)));
+      setEditingId(null);
+    } catch (e) {
+      setNoteErr(errText(e));
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+
+  const removeNote = async (noteId: string) => {
+    if (noteBusy) return;
+    setNoteBusy(true);
+    setNoteErr("");
+    try {
+      await request(`/practice/notes/${noteId}`, { method: "DELETE" });
+      setNotes((ns) => ns.filter((x) => x.id !== noteId));
+      bumpNoteCount(notes.length - 1);
+      setEditingId((cur) => (cur === noteId ? null : cur));
+    } catch (e) {
+      setNoteErr(errText(e));
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+
+  const toggleFlag = useCallback(
+    async (path: "marks" | "favorites") => {
+      if (!current || flagBusy) return;
+      const on = path === "marks" ? !current.marked : !current.favorited;
+      setFlagBusy(true);
+      setErr("");
+      try {
+        const d = await request<FlagState>(`/practice/${path}/${current.question_id}`, {
+          method: on ? "PUT" : "DELETE",
+        });
+        setSess((s) =>
+          s === null
+            ? s
+            : {
+                ...s,
+                items: s.items.map((x) =>
+                  x.item_id === current.item_id
+                    ? { ...x, marked: d.marked, favorited: d.favorited }
+                    : x,
+                ),
+              },
+        );
+      } catch (e) {
+        setErr(errText(e));
+      } finally {
+        setFlagBusy(false);
+      }
+    },
+    [current, flagBusy],
+  );
+
+  const supported = current !== null && ["single", "multiple", "judge"].includes(current.type);
+  const canSubmit = !busy && !revealed && supported && toValue(current!, picked, judge) !== null;
+
+  return (
+    <>
+      <main className="mx-auto max-w-md px-6 py-8">
+        <div className="flex items-center justify-between">
+          <Link href="/practice" className="text-sm text-brand">
+            ← 换章节
+          </Link>
+          {sess && (
+            <span className="text-xs text-sub">
+              已答 {sess.answered} / {sess.total}
+            </span>
+          )}
+        </div>
+
+        {err && (
+          <p className="mt-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            {err}
+          </p>
+        )}
+
+        {sess === null && !err && <p className="mt-8 text-sm text-sub">加载中…</p>}
+
+        {sess && current && (
+          <>
+            {/* ★ 滑动切题：**整块题目**跟着手指位移。`touch-action: pan-y` 让纵向仍可滚动，
+              横向归我们 —— 这样不必 `preventDefault`（被动监听里叫不动它）。 */}
+            <div
+              data-swipe-card
+              data-qid={current.question_id}
+              onTouchStart={onTouchStart}
+              onTouchMove={onTouchMove}
+              onTouchEnd={onTouchEnd}
+              style={{
+                transform: `translateX(${dragX}px)`,
+                transition: animating ? "transform 160ms ease-out" : "none",
+                touchAction: "pan-y",
+              }}
+            >
+              <h1 className="mt-4 text-lg font-semibold">
+                {sess.chapter_name ?? sess.subject_name ?? "练习"}
+              </h1>
+              <p className="mt-1 text-xs text-sub">
+                第 {current.seq} 题 / 共 {sess.total} 题 ·{" "}
+                {current.type === "single"
+                  ? "单选"
+                  : current.type === "multiple"
+                    ? "多选"
+                    : current.type === "judge"
+                      ? "判断"
+                      : current.type}
+              </p>
+
+              <p className="mt-5 whitespace-pre-wrap text-base leading-relaxed">{current.stem}</p>
+
+              {!supported && (
+                <p className="mt-4 rounded-lg border border-dashed border-line p-3 text-sm text-sub">
+                  这类题（{current.type}）暂不支持在线判分。
+                </p>
+              )}
+
+              {supported && (
+                <ul className="mt-5 space-y-2">
+                  {current.type === "judge"
+                    ? [
+                        { label: "正确", value: true },
+                        { label: "错误", value: false },
+                      ].map((o) => {
+                        const active = judge === o.value;
+                        return (
+                          <li key={o.label}>
+                            <button
+                              type="button"
+                              disabled={busy || revealed !== null}
+                              aria-pressed={active}
+                              onClick={() => setJudge(o.value)}
+                              className={`min-h-touch w-full rounded-xl border px-4 text-left text-sm disabled:opacity-60 ${
+                                active ? "border-brand bg-brand/10 text-brand" : "border-line"
+                              }`}
+                            >
+                              {o.label}
+                            </button>
+                          </li>
+                        );
+                      })
+                    : current.options.map((o) => {
+                        const active = picked.includes(o.label);
+                        // 判完分之后把"我选的"和"正确答案"分别标出来 —— 只标对错
+                        // 而不给正确答案，用户还得自己回头数标号（体验 + 判据都不合格）。
+                        const isRight =
+                          revealed !== null && revealed.answer.some((x) => show(x) === o.label);
+                        const isMine = revealed !== null && picked.includes(o.label);
+                        return (
+                          <li key={o.label}>
+                            <button
+                              type="button"
+                              disabled={busy || revealed !== null}
+                              aria-pressed={active}
+                              onClick={() => toggle(o.label)}
+                              className={`flex min-h-touch w-full items-start gap-3 rounded-xl border px-3 py-2 text-left text-sm disabled:opacity-60 ${
+                                active && revealed === null
+                                  ? "border-brand bg-brand/10"
+                                  : "border-line"
+                              } ${isRight ? "border-green-500" : ""}`}
+                            >
+                              <span className="mt-0.5 shrink-0 font-medium">{o.label}</span>
+                              <span className="flex-1 whitespace-pre-wrap">{o.content}</span>
+                              {revealed !== null && (
+                                <span className="shrink-0 text-xs text-sub">
+                                  {isRight ? "正确答案" : isMine ? "我选的" : ""}
+                                </span>
+                              )}
+                            </button>
+                          </li>
+                        );
+                      })}
+                </ul>
+              )}
+
+              {revealed === null ? (
+                <button
+                  type="button"
+                  disabled={!canSubmit}
+                  onClick={() => void submit()}
+                  className="mt-6 min-h-touch w-full rounded-xl bg-brand text-center font-medium text-white disabled:opacity-45"
+                >
+                  {busy ? "提交中…" : "提交"}
+                </button>
+              ) : (
+                <section className="mt-6 rounded-xl border border-line p-4">
+                  <p
+                    className={`font-medium ${revealed.is_correct ? "text-green-600" : "text-red-600"}`}
+                  >
+                    {revealed.is_correct ? "答对了" : "答错了"}
+                    <span className="ml-2 text-xs font-normal text-sub">
+                      得分 {revealed.score}
+                      {revealed.idempotent ? " · 这题之前已经答过（已按既有结果返回）" : ""}
+                    </span>
+                  </p>
+                  <p className="mt-3 text-sm">
+                    <span className="text-sub">正确答案：</span>
+                    {revealed.answer.map(show).join("、")}
+                  </p>
+                  <p className="mt-3 whitespace-pre-wrap text-sm">
+                    <span className="text-sub">解析：</span>
+                    {revealed.analysis ?? "（这道题没有解析）"}
+                  </p>
+                </section>
+              )}
+
+              {/* ★ 交卷（P2c-1）：本页唯一的**不可逆**动作 ⇒ 二次确认
+                  （硬约定 D：状态落在**按钮属性**上，不是写在 onClick 里）。 */}
+              <div className="mt-6 border-t border-line pt-4">
+                {confirming ? (
+                  <div data-confirm="finish" className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void finish()}
+                      className="min-h-touch flex-1 rounded-xl bg-brand text-center text-sm font-medium text-white disabled:opacity-45"
+                    >
+                      {busy ? "交卷中…" : "确认交卷"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setConfirming(false)}
+                      className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-45"
+                    >
+                      再练一会儿
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setConfirming(true)}
+                    className="min-h-touch w-full rounded-xl border border-line text-sm text-sub disabled:opacity-45"
+                  >
+                    交卷（交卷后不能再改答案）
+                  </button>
+                )}
+                {confirming && (
+                  <p className="mt-2 text-xs text-sub">
+                    已答 {sess.answered} / {sess.total}
+                    。交卷后这次练习就结束了，没答的题按未作答计入。
+                  </p>
+                )}
+              </div>
+
+              {/* ★ 标记 / 收藏（P2c-4）：**用户级**状态（题目级 ⇒ 跨会话一致）。
+                  成功后**只就地更新这两个字段**（值来自响应，不是前端自己推的）——
+                  不去重新 GET 整个 session：那是「刷新数据」，与「用户动作」是两件事
+                  （P2b-1 那条「刷新不许移动当前位置」的教训）。 */}
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  data-flag-mark={current.marked ? "1" : "0"}
+                  disabled={flagBusy}
+                  onClick={() => void toggleFlag("marks")}
+                  className={`min-h-touch flex-1 rounded-xl border text-sm disabled:opacity-40 ${
+                    current.marked
+                      ? "border-amber-400 bg-amber-50 font-medium text-amber-800"
+                      : "border-line"
+                  }`}
+                >
+                  {current.marked ? "⚑ 已标记" : "⚑ 标记"}
+                </button>
+                <button
+                  type="button"
+                  data-flag-fav={current.favorited ? "1" : "0"}
+                  disabled={flagBusy}
+                  onClick={() => void toggleFlag("favorites")}
+                  className={`min-h-touch flex-1 rounded-xl border text-sm disabled:opacity-40 ${
+                    current.favorited
+                      ? "border-brand bg-brand/10 font-medium text-brand"
+                      : "border-line"
+                  }`}
+                >
+                  {current.favorited ? "★ 已收藏" : "☆ 收藏"}
+                </button>
+              </div>
+
+              {/* ★ 笔记（P2c-5）—— 就地展开，不跳页（理由见上面 NOTES_STATE 的抬头）。
+                  ★ IA（`docs/02`）的动作条顺序是 `[☆收藏][✎笔记][⚑报错][答题卡]`；
+                    「报错」全仓**尚未实现**，所以这里就在 收藏 之后紧跟 笔记。 */}
+              <div className="mt-3">
+                <button
+                  type="button"
+                  data-note-open
+                  data-note-count={current.note_count}
+                  disabled={noteBusy}
+                  onClick={() => void toggleNotes()}
+                  className={`min-h-touch w-full rounded-xl border text-sm disabled:opacity-40 ${
+                    current.note_count > 0 ? "border-line font-medium" : "border-line text-sub"
+                  }`}
+                >
+                  {notesOpen
+                    ? "收起笔记"
+                    : `✎ 笔记${current.note_count > 0 ? `（${current.note_count}）` : ""}`}
+                </button>
+
+                {notesOpen && (
+                  <div data-note-panel className="mt-2 rounded-xl border border-line p-3">
+                    {noteErr && (
+                      <p data-note-error className="mb-2 text-xs text-red-600">
+                        {noteErr}
+                      </p>
+                    )}
+
+                    <textarea
+                      data-note-input
+                      value={noteDraft}
+                      onChange={(e) => setNoteDraft(e.target.value)}
+                      rows={3}
+                      placeholder="就这道题写点什么…"
+                      className="w-full rounded-lg border border-line p-2 text-sm"
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        data-note-submit
+                        disabled={noteBusy || noteDraft.trim() === ""}
+                        onClick={() => void addNote()}
+                        className="min-h-touch flex-1 rounded-lg border border-brand text-xs font-medium text-brand disabled:opacity-40"
+                      >
+                        {noteBusy ? "处理中…" : "保存笔记"}
+                      </button>
+                      <span className="text-xs text-sub">{noteDraft.trim().length} / 2000</span>
+                    </div>
+
+                    {notes.length === 0 ? (
+                      <p
+                        data-note-empty="none"
+                        className="mt-3 rounded-lg border border-dashed border-line p-3 text-xs text-sub"
+                      >
+                        这道题还没有笔记。
+                      </p>
+                    ) : (
+                      <ul data-note-list className="mt-3 space-y-2">
+                        {notes.map((n) => (
+                          <li
+                            key={n.id}
+                            data-note-id={n.id}
+                            className="rounded-lg border border-line p-2"
+                          >
+                            {editingId === n.id ? (
+                              <>
+                                <textarea
+                                  data-note-edit-input
+                                  value={editDraft}
+                                  onChange={(e) => setEditDraft(e.target.value)}
+                                  rows={3}
+                                  className="w-full rounded-lg border border-line p-2 text-sm"
+                                />
+                                <div className="mt-2 flex gap-2">
+                                  <button
+                                    type="button"
+                                    data-note-edit-save
+                                    disabled={noteBusy || editDraft.trim() === ""}
+                                    onClick={() => void saveEdit(n.id)}
+                                    className="min-h-touch flex-1 rounded-lg border border-brand text-xs font-medium text-brand disabled:opacity-40"
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-note-edit-cancel
+                                    disabled={noteBusy}
+                                    onClick={() => setEditingId(null)}
+                                    className="min-h-touch flex-1 rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <p
+                                  data-note-content={n.id}
+                                  className="text-sm whitespace-pre-wrap break-words"
+                                >
+                                  {n.content}
+                                </p>
+                                <div className="mt-2 flex gap-2">
+                                  <button
+                                    type="button"
+                                    data-note-edit={n.id}
+                                    disabled={noteBusy}
+                                    onClick={() => {
+                                      setEditingId(n.id);
+                                      setEditDraft(n.content);
+                                    }}
+                                    className="min-h-touch flex-1 rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                                  >
+                                    编辑
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-note-del={n.id}
+                                    disabled={noteBusy}
+                                    onClick={() => void removeNote(n.id)}
+                                    className="min-h-touch flex-1 rounded-lg border border-line text-xs text-sub disabled:opacity-40"
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* ★ 切题（P2b-2a）：**纯本地**，不发请求、不动进度（硬约定 S）。 */}
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={!canPrev}
+                  onClick={() => go(-1)}
+                  className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
+                >
+                  ← 上一题
+                </button>
+                <button
+                  type="button"
+                  data-sheet-open
+                  onClick={() => setSheetOpen(true)}
+                  className="min-h-touch flex-1 rounded-xl border border-line text-sm"
+                >
+                  答题卡
+                </button>
+                <button
+                  type="button"
+                  disabled={!canNext}
+                  onClick={() => go(1)}
+                  className="min-h-touch flex-1 rounded-xl border border-line text-sm disabled:opacity-40"
+                >
+                  下一题 →
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {sess && !current && <p className="mt-8 text-sm text-sub">这次练习里没有题目。</p>}
+      </main>
+
+      {/* ★★ 答题卡**刻意不放在 `<main>` 里** —— 走查按 `main ul li button` 找选项，
+          抽屉里的题号按钮混进那个选择器，就会把"点第一个选项"变成"点第 1 题"。
+          （这也是为什么网格用 `<div><button>` 而不是 `<ul><li><button>`。）
+          抽屉**常驻 DOM**、靠 `translateY` 显隐 —— 这样"从底部滑出"是个**可读的状态**
+          （走查直接读 `style.transform`），而不是一个只能靠肉眼看的动画。 */}
+      {sess && (
+        <>
+          {sheetOpen && (
+            <div
+              data-sheet-mask
+              onClick={() => setSheetOpen(false)}
+              className="fixed inset-0 z-40 bg-black/40"
+            />
+          )}
+          <div
+            data-sheet-root
+            aria-hidden={!sheetOpen}
+            className={`fixed inset-x-0 bottom-0 z-50 ${
+              sheetOpen ? "pointer-events-auto" : "pointer-events-none"
+            }`}
+          >
+            <section
+              data-sheet
+              style={{ transform: sheetOpen ? "translateY(0)" : "translateY(110%)" }}
+              className="max-h-[70vh] overflow-y-auto rounded-t-2xl border-t border-line bg-white p-4 shadow-xl transition-transform duration-200"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold">答题卡</h2>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-sub">共 {sess.total} 题</span>
+                  <button
+                    type="button"
+                    data-sheet-close
+                    onClick={() => setSheetOpen(false)}
+                    className="min-h-touch rounded-lg border border-line px-3 text-xs"
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+
+              {/* 图例：四种状态。★「标记」自 **P2c-4** 起**真的可达**（`question_marks`，题目级）
+                  —— 这条图例不再是"先摆着"：它描述的四种状态现在都会出现。 */}
+              <div className="mt-3 flex flex-wrap gap-3 text-xs text-sub">
+                {(["todo", "done", "current", "marked"] as CellKind[]).map((k) => (
+                  <span key={k} className="flex items-center gap-1">
+                    <span className={`inline-block h-3 w-3 rounded border ${CELL_CLS[k]}`} />
+                    {CELL_LABEL[k]}
+                  </span>
+                ))}
+              </div>
+
+              <div data-sheet-grid className="mt-3 grid grid-cols-5 gap-2">
+                {sess.items.map((it) => {
+                  const k = cellKind(it);
+                  return (
+                    <button
+                      key={it.item_id}
+                      type="button"
+                      data-cell-state={k}
+                      data-cell-qid={it.question_id}
+                      aria-label={`第 ${it.seq} 题（${CELL_LABEL[k]}）`}
+                      onClick={() => jumpTo(it.item_id)}
+                      className={`min-h-touch rounded-lg border text-sm ${CELL_CLS[k]}`}
+                    >
+                      {it.seq}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          </div>
+        </>
+      )}
+    </>
+  );
+}

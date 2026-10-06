@@ -332,6 +332,16 @@ run_gate_apps() {
             printf '  ⏭ %s：无 node_modules（补：cd apps/%s && npm ci）\n' "$app" "$app"
             continue
         fi
+        # ★ ⑪ 的 `format:check:shared` 是**按 app 可选**的：它查的是"该 app **之外**的共享文件"
+        #   （`packages/api-core` 与 `tools/` 下的检查脚本）。个人 PWA 不消费那个包
+        #   （它没有认证链路）⇒ 它**不声明**这个脚本。
+        #   ⇒ 不声明 = **跳过并写明"少查了"**，不是失败。
+        #   ⚠️ **只对这一道放开**：若放开到所有脚本，某个 app 删掉 `lint` 就会静默跳过 ⑨ ——
+        #      那是真的放水（"依赖缺失 = 大声跳过"的前提是"它本来就该在"）。
+        if [ "$script" = "format:check:shared" ] && ! grep -q '"format:check:shared"' "$repo/apps/$app/package.json"; then
+            printf '  ⏭ %s：没有声明 `format:check:shared`（该 app 之外没有共享文件要查）\n' "$app"
+            continue
+        fi
         printf '  ── %s ──\n' "$app"
         ran=$((ran + 1))
         [ -n "$pre" ] && "$pre" "$app"
