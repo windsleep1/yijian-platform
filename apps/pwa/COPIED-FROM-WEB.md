@@ -38,7 +38,7 @@
 | `src/app/(tabs)/practice/page.tsx` | `7f815474515afc21` |
 | `src/app/globals.css` | `0e14476ef0f44d95` |
 | `src/app/manifest.ts` | `e74091c86dff4327` |
-| `src/app/practice/session/[id]/page.tsx` | `a29b0aa6cc4ec1a0` |
+| `src/app/practice/session/[id]/page.tsx` | `8313b38237bce238` |
 | `src/app/practice/session/[id]/report/page.tsx` | `b06745289f262bc8` |
 | `src/app/practice/wrong/[qid]/page.tsx` | `3ec3ed85775dcfa7` |
 | `src/app/practice/wrong/page.tsx` | `11a7ce446881ddf7` |
@@ -219,7 +219,7 @@
     {
       "to": "src/app/practice/session/[id]/page.tsx",
       "from": "src/app/practice/session/[id]/page.tsx",
-      "sha256": "a29b0aa6cc4ec1a0",
+      "sha256": "8313b38237bce238",
       "identical": true
     },
     {

@@ -576,6 +576,7 @@ export default function PracticeSessionPage() {
                           <li key={o.label}>
                             <button
                               type="button"
+                              data-option={o.label}
                               disabled={busy || revealed !== null}
                               aria-pressed={active}
                               onClick={() => setJudge(o.value)}
@@ -599,6 +600,7 @@ export default function PracticeSessionPage() {
                           <li key={o.label}>
                             <button
                               type="button"
+                              data-option={o.label}
                               disabled={busy || revealed !== null}
                               aria-pressed={active}
                               onClick={() => toggle(o.label)}
