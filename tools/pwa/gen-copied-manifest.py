@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 REPO = Path("C:/My Protect/WorkBuddy/ONE Build/yijian-platform")
@@ -92,6 +93,48 @@ ONLY: dict[str, tuple[str, str]] = {
     "src/favicon.ico": ("Next 默认图标占位（若存在）", "永久"),
 }
 
+# ------------------------------------------------------------ converge 值的守卫
+#
+#: `converge` 只许这两个形状（用户 2026-10-07 定）。
+CONVERGE_PERMANENT = "永久"
+CONVERGE_BL = re.compile(r"^BL-\d+$")
+
+
+def check_converge_values() -> None:
+    """`converge` 只许「永久」或 `BL-<n>` —— 其他值**生成即失败**。
+
+    ## 为什么"字段值域"能当门禁，而"分析这个 fork 会不会收敛"不能
+    本函数只看**字段值在不在允许集合里** —— 机械、不会误报。
+    而"读代码判断这个分叉将来会不会消除"会误报，那种检查只能做诊断、不能做门禁
+    （项目口径：**会误报的检查只能诊断，不能做门禁**）。
+
+    ## 它拦的是什么
+    理由里写下「当 C 端抽了共享包时可以消除」这类**条件** = 一条**待办**，
+    而待办按硬约定 P 必须**有编号（`docs/21` 的 BL-XX）+ 触发条件 + 检查点**。
+    没有这道守卫，那句话就是**伪装成理由的逃避**：读起来很负责，却没有任何东西跟踪它。
+
+    ★ 反过来，「永久」是一个**断言**（确实不收敛），不是"忘了填" ——
+      内容分叉（数据源不同、站点标题不同）本来就永久。
+    """
+    bad: list[str] = []
+    for rel, (_reason, _check, converge) in FORK.items():
+        if converge != CONVERGE_PERMANENT and not CONVERGE_BL.match(converge):
+            bad.append(f"FORK `{rel}`：converge={converge!r}")
+    for rel, (_why, converge) in ONLY.items():
+        if converge != CONVERGE_PERMANENT and not CONVERGE_BL.match(converge):
+            bad.append(f"ONLY `{rel}`：converge={converge!r}")
+    if bad:
+        raise SystemExit(
+            "✗ `converge` 的值不在允许集合里（只许「永久」或 `BL-<n>`）：\n  - "
+            + "\n  - ".join(bad)
+            + "\n  ⇒ 若它说的是「当 X 时可以消除」那类**条件**：那是一条**待办** ——"
+            "\n     到 `docs/21` 落一个 BL 编号（含触发条件 + 检查点），再把这里写成 `BL-<n>`。"
+            "\n  ⇒ 若它其实不会收敛，写「永久」。"
+            "\n  ★ 本守卫只验**字段值在允许集合内**（机械、不会误报）——"
+            "它拦的正是「理由里悄悄写下一句『以后可以消除』而没人跟踪」这件事。"
+        )
+
+
 #: 不该进清单的东西。
 #: ★ `package-lock.json` **由 npm 生成**，不是"从 C 端复制过来的" ——
 #:   它对每个 app 本来就**必须不同**（各装各的依赖树），拿它与 C 端逐字节比是没意义的。
@@ -140,6 +183,10 @@ def main(argv: list[str] | None = None) -> int:
         help="只校验（不写盘）：磁盘上的文件必须与本脚本现在会生成的内容逐字节一致",
     )
     args = ap.parse_args(argv)
+
+    # ★ 先验**表本身**（值域守卫）—— 比生成更早失败：改表的人当场知道"条件式收敛要写编号"，
+    #   而不是等到门禁红、或者（更糟）根本没红。
+    check_converge_values()
 
     pwa_files = walk(PWA)
     web_files = set(walk(WEB))
