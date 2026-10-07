@@ -585,14 +585,37 @@ async def _collection(b: Any, base: str, kind: str, facet: str | None = None) ->
     raise Failure(f"「{kind}」列表**一直没稳定**（读了 25 次还在变）：{prev!r}")
 
 
-async def run_marks(
-    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
-) -> dict[str, float]:
-    """`marks` 场景：标记一道题 ⇒ 按钮翻 1 ⇒ 刷新仍在 ⇒ 列表能筛出（**并对照收藏仍是 0**）。
+#: 标记 / 收藏**只差几个字面量**（按钮属性 / 页签 kind / 对照页签）—— 所以共用一份实现。
+#: ★ 不各写一遍：它们是**同一条流程**（按钮 → 刷新 → 列表 → 筛选 → 取消 → 对照），
+#:   写两份的话改一处必漏另一处（「同一个事实两种写法」那一族）。
+_FLAG_VARIANTS: dict[str, dict[str, str]] = {
+    "marks": {
+        "attr": "mark",
+        "kind": "mark",
+        "word": "标记",
+        "other_kind": "favorite",
+        "other_word": "收藏",
+    },
+    "fav": {
+        "attr": "fav",
+        "kind": "favorite",
+        "word": "收藏",
+        "other_kind": "mark",
+        "other_word": "标记",
+    },
+}
 
-    ★ 判据的顺序就是用户定的"**先断未变化态，再断变化**"：
-      "标记本来就有"和"真的记了账"长得一模一样 ⇒ 变化**之前**必须先断一次。
+
+async def _flag_scenario(
+    base: str, small: Path, small_meta: dict[str, Any], timeout: int, name: str
+) -> dict[str, float]:
+    """标记 / 收藏的**同一条流程**（变体见 `_FLAG_VARIANTS`）。
+
+    ★ 判据顺序就是用户定的"**先断未变化态，再断变化**"：
+      "本来就有"和"真的记了账"长得一模一样 ⇒ 变化**之前**必须先断一次。
     """
+    v = _FLAG_VARIANTS[name]
+    attr, kind, word = v["attr"], v["kind"], v["word"]
     cdp = _load("cdp_browser", CDP_BROWSER)
     t0 = time.time()
     async with cdp.Browser(mobile=True, width=375, height=667) as b:
@@ -600,29 +623,29 @@ async def run_marks(
         catalog = _catalog(small)
 
         # ---- ① 可证伪锚（变化之前）----
-        before = await _collection(b, base, "mark")
+        before = await _collection(b, base, kind)
         need(
             before["rows"] == [],
-            f"还没标记过，「标记」列表却有 {len(before['rows'])} 行：{before['rows']}",
+            f"还没{word}过，「{word}」列表却有 {len(before['rows'])} 行：{before['rows']}",
         )
         need(
             "0" in before["total"],
-            f"空列表时总数文案不对（期望「共 0 道标记」）：{before['total'].strip()!r}",
+            f"空列表时总数文案不对（期望「共 0 道{word}」）：{before['total'].strip()!r}",
         )
-        say(f"  ✅ ①a 锚：标记列表本来是空的（{before['total'].strip()}）")
+        say(f"  ✅ ①a 锚：{word}列表本来是空的（{before['total'].strip()}）")
 
         qid, path = await _enter_session(b, base)
         need(qid in catalog, f"当前题号 {qid} 不在小包里 —— 库里的题和小包对不上？")
         need(
-            await _flag(b, "mark") == "0",
-            f"刚进来的题（{qid}）标记按钮不是 0 —— 锚不成立，后面的「变 1」就不说明问题",
+            await _flag(b, attr) == "0",
+            f"刚进来的题（{qid}）的「{word}」按钮不是 0 —— 锚不成立，后面的「变 1」就不说明问题",
         )
-        say(f"  ✅ ①b 锚：题目 {qid} 的标记按钮本来是 0")
+        say(f"  ✅ ①b 锚：题目 {qid} 的「{word}」按钮本来是 0")
 
-        # ---- ② 点标记 ----
-        await b.click("[data-flag-mark]")
-        await _wait_flag(b, "mark", "1")
-        say("  ✅ ② 点「标记」⇒ 按钮翻成 1")
+        # ---- ② 点 ----
+        await b.click(f"[data-flag-{attr}]")
+        await _wait_flag(b, attr, "1")
+        say(f"  ✅ ② 点「{word}」⇒ 按钮翻成 1")
 
         # ---- ③ 刷新后仍在（读的是 IndexedDB，不是内存态）----
         await b.goto_ready(base + path)
@@ -632,35 +655,67 @@ async def run_marks(
             again == qid,
             f"刷新后回到的是**另一道题**（{again} ≠ {qid}）—— 本步的前提没了，不能算通过",
         )
-        need(await _flag(b, "mark") == "1", "刷新后标记没了 —— 没落到 IndexedDB")
+        need(await _flag(b, attr) == "1", f"刷新后{word}没了 —— 没落到 IndexedDB")
         say("  ✅ ③ 刷新后仍在（IndexedDB 持久化）")
 
         # ---- ④ 列表能筛出 ----
-        after = await _collection(b, base, "mark")
+        after = await _collection(b, base, kind)
         need(
             after["rows"] == [qid],
-            f"「标记」列表应该有且仅有 {qid}：{after['rows']}（总数文案 {after['total'].strip()!r}）",
+            f"「{word}」列表应该有且仅有 {qid}：{after['rows']}"
+            f"（总数文案 {after['total'].strip()!r}）",
         )
         sid = str(catalog[qid]["subject_id"])
         need(sid in after["facets"], f"分面里没有这道题的科目 {sid}：{after['facets']}")
-        filtered = await _collection(b, base, "mark", facet=sid)
+        filtered = await _collection(b, base, kind, facet=sid)
         need(filtered["rows"] == [qid], f"按科目 {sid} 筛完不该变：{filtered['rows']}")
-        unfiltered = await _collection(b, base, "mark", facet="all")
+        unfiltered = await _collection(b, base, kind, facet="all")
         need(unfiltered["rows"] == [qid], f"点回「全部」不该变：{unfiltered['rows']}")
         say(f"  ✅ ④ 列表能筛出（共 1 道；科目 {sid} 与「全部」筛出来的都是它 {qid}）")
 
-        # ---- ⑤ 对照：收藏列表仍是 0 ----
+        # ---- ⑤ 对照：**另一个**页签仍是 0 ----
         # ★ 少了这一条，"两个页签其实读的是同一份数据"的实现也能过 ④
         #   （那正是"二元判据只验一头"的老毛病）。
-        fav = await _collection(b, base, "favorite")
+        other = await _collection(b, base, v["other_kind"])
         need(
-            fav["rows"] == [],
-            f"只打了**标记**，「收藏」列表却有 {len(fav['rows'])} 行：{fav['rows']} "
-            "—— 两个页签切的是同一份数据？",
+            other["rows"] == [],
+            f"只打了**{word}**，「{v['other_word']}」列表却有 {len(other['rows'])} 行："
+            f"{other['rows']} —— 两个页签切的是同一份数据？",
         )
-        say("  ✅ ⑤ 对照：收藏列表仍是 0 ⇒ 两个页签真的在切**不同的题源**")
+        say(f"  ✅ ⑤ 对照：「{v['other_word']}」列表仍是 0 ⇒ 两个页签真的在切**不同的题源**")
+
+        # ---- ⑥ 取消 ⇒ 行从列表消失、总数回 0（**写与取消是一对**）----
+        # ★ 约定 T 的同族（**写设门、取消不设门**）：取消这条路径必须自己能被验到 ——
+        #   只验"能记上"的话，一个"记得上但撤不掉"的实现也能过。
+        back = await _collection(b, base, kind)  # ⑤ 把页签切走了，先切回来
+        need(back["rows"] == [qid], f"切回「{word}」页签后行不见了：{back['rows']}")
+        await b.click(f'[data-collect-remove="{qid}"]')
+        need(
+            await _try_wait(
+                b, """document.querySelectorAll('[data-collect-row]').length === 0""", 30
+            ),
+            f"点了「取消{word}」，那一行**还在**列表里",
+        )
+        gone = await _collection(b, base, kind)
+        need(gone["rows"] == [], f"取消之后列表还有 {gone['rows']}")
+        need("0" in gone["total"], f"取消之后总数文案不是 0：{gone['total'].strip()!r}")
+        say(f"  ✅ ⑥ 取消{word} ⇒ 行消失、总数回「共 0 道{word}」")
 
     return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
+
+
+async def run_marks(
+    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
+) -> dict[str, float]:
+    """`marks` 场景：标记一道题（单功能闭环；实现见 `_flag_scenario`）。"""
+    return await _flag_scenario(base, small, small_meta, timeout, "marks")
+
+
+async def run_fav(
+    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
+) -> dict[str, float]:
+    """`fav` 场景：收藏一道题（与 `marks` 同流程、不同题源）。"""
+    return await _flag_scenario(base, small, small_meta, timeout, "fav")
 
 
 #: ★ 场景注册表（不变量 11 的**第三处**清单）—— 名字 → 协程。
@@ -670,6 +725,7 @@ async def run_marks(
 drivers = {
     "setup": run_setup,
     "marks": run_marks,
+    "fav": run_fav,
 }
 
 
@@ -683,8 +739,8 @@ def main(argv: list[str] | None = None) -> int:
         #    ★ 别靠"记得改"：**不变量 11** 会把三处对账，不一致就红
         #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`
         #       现在**遍历走查器清单**，e2e-web 与本脚本各自三处）。
-        choices=["setup", "marks"],
-        help="走查场景：setup（导入题库 + 对账 + 换题库二次确认）/ marks（标记 + 列表筛选）",
+        choices=["setup", "marks", "fav"],
+        help="走查场景：setup（导入题库 + 对账）/ marks（标记 + 列表筛选 + 取消）/ fav（收藏，同流程）",
     )
     ap.add_argument("--url", help="已在跑的前端地址（给了就不自己起服务）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自己挑一个空闲端口")
