@@ -276,6 +276,63 @@ def _diff(want: dict[str, Any], got: dict[str, Any], label: str) -> list[str]:
     return out
 
 
+async def _try_wait(b: Any, expr: str, timeout: float) -> bool:
+    """探测式等待：超时**返回 False**（`wait_for` 抛的是 `TimeoutError`），不中断场景。
+
+    ★ 用于"这条分支**本来就可能不成立**"的场合（例：这门科目的章节恰好都 0 题）。
+      用它而不是 try/except 包一整段，是为了让"没等到"这件事**只影响这一个判断**。
+    """
+    try:
+        await b.wait_for(expr, timeout=timeout, label="(probe)")
+        return True
+    except TimeoutError:
+        return False
+
+
+async def _import_bank_from_setup(
+    b: Any, base: str, small: Path, small_meta: dict[str, Any], timeout: int
+) -> float:
+    """从首页走**真 UI** 导入小包（前提：当前**没有**题库）。返回导入耗时（秒）。
+
+    ★ 只写一处：**每个场景都要题库**。在 6 个 driver 里各抄一遍的话，
+      导入 UI 一改就有 6 处要跟着改（「同一个事实两种写法」那一族）。
+    """
+    await b.click('[data-entry="setup"]')
+    await b.wait_for("location.pathname === '/setup'", timeout=40, label="进入 /setup")
+    await b.wait_for(
+        """document.querySelector('[data-bank-state="none"]')""", timeout=40, label="/setup 空态"
+    )
+    t0 = time.time()
+    await b.set_file_input('[data-setup-file="1"]', small)
+    await b.wait_for(
+        """document.querySelector('[data-setup-done="1"]')""",
+        timeout=timeout,
+        label=f"导入 {small_meta['totals']['questions']} 题完成",
+    )
+    sec = time.time() - t0
+    err = await b.eval(
+        """(() => { const e = document.querySelector('[data-setup-error="1"]');
+                   return e ? e.innerText : ''; })()"""
+    )
+    need(not err, f"导入期间页面报了错：{err}")
+    return sec
+
+
+async def _ensure_bank(
+    b: Any, base: str, small: Path, small_meta: dict[str, Any], timeout: int
+) -> float:
+    """场景**共用前置**：库里有题就跳过，否则走真 UI 导入。返回导入耗时（跳过 ⇒ 0.0）。
+
+    ★ `cdp_browser` 每次都用**全新临时 profile** ⇒ 正常都走导入那一路；
+      "已有就跳过"是为了 `--url <已在跑的服务>` 复用服务时**不白导一遍**（那会把耗时数搞脏）。
+    """
+    await b.goto_ready(base + "/")
+    if await b.eval("""!!document.querySelector('[data-bank="ready"]')"""):
+        say("  （复用已有题库 —— 跳过导入）")
+        return 0.0
+    return await _import_bank_from_setup(b, base, small, small_meta, timeout)
+
+
 async def run_setup(base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int) -> dict[str, float]:
     """`setup` 场景。返回耗时数据。"""
     cdp = _load("cdp_browser", CDP_BROWSER)
@@ -294,23 +351,8 @@ async def run_setup(base: str, small: Path, small_meta: dict[str, Any], other: P
         )
         say("  ✅ ① 可证伪锚：首页显示「还没有题库」（且 ready 区块不在）")
 
-        # ---- ② 走真 UI 导入 ----
-        await b.click('[data-entry="setup"]')
-        await b.wait_for("location.pathname === '/setup'", timeout=40, label="进入 /setup")
-        await b.wait_for(
-            """document.querySelector('[data-bank-state="none"]')""", timeout=40, label="/setup 空态"
-        )
-        t_imp0 = time.time()
-        await b.set_file_input('[data-setup-file="1"]', small)
-        await b.wait_for(
-            """document.querySelector('[data-setup-done="1"]')""",
-            timeout=timeout,
-            label=f"导入 {small_meta['totals']['questions']} 题完成",
-        )
-        import_sec = time.time() - t_imp0
-        err = await b.eval("""(() => { const e = document.querySelector('[data-setup-error="1"]');
-                                      return e ? e.innerText : ''; })()""")
-        need(not err, f"导入期间页面报了错：{err}")
+        # ---- ② 走真 UI 导入（**与其它场景共用同一段前置**，见 `_import_bank_from_setup`）----
+        import_sec = await _import_bank_from_setup(b, base, small, small_meta, timeout)
         say(f"  ✅ ② 走真 UI 导入完成（{import_sec:.1f}s）")
 
         # ---- ③ 对账：库里的行 vs 小包文件里的 meta ----
@@ -401,12 +443,205 @@ async def run_setup(base: str, small: Path, small_meta: dict[str, Any], other: P
     return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
 
 
+# --------------------------------------------------------------- 场景：marks
+
+#: 练习页的两个列表**没有 `data-*`**（科目名 / 章节名来自数据，不是硬编码 UI 文案），
+#: 所以按**结构**定位：`main` 里的第 1 / 第 2 个 `<section>`。
+#: `:not([disabled])` 顺带把"0 题的章节"排除 —— 页面正是用 `disabled` 表达那件事。
+_SUBJ = "main section:nth-of-type(1) ul li button:not([disabled])"
+_CHAP = "main section:nth-of-type(2) ul li button:not([disabled])"
+
+
+def _catalog(bank: Path) -> dict[str, dict[str, Any]]:
+    """题号（字符串）→ 题目。读的是**小包文件**，不是页面也不是库 —— 外部真相。"""
+    pkg = json.loads(bank.read_text(encoding="utf-8"))
+    return {str(q["id"]): q for q in pkg["questions"]}
+
+
+async def _enter_session(b: Any, base: str) -> tuple[str, str]:
+    """练习页 → 第一门**有题**的科目 → 它的第一个有题章节 → 答题页。
+
+    返回 `(当前题号, 路径)` —— 路径留给"刷新后仍在"那一步复用。
+    ★ 科目按钮没有 `data-*` ⇒ 只能按结构点第 i 个；但**不能假定第 1 门科目就有题**
+      （小包按科目分层抽样，各科题量不匀），所以逐门试到第一个点得动的章节为止。
+    """
+    await b.goto_ready(base + "/practice")
+    await b.wait_for(f"""document.querySelectorAll('{_SUBJ}').length > 0""", timeout=40, label="科目列表")
+    n = await b.eval(f"""document.querySelectorAll('{_SUBJ}').length""")
+    need(isinstance(n, int) and n > 0, f"科目列表是空的（n={n!r}）—— 题库里没有科目？")
+    for i in range(n):
+        await b.click(_SUBJ, nth=i)
+        # 等这门科目的章节区渲染出来；`busy` 期间按钮全是 disabled ⇒ 一并等掉
+        await _try_wait(b, f"""document.querySelectorAll('{_CHAP}').length > 0""", 10)
+        if await b.eval(f"""document.querySelectorAll('{_CHAP}').length > 0"""):
+            break
+    else:
+        raise Failure(
+            f"{n} 门科目**都没有可以点的章节**（每章 0 题？）—— 小包的分层抽样出问题了？"
+        )
+    await b.click(_CHAP, nth=0)
+    await b.wait_for(
+        """location.pathname.startsWith('/practice/session/')""", timeout=40, label="进入答题页"
+    )
+    await b.wait_for("""!!document.querySelector('[data-qid]')""", timeout=40, label="答题页就绪")
+    qid = await b.eval("""document.querySelector('[data-qid]').getAttribute('data-qid')""")
+    need(isinstance(qid, str) and qid, f"读不到当前题号：{qid!r}")
+    return qid, await b.eval("location.pathname")
+
+
+async def _flag(b: Any, attr: str) -> Any:
+    """读 `data-flag-mark` / `data-flag-fav`：`'0'` / `'1'` / `None`（元素不在）。"""
+    return await b.eval(
+        f"""(() => {{ const e = document.querySelector('[data-flag-{attr}]');
+                     return e ? e.getAttribute('data-flag-{attr}') : null; }})()"""
+    )
+
+
+async def _wait_flag(b: Any, attr: str, want: str) -> None:
+    await b.wait_for(
+        f"""(() => {{ const e = document.querySelector('[data-flag-{attr}]');
+                     return !!e && e.getAttribute('data-flag-{attr}') === '{want}'; }})()""",
+        timeout=30,
+        label=f"`data-flag-{attr}` 翻成 {want}",
+    )
+
+
+#: 收藏页就绪判据：`[data-collect-empty]` **或** `[data-collect-list]` 出现
+#: —— 两者都只在 `data !== null` 之后渲染（等页签的 `aria-pressed` 是不够的）。
+_COLLECT_READY = (
+    "document.querySelector('[data-collect-empty]') || document.querySelector('[data-collect-list]')"
+)
+
+_COLLECT_READ = """(() => ({
+  total: (document.querySelector('[data-collect-total]') || {}).innerText || '',
+  rows: Array.from(document.querySelectorAll('[data-collect-row]'))
+          .map((e) => e.getAttribute('data-collect-row')),
+  facets: Array.from(document.querySelectorAll('[data-facet]'))
+          .map((e) => e.getAttribute('data-facet')),
+}))()"""
+
+
+async def _collection(b: Any, base: str, kind: str, facet: str | None = None) -> dict[str, Any]:
+    """收藏页 → 切到 `kind` 页签 →（可选）点科目分面 → 读回**已稳定**的列表。
+
+    ★ 为什么要"稳定"而不是读一次就走：切页签 / 切分面之后列表是**异步换源**的
+      （`setKind`/`pickSubject` 之后 effect 里再取一次），读到一半拿到的是**上一份**。
+      固定 `sleep` 是坏判据（时长靠猜、换台机器就不准），所以用**收敛判据**：
+      **连续两次读到的内容一致**才算数。
+    """
+    await b.goto_ready(base + "/me/favorites")
+    await b.wait_for(_COLLECT_READY, timeout=40, label="收藏页首屏列表")
+    await b.click(f'[data-kind-tab="{kind}"]')
+    await b.wait_for(
+        f"""(() => {{ const t = document.querySelector('[data-kind-tab][aria-pressed="true"]');
+                      return !!t && t.getAttribute('data-kind-tab') === '{kind}'; }})()""",
+        timeout=30,
+        label=f"切到「{kind}」页签",
+    )
+    if facet is not None:
+        await b.click(f'[data-facet="{facet}"]')
+        await b.wait_for(
+            f"""document.querySelector('[data-facet="{facet}"][aria-pressed="true"]') !== null""",
+            timeout=30,
+            label=f"分面 {facet} 选中",
+        )
+    prev: Any = None
+    for _ in range(25):
+        await b.wait_for(_COLLECT_READY, timeout=20, label=f"「{kind}」列表")
+        got = await b.eval(_COLLECT_READ)
+        need(isinstance(got, dict), f"读收藏列表没拿到对象：{got!r}")
+        if prev is not None and got == prev:
+            return got
+        prev = got
+        await asyncio.sleep(0.25)
+    raise Failure(f"「{kind}」列表**一直没稳定**（读了 25 次还在变）：{prev!r}")
+
+
+async def run_marks(
+    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
+) -> dict[str, float]:
+    """`marks` 场景：标记一道题 ⇒ 按钮翻 1 ⇒ 刷新仍在 ⇒ 列表能筛出（**并对照收藏仍是 0**）。
+
+    ★ 判据的顺序就是用户定的"**先断未变化态，再断变化**"：
+      "标记本来就有"和"真的记了账"长得一模一样 ⇒ 变化**之前**必须先断一次。
+    """
+    cdp = _load("cdp_browser", CDP_BROWSER)
+    t0 = time.time()
+    async with cdp.Browser(mobile=True, width=375, height=667) as b:
+        import_sec = await _ensure_bank(b, base, small, small_meta, timeout)
+        catalog = _catalog(small)
+
+        # ---- ① 可证伪锚（变化之前）----
+        before = await _collection(b, base, "mark")
+        need(
+            before["rows"] == [],
+            f"还没标记过，「标记」列表却有 {len(before['rows'])} 行：{before['rows']}",
+        )
+        need(
+            "0" in before["total"],
+            f"空列表时总数文案不对（期望「共 0 道标记」）：{before['total'].strip()!r}",
+        )
+        say(f"  ✅ ①a 锚：标记列表本来是空的（{before['total'].strip()}）")
+
+        qid, path = await _enter_session(b, base)
+        need(qid in catalog, f"当前题号 {qid} 不在小包里 —— 库里的题和小包对不上？")
+        need(
+            await _flag(b, "mark") == "0",
+            f"刚进来的题（{qid}）标记按钮不是 0 —— 锚不成立，后面的「变 1」就不说明问题",
+        )
+        say(f"  ✅ ①b 锚：题目 {qid} 的标记按钮本来是 0")
+
+        # ---- ② 点标记 ----
+        await b.click("[data-flag-mark]")
+        await _wait_flag(b, "mark", "1")
+        say("  ✅ ② 点「标记」⇒ 按钮翻成 1")
+
+        # ---- ③ 刷新后仍在（读的是 IndexedDB，不是内存态）----
+        await b.goto_ready(base + path)
+        await b.wait_for("""!!document.querySelector('[data-qid]')""", timeout=40, label="刷新后答题页")
+        again = await b.eval("""document.querySelector('[data-qid]').getAttribute('data-qid')""")
+        need(
+            again == qid,
+            f"刷新后回到的是**另一道题**（{again} ≠ {qid}）—— 本步的前提没了，不能算通过",
+        )
+        need(await _flag(b, "mark") == "1", "刷新后标记没了 —— 没落到 IndexedDB")
+        say("  ✅ ③ 刷新后仍在（IndexedDB 持久化）")
+
+        # ---- ④ 列表能筛出 ----
+        after = await _collection(b, base, "mark")
+        need(
+            after["rows"] == [qid],
+            f"「标记」列表应该有且仅有 {qid}：{after['rows']}（总数文案 {after['total'].strip()!r}）",
+        )
+        sid = str(catalog[qid]["subject_id"])
+        need(sid in after["facets"], f"分面里没有这道题的科目 {sid}：{after['facets']}")
+        filtered = await _collection(b, base, "mark", facet=sid)
+        need(filtered["rows"] == [qid], f"按科目 {sid} 筛完不该变：{filtered['rows']}")
+        unfiltered = await _collection(b, base, "mark", facet="all")
+        need(unfiltered["rows"] == [qid], f"点回「全部」不该变：{unfiltered['rows']}")
+        say(f"  ✅ ④ 列表能筛出（共 1 道；科目 {sid} 与「全部」筛出来的都是它 {qid}）")
+
+        # ---- ⑤ 对照：收藏列表仍是 0 ----
+        # ★ 少了这一条，"两个页签其实读的是同一份数据"的实现也能过 ④
+        #   （那正是"二元判据只验一头"的老毛病）。
+        fav = await _collection(b, base, "favorite")
+        need(
+            fav["rows"] == [],
+            f"只打了**标记**，「收藏」列表却有 {len(fav['rows'])} 行：{fav['rows']} "
+            "—— 两个页签切的是同一份数据？",
+        )
+        say("  ✅ ⑤ 对照：收藏列表仍是 0 ⇒ 两个页签真的在切**不同的题源**")
+
+    return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
+
+
 #: ★ 场景注册表（不变量 11 的**第三处**清单）—— 名字 → 协程。
 #: 值统一签名 `(base, bank, bank_meta, other, timeout) -> dict[str, float]`（返回各段耗时），
 #: 于是**加场景不用改调度代码**（用户 2026-10-07："先推广不变量 11，再加 5 个场景"）。
 #: ★ 名字必须是纯小写字母数字 —— 门禁的 `_e2e_names()` 只认那个形状。
 drivers = {
     "setup": run_setup,
+    "marks": run_marks,
 }
 
 
@@ -420,8 +655,8 @@ def main(argv: list[str] | None = None) -> int:
         #    ★ 别靠"记得改"：**不变量 11** 会把三处对账，不一致就红
         #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`
         #       现在**遍历走查器清单**，e2e-web 与本脚本各自三处）。
-        choices=["setup"],
-        help="走查场景：setup（导入题库 + 对账 + 换题库二次确认）",
+        choices=["setup", "marks"],
+        help="走查场景：setup（导入题库 + 对账 + 换题库二次确认）/ marks（标记 + 列表筛选）",
     )
     ap.add_argument("--url", help="已在跑的前端地址（给了就不自己起服务）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自己挑一个空闲端口")
