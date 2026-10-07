@@ -429,6 +429,37 @@ class Browser:
         )
         await self.click_text(label, tag="[role='option']")
 
+    # ---- 文件上传 ----
+
+    async def set_file_input(self, selector: str, path: str | Path, *, nth: int = 0) -> None:
+        """给 `<input type="file">` 塞一个**真实文件**（CDP 的 `DOM.setFileInputFiles`）。
+
+        ★ 为什么不用 JS 造 `new File([...])`：那样造出来的对象**没有真实路径**，
+          也绕过了"用户确实从磁盘选了这一个文件"这件事 —— 而 PWA 的 `/setup`
+          走的正是 `<input type="file" accept=".json">` + 真实读取这条路。
+        ★ 走 **DOM 域**（不是 Input 域）：它按 **DOM 节点**寻址 ⇒ 对
+          `display:none` 的自定义上传控件同样有效（真实 UI 里 input 往往是藏起来的）。
+        ⚠️ Chrome 只在元素**在 DOM 里**时才能寻址 —— 若换页/重渲染过，先重新调用本方法
+          （内部每次都重取 `DOM.getDocument`，所以不需要手动刷新节点缓存）。
+        ★ "塞进去了"与"页面收到了 `change`"是**两件事**：本方法只负责前者；
+          后者由 `tools/local-verify/probe-file-input.py` 单独验（那里断言成对）。
+        """
+        p = Path(path).resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"要上传的文件不存在：{p}")
+        await self.send("DOM.enable")
+        doc = await self.send("DOM.getDocument", {"depth": -1})
+        ids = (
+            await self.send(
+                "DOM.querySelectorAll",
+                {"nodeId": doc["root"]["nodeId"], "selector": selector},
+            )
+        ).get("nodeIds") or []
+        if len(ids) <= nth:
+            raise RuntimeError(f"找不到第 {nth} 个 file input：{selector}（命中 {len(ids)} 个）")
+        await self.send("DOM.setFileInputFiles", {"files": [str(p)], "nodeId": ids[nth]})
+        await asyncio.sleep(0.3)
+
     # ---- 触摸（真触摸，走 CDP 输入管线）----
 
     async def _center_of(self, selector: str, nth: int = 0) -> list[float]:
