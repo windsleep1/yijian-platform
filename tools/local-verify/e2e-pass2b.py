@@ -21,9 +21,11 @@ import httpx
 
 from cdp_browser import Browser
 
+REPO = Path(__file__).resolve().parents[2]
 ADMIN = "http://localhost:3000"
 API = "http://127.0.0.1:8123/api/v1"
-SHOTS = Path(r"C:/My Protect/WorkBuddy/ONE Build/yijian-platform/apps/admin/docs/screenshots/batch7-pass2b")
+#: ★ 从**本文件位置**推导（2026-10-07 同族清理）；原来写死本机绝对路径。
+SHOTS = REPO / "apps" / "admin" / "docs" / "screenshots" / "batch7-pass2b"
 
 TAKEN: list[tuple[str, int]] = []
 

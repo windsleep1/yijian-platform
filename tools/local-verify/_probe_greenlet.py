@@ -36,7 +36,9 @@ MODE = sys.argv[1] if len(sys.argv) > 1 else "thread"
 # 每次跑用新号码：注册是**写库**的，重复号码会 409（上一轮崩溃正是踩了这个）
 PHONE = "139" + str(int(__import__("time").time() * 1000))[-8:]
 
-REPO = r"C:/My Protect/WorkBuddy/ONE Build/yijian-platform"
+#: ★ 从**本文件位置**推导（2026-10-07 同族清理）；原来写死本机绝对路径。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(REPO, "apps", "api"))
 os.chdir(os.path.join(REPO, "apps", "api"))
 

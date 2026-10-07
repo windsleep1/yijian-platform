@@ -20,7 +20,10 @@ import io
 import os
 from collections import defaultdict
 
-REPO = r"C:/My Protect/WorkBuddy/ONE Build/yijian-platform"
+#: ★ 从**本文件位置**推导（2026-10-07 同族清理）。原来写死本机绝对路径 ⇒
+#:   换台机器/CI 上 `REPO` 指向不存在的地方，而症状是"扫不到文件"（像工具坏了）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(_HERE))
 APP = os.path.join(REPO, "apps", "api", "app")
 TESTS = os.path.join(REPO, "apps", "api", "tests")
 

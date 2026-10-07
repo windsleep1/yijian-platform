@@ -18,7 +18,7 @@ from pathlib import Path
 #: 所以**连"我在用绝对路径"这件事都看不出来**。
 #:
 #: 代价（2026-10-07 复盘，实测复现）：门禁 `check_copy_manifest` 把本脚本当**子进程**
-#: 跑 `--check`；CI 是 Linux runner，`C:/My Protect/...` 不存在 ⇒
+#: 跑 `--check`；CI 是 Linux runner，那条写死的本机 Windows 路径不存在 ⇒
 #:   `walk(PWA)` 全空 ⇒ `apps/pwa/COPIED-FROM-WEB.md` 找不到 ⇒ `--check` 退出码 1
 #:   ⇒ **后端 job 的「不变量自检」从 B-1 起一路红**（9 个 run 形态完全一致）。
 #: ★ 症状是**本地绿、CI 红**：我本地一直跑 `python .../check-invariants.py` 全绿，

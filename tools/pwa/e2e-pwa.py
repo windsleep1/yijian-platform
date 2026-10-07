@@ -116,14 +116,16 @@ def _http_get(url: str, timeout: float = 10.0) -> tuple[int, str]:
 
 
 def find_node() -> str:
-    for cand in (
-        Path(r"C:\Users\15437\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"),
-        Path(r"C:\Users\15437\.workbuddy\binaries\node\versions\22.22.2-6\node.exe"),
-        Path(r"C:\bs2501\nodejs\node.exe"),
-    ):
-        if cand.is_file():
-            return str(cand)
-    raise SystemExit("✗ 找不到 node.exe")
+    """找 node。★ **不写死本机路径**：从 `Path.home()` 起手，版本目录用 glob 取最新的。
+
+    写死绝对路径的代价（2026-10-07 同族清理）：换台机器 / 在 CI 上就是"找不到"，
+    而那个症状看起来像**工具坏了**，不像**配置写死了**（同族：`gen-copied-manifest.py`
+    写死 REPO 把后端 CI 打红了一个多星期）。
+    """
+    managed = Path.home() / ".workbuddy" / "binaries" / "node" / "versions"
+    for cand in sorted(managed.glob("*/node.exe"), reverse=True):
+        return str(cand)
+    raise SystemExit("✗ 找不到 node.exe —— 装 node，或放进 ~/.workbuddy/binaries/node/versions/")
 
 
 # --------------------------------------------------------------------- 小包

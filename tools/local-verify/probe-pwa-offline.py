@@ -437,13 +437,11 @@ def _fake_args(base: str, port: int, dev: bool, node: str) -> argparse.Namespace
 
 
 def find_node() -> str:
-    for cand in (
-        Path(r"C:\Users\15437\.workbuddy\binaries\node\versions\22.22.2-3\node.exe"),
-        Path(r"C:\bs2501\nodejs\node.exe"),
-    ):
-        if cand.is_file():
-            return str(cand)
-    raise SystemExit("[probe] ✗ 找不到 node.exe")
+    """★ **不写死本机路径**（2026-10-07 同族清理）：`Path.home()` 起手 + glob 取最新版本。"""
+    managed = Path.home() / ".workbuddy" / "binaries" / "node" / "versions"
+    for cand in sorted(managed.glob("*/node.exe"), reverse=True):
+        return str(cand)
+    raise SystemExit("[probe] ✗ 找不到 node.exe —— 装 node，或设 PATH")
 
 
 def main(argv: list[str] | None = None) -> int:

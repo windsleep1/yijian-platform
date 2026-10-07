@@ -7,7 +7,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools/local-verify/run-smoke.ps1 -DbName yijian # 跑在累积的开发库上
 #
 # 若自动挑选的 Python 解释器不对，可显式指定：
-#   ... -Python "C:\path\to\python.exe"
+#   ... -Python "<python.exe 的完整路径>"
 #
 [CmdletBinding()]
 param(

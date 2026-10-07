@@ -42,6 +42,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -49,10 +50,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 API_DIR = REPO / "apps" / "api"
 SERVICE = API_DIR / "app" / "services" / "question_service.py"
-PG_BIN = Path(r"C:/Users/15437/.workbuddy/binaries/pg/pg16/Library/bin")
-PG_DATA = Path(r"C:/Users/15437/.workbuddy/binaries/pg/data16")
-PY = r"C:/Users/15437/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
-TMP = Path(r"C:/Users/15437/AppData/Local/Temp")
+#: ★ 本机工具链位置**从 `$HOME` 推导**（2026-10-07 同族清理）——
+#:   原来写死了本机绝对路径（含用户名），换台机器/CI 上就找不到，而症状像"工具坏了"。
+_BIN = Path.home() / ".workbuddy" / "binaries"
+PG_BIN = _BIN / "pg" / "pg16" / "Library" / "bin"
+PG_DATA = _BIN / "pg" / "data16"
+#: ★ 用**正在跑本脚本的那个解释器**（本来就该是 venv 的），不写死某个 python.exe。
+PY = sys.executable
+TMP = Path(tempfile.gettempdir())
 PG_PORT, API_PORT = 55432, 8123
 
 #: 变异清单。每条 `(名字, 原文, 替换成)` —— 原文必须**逐字**出现一次，否则算"未应用"。

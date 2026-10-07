@@ -42,6 +42,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
 API_BASE = "http://localhost:8123/api/v1"
@@ -57,10 +58,20 @@ JWT_ISSUER = "yijian"
 LOGIN_PHONE = "13900000001"
 LOGIN_PASSWORD = "Viewer@123456"
 
-AGENT_BROWSER = (
-    r"C:\Users\15437\.workbuddy\binaries\node\versions\22.22.2-3"
-    r"\node_modules\agent-browser\bin\agent-browser-win32-x64.exe"
-)
+def _find_agent_browser() -> str:
+    """找 agent-browser 的可执行文件。★ **不写死本机路径与版本号**（2026-10-07 同族清理）。
+
+    原来把用户名和 node 版本号都写死了 ⇒ 换台机器、或版本一升，就是"找不到"，
+    而那个症状看起来像**工具坏了**，不像**配置写死了**。
+    """
+    root = Path.home() / ".workbuddy" / "binaries" / "node" / "versions"
+    hits = sorted(root.glob("*/node_modules/agent-browser/bin/agent-browser-win32-x64.exe"))
+    if not hits:
+        raise SystemExit("✗ 找不到 agent-browser.exe（应在 ~/.workbuddy/binaries/node/versions/ 下）")
+    return str(hits[-1])
+
+
+AGENT_BROWSER = _find_agent_browser()
 
 
 # ----------------------------------------------------------------- JWT helpers

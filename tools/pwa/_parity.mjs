@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-/* ★ Windows 上必须转成 `file://` URL —— 直接 `import("C:\\...\\grade.mjs")`
+/* ★ Windows 上必须转成 `file://` URL —— 直接 `import("<盘符>:\\...\\grade.mjs")`
    会报 `ERR_UNSUPPORTED_ESM_URL_SCHEME: Received protocol 'c:'`
    （ESM 加载器只认 file / data / node 三种 scheme）。
    ★ 这条**只在 Windows 上炸**，Linux/macOS 上路径本身就是 `/...` 所以看不出问题
