@@ -1288,9 +1288,65 @@ def check_e2e_scenarios() -> None:
     ok("两个走查器各自三处一致 —— " + " ｜ ".join(reports))
 
 
+#: 工具脚本里**不许出现本机私有的绝对路径**。
+#:
+#: ## 这条是拿一个多星期的红灯换来的（2026-10-07）
+#: `tools/pwa/gen-copied-manifest.py` 把仓库根写死成"盘符 + 本机目录"，而门禁
+#: `check_copy_manifest` 会把它当**子进程**跑 ⇒ **CI（Linux）上那条路径不存在** ⇒
+#: 后端 job 的「不变量自检」从 B-1 起一路红（9 个 run 形态完全一致）。
+#: ★ 阴的地方：**本机永远是绿的**（那条路径恰好就是本机）⇒ 写的人看不出来。
+#:   ⇒ 教训不是"我写错了"，是"**这类写法不会报错**" —— 所以要门禁，不要"记得别写"。
+#:
+#: ## 为什么不是"凡盘符就红"
+#: **系统标准位置是正当的**（`Program Files\Google\Chrome`、`Windows\Fonts`
+#: —— 任何一台 Windows 机器上都是那个位置）。一刀切会把它们**假红**，
+#: 而假红的门禁迟早被"顺手放宽掉"。⇒ 判据 = 盘符路径的**第一段**必须在系统段白名单里。
+#:
+#: ⚠️ `\b` 必须有：没有它，URL 里的 `<字母>://` 会被当成盘符路径
+#:    （实测：一刀切那一版报出一屏**全是 URL** 的"命中"，20 行里没有一处是真问题）。
+_WIN_ABS = re.compile(r"\b[A-Za-z]:[\\/]+")
+#: 盘符路径允许的第一段（**只有**系统标准位置）。
+_SYSTEM_SEGMENTS = ("Windows", "Program Files", "Program Files (x86)")
+#: 扫哪些文件：`tools/` 下的**代码**。
+#: ★ 不含 `.md` —— 文档里的示例路径是写给人的正文（且常用 `<占位>`）。
+#: ⚠️ 也不含仓库其余部分：**没扫到的地方不算查过**（三态纪律）。
+_TOOL_CODE_SUFFIXES = (".py", ".mjs", ".sh", ".ps1")
+
+
+def check_no_hardcoded_paths() -> None:
+    print("[13] 工具脚本里没有**本机私有绝对路径**（写死 ⇒ 换台机器/CI 就找不到，且不报错）")
+    problems: list[str] = []
+    n_files = 0
+    for p in sorted((REPO / "tools").rglob("*")):
+        if not p.is_file() or p.suffix not in _TOOL_CODE_SUFFIXES:
+            continue
+        n_files += 1
+        for line_no, line in enumerate(
+            p.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        ):
+            for m in _WIN_ABS.finditer(line):
+                segs = [s for s in re.split(r"[\\/]+", line[m.end() :]) if s]
+                if segs and segs[0] in _SYSTEM_SEGMENTS:
+                    continue  # 系统标准位置 ⇒ 正当
+                problems.append(
+                    f"{p.relative_to(REPO).as_posix()}:{line_no}  {line.strip()[:88]}"
+                )
+    if problems:
+        bad(f"有 {len(problems)} 处本机私有绝对路径（换机器/CI 就失效，而且**不报错**）")
+        for x in problems[:10]:
+            print(f"      {x}")
+        print(
+            "      ⇒ 改成从 `__file__` / `Path.home()` 推导"
+            "（系统位置白名单见本文件里的 `_SYSTEM_SEGMENTS`）。\n"
+            "      ★ 只有**在本机**跑才看不出来 —— 提交前这道门禁是唯一的网。"
+        )
+        return
+    ok(f"{n_files} 个工具脚本里没有本机私有绝对路径（系统段白名单：{', '.join(_SYSTEM_SEGMENTS)}）")
+
+
 def main() -> int:
     print(
-        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11；"
+        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11/12/13；"
         "每批收尾跑一次）==="
     )
     check_gates()
@@ -1305,6 +1361,7 @@ def main() -> int:
     check_pwa_contract()
     check_copy_manifest()
     check_e2e_scenarios()
+    check_no_hardcoded_paths()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()
