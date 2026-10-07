@@ -718,6 +718,322 @@ async def run_fav(
     return await _flag_scenario(base, small, small_meta, timeout, "fav")
 
 
+# --------------------------------------------------------------- 场景：notes
+
+_NOTE1 = "走查写的第 1 版文案"
+_NOTE2 = "改过之后的第 2 版文案"
+_NOTE3 = "在列表页改的第 3 版文案"
+
+
+async def _open_panel(b: Any) -> None:
+    """展开答题页的笔记面板（已展开就什么都不做）。"""
+    if await b.eval("!!document.querySelector('[data-note-input]')"):
+        return
+    await b.click("[data-note-open]")
+    await b.wait_for("!!document.querySelector('[data-note-input]')", timeout=30, label="笔记面板展开")
+
+
+async def _retype(b: Any, selector: str, text: str) -> None:
+    """把输入框**清空**再敲入 —— 清空走 **Ctrl+A**（真键盘），不碰 React 的 value tracker。
+
+    ⚠️ `type_text` 只负责"敲"，它**不清空**：直接往上敲会得到"旧文案 + 新文案"，
+       而那恰好让"编辑"与"追加"看起来一样 —— 正是本场景要分开的两件事。
+    """
+    await b.eval(f"document.querySelectorAll({json.dumps(selector)})[0].focus()")
+    for kind in ("keyDown", "keyUp"):
+        await b.send(
+            "Input.dispatchKeyEvent",
+            {"type": kind, "modifiers": 2, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65},
+        )
+    await b.type_text(selector, text)
+
+
+async def _panel_state(b: Any) -> dict[str, Any]:
+    """读**答题页的笔记面板**（要求已展开）：徽标 / 条 id / 各自文案 / 空态在不在。"""
+    got = await b.eval(
+        """(() => {
+             const ids = Array.from(document.querySelectorAll('[data-note-id]'))
+                            .map((e) => e.getAttribute('data-note-id'));
+             const contents = {};
+             for (const id of ids) {
+               const c = document.querySelector('[data-note-content="' + id + '"]');
+               contents[id] = c ? c.innerText : null;
+             }
+             const badge = document.querySelector('[data-note-open]');
+             return {
+               badge: badge ? badge.getAttribute('data-note-count') : null,
+               ids: ids,
+               contents: contents,
+               emptyNone: !!document.querySelector('[data-note-empty="none"]'),
+             };
+           })()"""
+    )
+    need(isinstance(got, dict), f"读笔记面板没拿到对象：{got!r}")
+    return got
+
+
+async def _list_state(b: Any, base: str) -> dict[str, Any]:
+    """打开 `/me/notes`，等列表落地，读回总数文案 / 行 id / 空态取值。"""
+    await b.goto_ready(base + "/me/notes")
+    await b.wait_for(
+        "document.querySelector('[data-note-empty]') || document.querySelector('[data-note-row]')",
+        timeout=40,
+        label="笔记列表落地",
+    )
+    got = await b.eval(
+        """(() => {
+             const e = document.querySelector('[data-note-empty]');
+             return {
+               total: (document.querySelector('[data-note-total]') || {}).innerText || '',
+               rows: Array.from(document.querySelectorAll('[data-note-row]'))
+                       .map((x) => x.getAttribute('data-note-row')),
+               empty: e ? e.getAttribute('data-note-empty') : null,
+             };
+           })()"""
+    )
+    need(isinstance(got, dict), f"读笔记列表没拿到对象：{got!r}")
+    return got
+
+
+async def _back_to_session(b: Any, base: str, path: str, qid: str) -> None:
+    """回到**同一场**练习的同一道题 —— 每一步都自己确立前提，不依赖上一步留下的位置。"""
+    await b.goto_ready(base + path)
+    await b.wait_for("""!!document.querySelector('[data-qid]')""", timeout=40, label="回到答题页")
+    got = await b.eval("""document.querySelector('[data-qid]').getAttribute('data-qid')""")
+    need(got == qid, f"回到的题不对（{got} ≠ {qid}）—— 后面的判据会失去前提，不能算通过")
+
+
+async def _idb_all(b: Any, store: str) -> list[Any]:
+    """读某个 store 的**全部行**（原样）。用来证明"软删 ≠ 物理删"。"""
+    got = await b.eval(
+        """(async () => {
+             const open = () => new Promise((res, rej) => {
+               const r = indexedDB.open('yijian-pwa');
+               r.onsuccess = () => res(r.result);
+               r.onerror = () => rej(r.error || new Error('open failed'));
+             });
+             const db = await open();
+             const rows = await new Promise((res, rej) => {
+               const r = db.transaction('STORE', 'readonly').objectStore('STORE').getAll();
+               r.onsuccess = () => res(r.result);
+               r.onerror = () => rej(r.error || new Error('getAll failed'));
+             });
+             db.close();
+             return rows;
+           })()""".replace("STORE", store)
+    )
+    need(isinstance(got, list), f"读 store `{store}` 没拿到数组：{got!r}")
+    return got
+
+
+async def run_notes(
+    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
+) -> dict[str, float]:
+    """`notes` 场景：**新增 / 编辑 / 软删** 三条路径 + 软删的**多条读路径**。
+
+    ★ 用户 2026-10-07 点的三条：
+      ① **编辑之后条数仍为 1** —— 拦"编辑其实插了一条"（有些实现会"先删后插"，
+         那样条数变 2，**但不报错**）；
+      ② 软删要**多条读路径**都看不到 —— 只验"列表里没了"不够，"删了还在别处"
+         是最常见的不报错形态；
+      ③ "新增"与"编辑"是**两条路径**，分别验。
+
+    ★ 本场景**不覆盖**"报告页的笔记计数"：它**不存在**（`report/page.tsx` 里 `note` 零命中）
+      ⇒ 塞一条断言进来只会是一条**假装查过**的判据。范围里说清"没有"，不算查过。
+    ★ 读路径 5/5（备份）的判据刻意取"**恢复之后仍然看不见**"而不是"文件里没有那一行"：
+      导出取的是 `idbAll`（**含 tombstone**），两种口径在"恢复后看不见"上等价，
+      而前者与实现选择无关。文件里到底有没有，走查**如实打印**出来备查。
+    """
+    cdp = _load("cdp_browser", CDP_BROWSER)
+    t0 = time.time()
+    dl = Path(tempfile.mkdtemp(prefix="e2e-pwa-dl-"))
+    async with cdp.Browser(mobile=True, width=375, height=667) as b:
+        import_sec = await _ensure_bank(b, base, small, small_meta, timeout)
+        catalog = _catalog(small)
+        qid, path = await _enter_session(b, base)
+        need(qid in catalog, f"当前题号 {qid} 不在小包里 —— 库里的题和小包对不上？")
+
+        # ---- ① 可证伪锚（变化之前）：徽标 0 / 面板空 / 列表空 ----
+        await _open_panel(b)
+        st = await _panel_state(b)
+        need(st["badge"] == "0", f"还没写过笔记，徽标却是 {st['badge']!r}")
+        need(st["ids"] == [] and st["emptyNone"], f"面板里本该什么都没有：{st}")
+        first = await _list_state(b, base)
+        need(first["rows"] == [] and "0" in first["total"], f"还没写过笔记，列表却是：{first}")
+        say(f"  ✅ ① 锚（变化之前）：徽标 0 ｜ 面板「这道题还没有笔记」｜ 列表「{first['total'].strip()}」")
+
+        # ---- ② 新增（**POST** 路径）----
+        await _back_to_session(b, base, path, qid)
+        await _open_panel(b)
+        await b.type_text("[data-note-input]", _NOTE1)
+        await b.wait_for(
+            """!document.querySelector('[data-note-submit]').disabled""", timeout=20, label="保存按钮可点"
+        )
+        await b.click("[data-note-submit]")
+        await b.wait_for(
+            "document.querySelectorAll('[data-note-id]').length === 1", timeout=30, label="面板里出现 1 条"
+        )
+        st = await _panel_state(b)
+        nid = st["ids"][0]
+        need(st["badge"] == "1", f"写完一条徽标应是 1：{st['badge']!r}")
+        need(not st["emptyNone"], "刚写完一条，面板却仍显示「这道题还没有笔记」")
+        need((st["contents"].get(nid) or "").strip() == _NOTE1, f"面板文案不对：{st['contents']}")
+        say(f"  ✅ ② 新增（POST）：面板 1 条 ｜ 徽标 1 ｜ note id = {nid}")
+
+        # ---- ③ 编辑（**PUT** 路径；★ 条数必须仍是 1、id 必须不变）----
+        await b.click(f'[data-note-edit="{nid}"]')
+        await b.wait_for("!!document.querySelector('[data-note-edit-input]')", timeout=20, label="编辑框")
+        await _retype(b, "[data-note-edit-input]", _NOTE2)
+        await b.click("[data-note-edit-save]")
+        # ★ 等的是"**保存这件事结束了**"这个中性信号（编辑框收起），**不是**"我期望的值出现"：
+        #   后者会把"值不对"变成"等待超时"，而超时**指不到真凶**（2026-10-07 变异实测踩到）。
+        await b.wait_for(
+            """!document.querySelector('[data-note-edit-input]')""", timeout=30, label="编辑框收起"
+        )
+        st2 = await _panel_state(b)
+        # ★★ **先看库**：UI 是**产物**，库里的行才是**事实**。
+        #    实测（2026-10-07 变异"编辑插一条新的"）：**面板会被替换成 1 条**（旧那条
+        #    被内存态盖住）⇒ 只断言 UI 条数**看不出来**；而库里已经是 2 行。
+        #    ⇒ 这条放在最前面：它比任何 UI 判据都硬，且消息里带两个 id，能直接定位。
+        rows_now = await _idb_all(b, "notes")
+        need(
+            len(rows_now) == 1,
+            f"★ 编辑之后库里变成了 {len(rows_now)} 行 —— 编辑**不该**新增一行"
+            f"（UI 上可能只显示 1 条，看不见这件事）：{[r.get('id') for r in rows_now]}",
+        )
+        need(
+            len(st2["ids"]) == 1,
+            f"★ 编辑之后条数变成了 {len(st2['ids'])} —— 编辑**不该**插一条（{st2['ids']}）",
+        )
+        need(st2["ids"] == [nid], f"编辑换了 id（{st2['ids']} ≠ [{nid}]）—— 编辑应是**原地改**")
+        need(st2["badge"] == "1", f"编辑之后徽标应是 1：{st2['badge']!r}")
+        need((st2["contents"].get(nid) or "").strip() == _NOTE2, f"面板文案不是新值：{st2['contents']}")
+        say(f"  ✅ ③ 编辑（PUT，答题页面板）：条数**仍是 1** ｜ id 不变（{nid}）｜ **库里也是 1 行**")
+
+        # ---- ④ 列表对账 ----
+        lst = await _list_state(b, base)
+        need(lst["rows"] == [nid], f"「我的笔记」应有且仅有 {nid}：{lst['rows']}")
+        need("1" in lst["total"], f"总数文案不对（期望「共 1 条笔记」）：{lst['total'].strip()!r}")
+        row_txt = await b.eval(f"""(document.querySelector('[data-note-row="{nid}"]') || {{}}).innerText || ''""")
+        need(_NOTE2 in row_txt, f"列表行里的文案不是新值：{row_txt!r}")
+        say(f"  ✅ ④ 列表对账：逐项一致（{lst['total'].strip()}，行内是新文案）")
+
+        # ---- ④b **另一条编辑入口**：列表页上的「编辑」（同一个接口，**另一段实现**）----
+        # ★ 用户点的第 ③ 条：两个入口要**分别**验。这一页的 `save()` 是"就地替换那一行、
+        #   不重新取整页" —— 与答题页面板那条不是同一段代码，只验一条会漏另一条。
+        await b.click(f'[data-note-edit="{nid}"]')
+        await b.wait_for(
+            """!!document.querySelector('[data-note-edit-input]')""", timeout=20, label="列表页编辑框"
+        )
+        await _retype(b, "[data-note-edit-input]", _NOTE3)
+        await b.click(f'[data-note-edit-save="{nid}"]')
+        await b.wait_for(
+            """!document.querySelector('[data-note-edit-input]')""", timeout=30, label="列表页编辑框收起"
+        )
+        lst_b = await _list_state(b, base)
+        need(lst_b["rows"] == [nid], f"★ 列表页编辑之后行变了：{lst_b['rows']}")
+        need("1" in lst_b["total"], f"★ 列表页编辑之后总数变了：{lst_b['total'].strip()!r}")
+        row_txt3 = await b.eval(
+            f"""(document.querySelector('[data-note-row="{nid}"]') || {{}}).innerText || ''"""
+        )
+        need(_NOTE3 in row_txt3, f"列表页编辑之后行内不是新文案：{row_txt3!r}")
+        say("  ✅ ④b 另一条入口（/me/notes 的「编辑」）：条数仍 1、id 不变、行内是新文案")
+
+        # ---- ⑤ 刷新后仍在（IndexedDB 持久化）----
+        await _back_to_session(b, base, path, qid)
+        await _open_panel(b)
+        st3 = await _panel_state(b)
+        need(st3["badge"] == "1", f"刷新后徽标不是 1：{st3['badge']!r}")
+        need(st3["ids"] == [nid], f"刷新后笔记变了：{st3['ids']}")
+        need((st3["contents"].get(nid) or "").strip() == _NOTE3, "刷新后文案不是列表页改的那一版")
+        say("  ✅ ⑤ 刷新后仍在（IndexedDB 持久化，内容是列表页改的那一版）")
+
+        # ---- ⑥ 软删：**多条读路径**逐一确认看不见 ----
+        lst = await _list_state(b, base)
+        await b.click(f'[data-note-del="{nid}"]')
+        await b.wait_for(
+            "document.querySelectorAll('[data-note-row]').length === 0",
+            timeout=30,
+            label="列表里那行消失",
+        )
+        lst2 = await _list_state(b, base)
+        need(lst2["rows"] == [], f"删完列表还有：{lst2['rows']}")
+        need(
+            lst2["empty"] == "no-data",
+            f"空态该是 `no-data`（「还没写过」），不是 `filtered`：{lst2['empty']!r}",
+        )
+        need("0" in lst2["total"], f"总数文案不是 0：{lst2['total'].strip()!r}")
+        say(f"  ✅ ⑥a 读路径 1/5（/me/notes 列表）：行没了、空态 no-data、{lst2['total'].strip()}")
+
+        await _back_to_session(b, base, path, qid)
+        await _open_panel(b)
+        st4 = await _panel_state(b)
+        need(st4["badge"] == "0", f"★ 读路径 2/5（答题页**徽标**）：删完之后仍是 {st4['badge']!r}")
+        need(
+            st4["ids"] == [] and st4["emptyNone"],
+            f"★ 读路径 3/5（答题页**面板**）：删完还看得到：{st4}",
+        )
+        say("  ✅ ⑥b 读路径 2/5 + 3/5（答题页的徽标 + 面板）：都看不到它")
+
+        rows = await _idb_all(b, "notes")
+        need(len(rows) == 1, f"软删之后库里应该**留着那一行**（tombstone），实际 {len(rows)} 行：{rows}")
+        need(rows[0].get("deleted_at"), f"那一行没有 `deleted_at` —— 那就不是软删了：{rows[0]}")
+        say("  ✅ ⑥c 读路径 4/5（库里的行）：tombstone 仍在（`deleted_at` 已置）")
+        say("       ★ 报告页那条（5 条里的第 4 条）**不存在** —— 不写断言，也不算查过")
+
+        # ★★ 正对照：**先证明"恢复"这件事真的发生了**，否则"恢复后笔记看不见"可以
+        #    是"恢复根本没生效"—— 那是**空绿**（少一个"本来应该回来"的东西当参照）。
+        await _back_to_session(b, base, path, qid)
+        await b.click("[data-flag-mark]")
+        await _wait_flag(b, "mark", "1")
+        say("  · 正对照已布置：另外打了一个**标记** —— 恢复之后它**必须回来**")
+
+        # ---- ⑦ 读路径 5/5（备份）：导出 → **恢复** ⇒ 仍然看不见 ----
+        await b.goto_ready(base + "/me/backup")
+        # ★ 下载拦截：底座现成的 `send()` 就够（只有一个调用方 ⇒ **不为它加底座方法**，
+        #   加了就是"将来可能用"）。机制本身已由独立探针验证过。
+        await b.send("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(dl)})
+        await b.click("[data-export]")
+        await b.wait_for("""!!document.querySelector('[data-exported]')""", timeout=40, label="导出完成")
+        f: Path | None = None
+        for _ in range(40):
+            hits = list(dl.glob("*.json"))
+            if hits:
+                f = hits[0]
+                break
+            await asyncio.sleep(0.25)
+        need(f is not None, f"没等到导出的备份文件（目录 {dl}）")
+        bundle = json.loads(f.read_text(encoding="utf-8"))
+        raw_notes = bundle.get("data", {}).get("notes", [])
+        dead = [r for r in raw_notes if r.get("deleted_at")]
+        say(f"  · 实测：备份文件 {f.name} 里 notes 共 {len(raw_notes)} 行，其中**已软删** {len(dead)} 行")
+
+        await b.set_file_input("[data-import-file]", f)
+        await b.wait_for("""!!document.querySelector('[data-confirm-block]')""", timeout=40, label="导入确认块")
+        need(
+            not await b.eval("""!!document.querySelector('[data-bank-mismatch]')"""),
+            "同一份题库导出的备份却提示「题库不匹配」—— 指纹判据坏了",
+        )
+        await b.click("[data-confirm-import]")
+        await b.wait_for("""!!document.querySelector('[data-imported]')""", timeout=timeout, label="恢复完成")
+
+        # (a) 正对照：标记**回来了** ⇒ "恢复"确实生效
+        back = await _collection(b, base, "mark")
+        need(
+            back["rows"] == [qid],
+            f"★ 正对照失败：恢复之后标记**没回来**（{back['rows']}）"
+            "⇒ 「恢复」这件事没生效，下面那条判据是**空的**",
+        )
+        say("  ✅ ⑦a 正对照：恢复之后**标记回来了** ⇒ 恢复真的生效了")
+        # (b) 负判据：已软删的笔记**没有复活**
+        lst3 = await _list_state(b, base)
+        need(lst3["rows"] == [], f"★ 恢复之后已软删的笔记**复活了**：{lst3['rows']}")
+        need("0" in lst3["total"], f"恢复后总数不是 0：{lst3['total'].strip()!r}")
+        say("  ✅ ⑦b 读路径 5/5（备份）：导出 → 恢复 ⇒ 已软删的**仍然看不见**（没有复活）")
+
+    return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
+
+
 #: ★ 场景注册表（不变量 11 的**第三处**清单）—— 名字 → 协程。
 #: 值统一签名 `(base, bank, bank_meta, other, timeout) -> dict[str, float]`（返回各段耗时），
 #: 于是**加场景不用改调度代码**（用户 2026-10-07："先推广不变量 11，再加 5 个场景"）。
@@ -726,6 +1042,7 @@ drivers = {
     "setup": run_setup,
     "marks": run_marks,
     "fav": run_fav,
+    "notes": run_notes,
 }
 
 
@@ -739,8 +1056,8 @@ def main(argv: list[str] | None = None) -> int:
         #    ★ 别靠"记得改"：**不变量 11** 会把三处对账，不一致就红
         #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`
         #       现在**遍历走查器清单**，e2e-web 与本脚本各自三处）。
-        choices=["setup", "marks", "fav"],
-        help="走查场景：setup（导入题库 + 对账）/ marks（标记 + 列表筛选 + 取消）/ fav（收藏，同流程）",
+        choices=["setup", "marks", "fav", "notes"],
+        help="走查场景：setup（导入题库 + 对账）/ marks（标记）/ fav（收藏）/ notes（笔记三条路径）",
     )
     ap.add_argument("--url", help="已在跑的前端地址（给了就不自己起服务）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自己挑一个空闲端口")
@@ -790,9 +1107,12 @@ def main(argv: list[str] | None = None) -> int:
         say(f"  · {args.scenario} 场景总耗时：{perf['scenario_sec']:.1f}s")
         say(f"  · next dev 冷启动：{boot_sec:.1f}s（不含在场景耗时里）")
         return 0
-    except Failure as e:
+    except (Failure, TimeoutError, RuntimeError) as e:
+        # ★ 底座的 `wait_for` 抛 `TimeoutError`、`eval`/`click` 抛 `RuntimeError`。
+        #   只接 `Failure` 的话，**最常见的一类失败（等不到）会变成裸 traceback**：
+        #   退出码是对的，但"哪一步、等的是什么"要去翻栈（2026-10-07 实测踩到）。
         say("")
-        say(f"==> ❌ 失败：{e}")
+        say(f"==> ❌ 失败：{type(e).__name__}: {e}")
         return 1
     finally:
         if proc is not None:
