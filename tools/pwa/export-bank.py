@@ -28,6 +28,8 @@ id、"按知识点"的报告只有数字）。而且两件事必须在**导出�
 用法：
     python tools/pwa/export-bank.py                 # → data/seed/pwa-bank.json
     python tools/pwa/export-bank.py --out /tmp/x.json --max-questions 200   # 小包，供本地试
+★ `--max-questions` 是**分层抽样**（科目×题型×难度 轮转），并断言 6 科目 / 5 题型 / 1~5 星
+  **全都有，缺一即失败** —— 详见 `stratified_sample` / `assert_representative` 的注释。
 """
 
 from __future__ import annotations
@@ -242,6 +244,96 @@ def build_questions(
     return out, bad
 
 
+# ---------------------------------------------------------------- 分层抽样（小包专用）
+
+def _strata_of(q: dict[str, Any]) -> tuple[Any, str, str]:
+    """分层键 =（科目, 题型, 难度）。三个坐标各自也是"全体里出现过的层级"。"""
+    return (q.get("subject_id"), str(q.get("type")), str(q.get("difficulty")))
+
+
+def stratified_sample(raw: list[dict[str, Any]], max_n: int) -> list[dict[str, Any]]:
+    """按（科目 × 题型 × 难度）**分层抽样**，最多取 `max_n` 题。
+
+    ## 为什么不是 `raw[:max_n]`
+    `questions.json` 是**按科目分段**排的 ⇒ 取前 N 题很可能只有一个科目，
+    甚至一道判断题都没有。后果不是"小包不好用"，而是：
+    **对账断言"逐项等于 meta"照样通过**（小包的 meta 就是按这个抽样算出来的）
+    ⇒ 那种绿是**自证** —— 它验不了"大题量下的抽样一致性"（方案 §补充②）。
+
+    ## 做法
+    - 桶 = 分层键；桶内**保序**；
+    - **轮转取**（第一轮每桶 1 条）⇒ 只要 `max_n ≥ 桶数`，**每一层都至少出现一次**；
+    - 取满后按**原顺序回排**（小包是全体的一条子序列，便于 diff 与肉眼核对）。
+    ★ **不用随机**：包要可复现（同一份 `questions.json` ⇒ 逐字节相同的包）。
+    """
+    if max_n <= 0 or max_n >= len(raw):
+        return list(raw)
+
+    pos = {id(q): i for i, q in enumerate(raw)}
+    buckets: dict[tuple[Any, str, str], list[dict[str, Any]]] = {}
+    for q in raw:
+        buckets.setdefault(_strata_of(q), []).append(q)
+
+    order = list(buckets)  # 首次出现顺序（确定性，不依赖 dict 之外的任何东西）
+    picked: list[dict[str, Any]] = []
+    idx = 0
+    while len(picked) < max_n:
+        progress = False
+        for key in order:
+            if len(picked) >= max_n:
+                break
+            bucket = buckets[key]
+            if idx < len(bucket):
+                picked.append(bucket[idx])
+                progress = True
+        if not progress:  # 所有桶都取空了（`max_n > len(raw)` 已在上面返回，理论到不了）
+            break
+        idx += 1
+    picked.sort(key=lambda q: pos[id(q)])
+    return picked
+
+
+#: 三条"缺一即失败"的判据（方案 §补充②）—— 维度 → 取值函数。
+_COVERAGE_DIMS: dict[str, Any] = {
+    "科目": lambda q: str(q.get("subject_id")),
+    "题型": lambda q: str(q.get("type")),
+    "难度": lambda q: str(q.get("difficulty")),
+}
+
+
+def assert_representative(
+    selected: list[dict[str, Any]], full: list[dict[str, Any]]
+) -> dict[str, int]:
+    """小包必须覆盖**全体出现过的每一个层级** —— **缺一即失败**（不是 warn）。
+
+    为什么不能只 warn：小包的 `meta` 是按它自己算的 ⇒ 缺一整个题型时
+    "导入的 == 算出来的"依然成立 —— 那条对账**验不了代表性**。
+    这一步补的正是那个洞。
+
+    ★ 判据用**全体的层级集合**（不是写死"6 / 5 / 5"）：题库变了它自动跟着变，
+      不会退化成一个过期的数字（"数量写两处必有一处先过期"）。
+    """
+    problems: list[str] = []
+    counts: dict[str, int] = {}
+    for name, get in _COVERAGE_DIMS.items():
+        want = {get(q) for q in full}
+        got = {get(q) for q in selected}
+        counts[name] = len(got)
+        missing = sorted(want - got)
+        if missing:
+            problems.append(f"{name} 缺 {missing}（全体有 {sorted(want)}）")
+    if problems:
+        n_strata = len({_strata_of(q) for q in full})
+        raise SystemExit(
+            "✗ 分层抽样没覆盖全体层级（缺一即失败，方案 §补充②）：\n  - "
+            + "\n  - ".join(problems)
+            + f"\n  ⇒ 加大 --max-questions。全体有 {n_strata} 个（科目×题型×难度）分层；"
+            f"取到 {n_strata} 题时**每层各一条**，覆盖由此**保证**。"
+            "（更小的 N 也可能够 —— 但下界取决于数据，本脚本不预设它。）"
+        )
+    return counts
+
+
 # ---------------------------------------------------------------- 一致性自检
 
 def check_schema_version_sync() -> None:
@@ -267,7 +359,11 @@ def main(argv: list[str] | None = None) -> int:
         "--max-questions",
         type=int,
         default=0,
-        help="只取前 N 题（本地试跑用；此时对账会相应放宽 —— 生成的不是完整包）",
+        help=(
+            "只取 N 题（本地试跑 / E2E 走查用）。★ 按（科目×题型×难度）**分层抽样**，"
+            "不是取前 N —— 并断言 6 科目 / 5 题型 / 1~5 星**全都有**，缺一即失败"
+            "（否则小包的「对账 == meta」是自证，验不了代表性）。此时对账相应放宽。"
+        ),
     )
     args = ap.parse_args(argv)
 
@@ -293,9 +389,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  ✓ 知识点 {len(kps)} 个")
 
     print("[4/6] 读题目并**归一答案**（任一题没归干净就不导出）")
-    raw_q = json.loads(Q_JSON.read_text(encoding="utf-8"))
-    if args.max_questions:
-        raw_q = raw_q[: args.max_questions]
+    raw_all = json.loads(Q_JSON.read_text(encoding="utf-8"))
+    raw_q = stratified_sample(raw_all, args.max_questions) if args.max_questions else raw_all
     questions, bad = build_questions(raw_q, load_answer_module(), rules["gradable_types"])
     if bad:
         print(f"  ✗ {len(bad)} 道题的答案不符合规范形式（前 5 条）：")
@@ -303,6 +398,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"      {b}")
         print("  ⇒ 不导出。库里有两套写法时，先跑迁移统一口径（BL-20），再回来导出。")
         return 2
+    if args.max_questions:
+        # ★ 自检放在**归一之后**：万一有题被 `build_questions` 挡下，分层就可能缺了一块 ——
+        #   拿 raw 自检会漏掉这种"被过滤出来的缺口"（方案 §补充②：缺一即失败）。
+        cov = assert_representative(questions, raw_all)
+        # ⚠️ 这里要报的是 **命中/全体** 两个数（"44 个全中"是假的：全体有 45 个分层，
+        #    44 题只是覆盖了三个维度、没覆盖全部 45 层）。一个自指的"全中"会骗人。
+        n_full = len({_strata_of(q) for q in raw_all})
+        n_hit = len({_strata_of(q) for q in questions})
+        buckets = " / ".join(f"{k} {v}" for k, v in cov.items())
+        print(f"  ✓ 分层抽样 {len(questions)} / {len(raw_all)} 题（{buckets}；分层 {n_hit}/{n_full}）")
     n_opts = sum(len(q["options"]) for q in questions)
     print(f"  ✓ 题目 {len(questions)} 道 / 选项 {n_opts} 个")
 
