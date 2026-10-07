@@ -47,7 +47,7 @@ flowchart TB
     end
 
     subgraph be["Render · 容器"]
-        API["apps/api<br/>FastAPI · 77 接口 / 13 模块<br/>50 项不变量门禁 · 464 用例"]
+        API["apps/api<br/>FastAPI · 77 接口 / 13 模块<br/>57 项不变量门禁 · 466 用例"]
         CORE["packages/api-core<br/>认证链路**唯一**实现"]
     end
 
@@ -116,7 +116,7 @@ npm run dev                                       # 打开 http://localhost:3000
 > 记忆曲线、小程序端、支付仍未启动；**统计看板已落地**（`docs/20` 的方案 + 后端
 > `admin_stats` 5 个接口 + 管理端 `/dashboard` 页）。
 >
-> 当前后端共 **77 个接口**，pytest 全量 **464 passed, 1 skipped**。
+> 当前后端共 **77 个接口**（判据：`/api/*` 的 `APIRoute` 计数），pytest 全量 **466 passed, 1 skipped**（收集 467）。
 
 **每一批都可以独立执行、独立验收。** Batch 2 起，后端本身就是可运行服务：
 `cd deploy && cp .env.example .env && docker compose up -d --build` → `http://localhost:8000/docs` 即可点开 Swagger 联调。
@@ -210,7 +210,7 @@ yijian-platform/
 │   │   ├─ Dockerfile                 # python:3.12-slim，非 root 运行
 │   │   ├─ docker-entrypoint.sh       # 等依赖 → 建表 → 建超管 → 启动
 │   │   ├─ requirements.txt
-│   │   ├─ tests/                     # pytest（464 passed, 1 skipped）：29 个测试模块（smoke / admin v3~v7 / 题库 / 导入 /
+│   │   ├─ tests/                     # pytest（466 passed, 1 skipped）：30 个测试模块（smoke / admin v3~v7 / 题库 / 导入 /
 │   │                                 #   组卷 / C 端 / 部署契约 / 演示账号 …）
 │   │   └─ app/
 │   │       ├─ main.py                # 应用入口（中间件 / 异常处理 / 路由挂载）
@@ -294,7 +294,7 @@ curl http://localhost:8000/api/v1/health
 cd ../apps/api
 pip install -r requirements.txt
 ADMIN_INIT_PHONE=13800000000 ADMIN_INIT_PASSWORD=Admin@123456 pytest tests -v
-# 全量 464 passed, 1 skipped（那 1 条是 6000 题灌库用例：需 YIJIAN_BIG_IMPORT=1 显式开启）
+# 全量 466 passed, 1 skipped（那 1 条是 6000 题灌库用例：需 YIJIAN_BIG_IMPORT=1 显式开启）
 ```
 
 `test_smoke.py` 覆盖认证主链路：注册 → `/me` → 密码登录 → 刷新令牌轮换（旧 token 立即失效）→ 登出 →
@@ -468,7 +468,7 @@ docker compose exec -T postgres psql -U yijian -d yijian -c "
 | 前端类型 | `npm run typecheck`（`tsc --noEmit`） | **拦截** | — |
 | 前端 lint | `npm run lint`（eslint） | **拦截** | 2026-09-20 存量 14 条清零 → 提级为 error → 上 CI |
 | 前端格式 | `npm run format:check`（prettier） | **拦截** | 配置 `apps/admin/prettier.config.mjs`，`printWidth 100` |
-| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 464 passed, 1 skipped |
+| 后端用例 | `pytest tests`（真 PostgreSQL） | **拦截** | 466 passed, 1 skipped |
 | 后端静态检查 | `ruff check apps/api` | **拦截** | 2026-09-20 存量 19 条清零后转的 |
 | 后端格式 | `ruff format --check apps/api` | **拦截** | 配置 `ruff.toml`，`line-length 100` |
 | 后端覆盖率 | `coverage report` | **拦截**（门槛 94.40） | 2026-09-20 起；依据见 `.coveragerc` |
