@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""个人 PWA 的 E2E 走查器（B-2 步骤 3b）。**目前只有 `setup` 一个场景。**
+"""个人 PWA 的 E2E 走查器（B-2 步骤 3c）。**场景清单见 `drivers` 注册表**（别在这里列一遍 —— 会过期）。
 
 ## 与 `e2e-web.py` 的关系
 同一个底座（`tools/local-verify/cdp_browser.py`、移动视口 375×667），**互不影响**：
@@ -25,6 +25,8 @@
    与**小包文件里的 meta** 逐项比 —— 题量 / 选项数 / `by_subject` / `by_type`。
    ★ 为什么必须读库而不看页面文案：页面文案是**产物**，库里的行才是**事实**；
      而且 `by_type` **应用自己不对账**（`api.ts::reconcile` 只比科目）—— 这里是唯一的网。
+   ★★ 3b **库里的 id 必须全是字符串**（不变量 14 的**行为判据**）：静态门禁只能证明
+     "边界代码走了 `asId`"，证明不了"写进库的**真的**归一了"。这一条是实测。
 4. **刷新后仍在**（IndexedDB 持久化，不是内存态）。
 5. **换题库的二次确认：取消 ⇒ 数据不动**，并**对照**"同一个包"走的是另一条分支
    （只验一头的话，"永远弹 replace"的实现也能过）。
@@ -33,9 +35,11 @@
 `--max-questions` 题的导入耗时 / 整个场景耗时 / 有没有新的技术栈坑（写在末尾的"现场"段）。
 
 ## 边界（本步**不做**）
-- 其余 5 个场景（`wrong` / `marks` / `fav` / `notes` / `loop`）—— 先验证底座；
-- CI 集成与 `run-local-pipeline.py --e2e-pwa`、不变量 11 的双走查器推广 —— 另一步；
-- 不碰 `apps/web`。
+- CI 集成（走查**不进 CI**，与 C 端一致）；
+- 场景清单由 `drivers` 注册表 + `--scenario` choices + `run-local-pipeline.py` 的第二份 choices
+  **三处**共同定义 —— 漏一处会被**不变量 11** 当场抓住。
+  ★ 走查器会改 `apps/web` 吗？**不会** —— 但 `apps/web` 与 `apps/pwa` 共用的页面
+    （例如答题页加 `data-option`）是**两边一起改、保持 `same`** 的（见 `COPIED-FROM-WEB.md`）。
 
 ## 跑法（**必须用 venv 的 python**：小包生成要 import 后端常量）
     PYTHONUTF8=1 <venv>/python tools/pwa/e2e-pwa.py
@@ -245,6 +249,7 @@ _IDB_JS = """(async () => {
   const db = await open();
   const qs = await all(db, 'questions');
   const subs = await all(db, 'subjects');
+  const chs = await all(db, 'chapters');
   const codeById = {};
   for (const s of subs) codeById[s.id] = s.code;
   const by_subject = {}, by_type = {};
@@ -256,8 +261,22 @@ _IDB_JS = """(async () => {
     by_type[q.type] = (by_type[q.type] || 0) + 1;
     options += (q.options || []).length;
   }
+  // ★★ 库里的 id **必须全是字符串**（不变量 14 的**行为判据**）。
+  //   静态门禁只能证明"边界代码走了 asId"；只有这里能证明**写进库的东西真的归一了**。
+  //   判据形状与 `api.ts::normalizeIds` 一致：键名是 `id` 或以 `_id` 结尾。
+  const badIds = [];
+  const scan = (store, rows) => {
+    for (const r of rows) {
+      for (const [k, v] of Object.entries(r)) {
+        if (k !== 'id' && !k.endsWith('_id')) continue;
+        if (v !== null && typeof v !== 'string') badIds.push(store + '.' + k + ' 是 ' + typeof v);
+      }
+    }
+  };
+  scan('subjects', subs); scan('chapters', chs); scan('questions', qs);
   db.close();
-  return { total: qs.length, subjects: subs.length, options, by_subject, by_type, noCode };
+  return { total: qs.length, subjects: subs.length, options, by_subject, by_type, noCode,
+           badIds: badIds.slice(0, 6), badIdCount: badIds.length };
 })()"""
 
 
@@ -372,6 +391,15 @@ async def run_setup(base: str, small: Path, small_meta: dict[str, Any], other: P
             not problems,
             "导入对账没通过（**库里的行**与**小包 meta** 逐项比）：\n  - " + "\n  - ".join(problems),
         )
+        # ★★ ③b：库里的 id 必须是**字符串**（不变量 14 的**行为判据**）。
+        #   静态门禁只能证明"边界代码走了 `asId`"，证明不了"写进库的**真的**归一了"。
+        need(
+            snap["badIdCount"] == 0,
+            "库里有**非字符串**的 id —— 跨边界的 id 必须在导入时归一"
+            "（「同一个字段两种写法」那一族；症状是「某个列表是空的」，**不报错**）：\n  - "
+            + "\n  - ".join(snap["badIds"]),
+        )
+        say("  ✅ ③b 库里的 id **全是字符串**（归一在导入边界真的生效了 —— 实测，不是声称）")
         say(
             f"  ✅ ③ 对账通过：{snap['total']} 题 / {snap['options']} 选项 / "
             f"{len(snap['by_subject'])} 科目 / {len(snap['by_type'])} 题型 —— **逐项等于小包 meta**"

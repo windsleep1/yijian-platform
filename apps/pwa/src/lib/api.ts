@@ -188,6 +188,42 @@ async function gradingRules() {
   return bank.grading_rules;
 }
 
+/* ============================================================ id 归一（**唯一入口**） */
+
+/**
+ * 把**跨边界**的 id 立即归一成字符串 —— 全应用唯一的写法。
+ *
+ * ★ 为什么必须有它（2026-10-07 实测踩到；症状是"**功能没了，但不报错**"）：
+ *   包里（JSON）的 id 是**数字**，而 URL 段 / 查询串 / 路由参数给的全是**字符串**
+ *   ⇒ `c.subject_id === sid` 这类**严格比较恒为假** ⇒ 章节列表恒空
+ *     （页面显示"这门科目还没有章节" —— 6 门科目一个章节都点不动）。
+ *   同族：`idbGet("questions", qid)` 拿字符串 key 去查数字主键 ⇒ 查不到 ⇒ 标记 / 收藏全 `40401`。
+ *   ⇒ 对策**不是**在每个比较点补 `String()`（那是打地鼠），而是**在边界上统一形状**
+ *     —— 正是本项目的不变量 8「**一个字段只有一种写法**」。
+ */
+export function asId(v: string | number): string {
+  return String(v);
+}
+
+/**
+ * 把一行里**所有 id 字段**归一成字符串 —— **按名字认，不逐个列字段**。
+ *
+ * 判据：键名是 `id`，或**以 `_id` 结尾**（`subject_id` / `chapter_id` / `knowledge_point_id` …）。
+ * ★ 为什么不写一张"哪些字段是 id"的清单：**清单会漏**，而漏掉的那一项**不报错** ——
+ *   它只是又悄悄变回数字，等下一次"某个列表是空的"再冒出来。
+ * ★ 只动 `string | number`；`null` / 对象 / 数组**原样留着**（`null` 不许变成 `"null"`）。
+ */
+function normalizeIds(row: unknown): unknown {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+  const src = row as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+  for (const [k, v] of Object.entries(src)) {
+    if (k !== "id" && !k.endsWith("_id")) continue;
+    if (typeof v === "string" || typeof v === "number") out[k] = String(v);
+  }
+  return out;
+}
+
 /* ============================================================ 题库导入（本模块的核心之一） */
 
 export type ImportProgress = {
@@ -338,11 +374,13 @@ export async function importBank(
   // ② 哨兵：现在起，任何中断都会被下次启动识别为"导到一半"
   await metaSet("importing", { started_at: nowIso(), bank_version: meta.bank_version });
 
+  // ★★ **id 在这一行归一成字符串**（`normalizeIds`）—— 这是"包 → 库"的**唯一入口**。
+  //    库里从此只有一种写法，URL / 查询串那种字符串 id 才比得上（见文件头的 `asId`）。
   const payload: Record<string, unknown[]> = {
-    subjects: pkg.subjects ?? [],
-    chapters: pkg.chapters ?? [],
-    kps: pkg.kps ?? [],
-    questions: pkg.questions ?? [],
+    subjects: (pkg.subjects ?? []).map(normalizeIds),
+    chapters: (pkg.chapters ?? []).map(normalizeIds),
+    kps: (pkg.kps ?? []).map(normalizeIds),
+    questions: (pkg.questions ?? []).map(normalizeIds),
   };
   const totalRows = IMPORT_ORDER.reduce((n, s) => n + (payload[s]?.length ?? 0), 0);
   let written = 0;
@@ -449,9 +487,16 @@ function route(pattern: string, handler: Handler) {
   return { seg: pattern.split("/").filter(Boolean), handler };
 }
 
+/**
+ * ★★ 路由表：**凡是把 URL 段当 id 用的地方，一律 `asId(...)`**。
+ *
+ * 这不是装饰 —— 它就是"跨边界的 id 立即归一"这条规则**在代码里的落点**，
+ * 而且**可被门禁 grep**（不变量 14：`seg[n]` / `query.get("<…id>")` 必须出现在 `asId(` 里）。
+ * 少了它，新增一条路由时没人会想起"id 的形状"这件事（`listChapters` 就是这么坏的）。
+ */
 const ROUTES = [
   route("subjects", () => listSubjects()),
-  route("subjects/:sid/chapters", ({ seg }) => listChapters(seg[1])),
+  route("subjects/:sid/chapters", ({ seg }) => listChapters(asId(seg[1]))),
 
   route("practice/sessions", ({ m, body }) => {
     if (m !== "POST") throw notFound("不支持的方法");
@@ -465,26 +510,28 @@ const ROUTES = [
       },
     );
   }),
-  route("practice/sessions/:sid", ({ seg }) => getSession(seg[2])),
+  route("practice/sessions/:sid", ({ seg }) => getSession(asId(seg[2]))),
   route("practice/sessions/:sid/answer", ({ seg, body }) =>
-    submitAnswer(seg[2], body as { item_id?: string; value?: unknown[] }),
+    submitAnswer(asId(seg[2]), body as { item_id?: string; value?: unknown[] }),
   ),
-  route("practice/sessions/:sid/finish", ({ seg }) => finishSession(seg[2])),
-  route("practice/sessions/:sid/report", ({ seg }) => sessionReport(seg[2])),
+  route("practice/sessions/:sid/finish", ({ seg }) => finishSession(asId(seg[2]))),
+  route("practice/sessions/:sid/report", ({ seg }) => sessionReport(asId(seg[2]))),
 
   route("practice/wrong-questions", ({ query }) => listWrong(query)),
-  route("practice/wrong-questions/:qid", ({ seg }) => wrongDetail(seg[2])),
+  route("practice/wrong-questions/:qid", ({ seg }) => wrongDetail(asId(seg[2]))),
 
-  route("practice/marks/:qid", ({ m, seg }) => toggleFlag(m, "marks", seg[2])),
-  route("practice/favorites/:qid", ({ m, seg }) => toggleFlag(m, "favorites", seg[2])),
+  route("practice/marks/:qid", ({ m, seg }) => toggleFlag(m, "marks", asId(seg[2]))),
+  route("practice/favorites/:qid", ({ m, seg }) => toggleFlag(m, "favorites", asId(seg[2]))),
   route("practice/favorites", ({ query }) => listCollections(query)),
 
   route("practice/questions/:qid/notes", ({ m, seg, body }) =>
-    m === "POST" ? addNote(seg[2], body as { content?: unknown }) : listNotesOfQuestion(seg[2]),
+    m === "POST"
+      ? addNote(asId(seg[2]), body as { content?: unknown })
+      : listNotesOfQuestion(asId(seg[2])),
   ),
   route("practice/notes/:nid", ({ m, seg, body }) => {
-    if (m === "PUT") return editNote(seg[2], body as { content?: unknown });
-    if (m === "DELETE") return removeNote(seg[2]);
+    if (m === "PUT") return editNote(asId(seg[2]), body as { content?: unknown });
+    if (m === "DELETE") return removeNote(asId(seg[2]));
     throw notFound("不支持的方法");
   }),
   route("practice/notes", ({ query }) => listNotes(query)),
@@ -1096,7 +1143,7 @@ async function listCollections(query: URLSearchParams): Promise<CollectionList> 
   }
   const page = Math.max(1, Number(query.get("page") ?? 1) || 1);
   const size = Math.max(1, Math.min(Number(query.get("page_size") ?? 20) || 20, 100));
-  const sid = query.get("subject_id") ?? "";
+  const sid = asId(query.get("subject_id") ?? "");
   const store: StoreName = kind === "favorite" ? "favorites" : "marks";
   const [rows, questions, subjects, chapters] = await Promise.all([
     idbAll<{ question_id: string; collected_at: string }>(store),
@@ -1233,7 +1280,7 @@ async function removeNote(nid: string): Promise<unknown> {
 async function listNotes(query: URLSearchParams): Promise<NoteList> {
   const page = Math.max(1, Number(query.get("page") ?? 1) || 1);
   const size = Math.max(1, Math.min(Number(query.get("page_size") ?? 20) || 20, 100));
-  const sid = query.get("subject_id") ?? "";
+  const sid = asId(query.get("subject_id") ?? "");
   const [notes, questions, subjects, chapters] = await Promise.all([
     idbAll<NoteRow & { subject_id?: string | null }>("notes"),
     idbAll<QuestionRow>("questions"),
@@ -1296,7 +1343,7 @@ async function listNotes(query: URLSearchParams): Promise<NoteList> {
 async function listWrong(query: URLSearchParams): Promise<WrongList> {
   const page = Math.max(1, Number(query.get("page") ?? 1) || 1);
   const size = Math.max(1, Math.min(Number(query.get("page_size") ?? 20) || 20, 100));
-  const sid = query.get("subject_id") ?? "";
+  const sid = asId(query.get("subject_id") ?? "");
   // ★ C 端传的是 `marked_only: true`，而 `request()` 会 `String(v)` ⇒ 这里收到的是 `"true"`。
   //   写成 `=== "true"` 而不是 `Boolean(...)`：后者会把字符串 `"false"` 判成真值。
   const markedOnly = query.get("marked_only") === "true";
@@ -1592,7 +1639,9 @@ export async function importUserData(file: File): Promise<{ counts: Record<strin
   // ② 分批写（**每个 store 一个事务**）。任一失败 ⇒ 抛错 —— 此时库里是**空的**，
   //    调用方要能看出"没成功"（而不是以为成功了）。
   for (const s of USER_DATA_STORES) {
-    const rows = data[s] as unknown[];
+    // ★ 同上：备份文件也是**跨边界**的（JSON）⇒ 进来就归一。
+    //   顺带的一个好处：**修好之前导出的备份**（里面是数字 id）也能被它救回来。
+    const rows = (data[s] as unknown[]).map(normalizeIds);
     for (let i = 0; i < rows.length; i += IMPORT_CHUNK) {
       await idbPutMany(s, rows.slice(i, i + IMPORT_CHUNK));
     }

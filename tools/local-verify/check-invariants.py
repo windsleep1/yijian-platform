@@ -1344,9 +1344,63 @@ def check_no_hardcoded_paths() -> None:
     ok(f"{n_files} 个工具脚本里没有本机私有绝对路径（系统段白名单：{', '.join(_SYSTEM_SEGMENTS)}）")
 
 
+#: 不变量 14：**PWA 里跨边界的 id 必须立即归一**（2026-10-07 定）。
+#:
+#: 事故：包里（JSON）的 id 是**数字**，URL 段 / 查询串给的是**字符串** ⇒
+#:   `c.subject_id === sid` 严格比较**恒为假** ⇒ 章节列表恒空（"这门科目还没有章节"），
+#:   **6 门科目一个章节都点不动** —— 即"选完科目永远建不出练习"。
+#:   同族：`idbGet("questions", qid)` 用字符串 key 查数字主键 ⇒ 查不到 ⇒ 标记/收藏 40401。
+#:   ★ 症状的共同点：**不报错**，只是功能没了。
+#:
+#: 判据（机械、不误报）：`apps/pwa/src/lib/api.ts` 里
+#:   ① 每个 `seg[<数字>]` 都必须出现在 `asId(` 里；
+#:   ② 每个 `query.get("<…id>")` 也要（`kind` / `page` / `page_size` / `marked_only` 不是 id，不在此列）；
+#:   ③ 两个转换点（`asId` / `normalizeIds`）必须还在 —— 被删掉 = 规则没了落点。
+#: ★ 它**证明不了**"每一条写入路径都过了归一"（那要靠行为判据：走查器的库形状断言）——
+#:   两处各管一半，谁都不能单独当"已经归一了"的证据。
+_PWA_SEG_ID_RE = re.compile(r"seg\[\d+\]")
+_PWA_QUERY_ID_RE = re.compile(r'query\.get\("(?:id|[a-z_]+_id)"\)')
+
+
+def check_pwa_id_boundaries() -> None:
+    print("[14] PWA 跨边界的 id 必须立即归一（不变量 14）—— 数字 id 与字符串 id 相遇时**不报错**，只是功能没了")
+    rel = "apps/pwa/src/lib/api.ts"
+    path = REPO / rel
+    if not path.is_file():
+        bad(f"读不到 `{rel}` —— 本检查会**静默变成假绿**，故直接失败")
+        return
+    text = path.read_text(encoding="utf-8")
+    problems: list[str] = []
+    n_seg = n_q = 0
+    for i, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        # 注释里出现 `seg[1]` 是在解释规则，不是用法（否则本检查会拿自己的说明文档判红）
+        if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+            continue
+        hit = bool(_PWA_SEG_ID_RE.search(line))
+        if hit:
+            n_seg += 1
+        if _PWA_QUERY_ID_RE.search(line):
+            hit = True
+            n_q += 1
+        if hit and "asId(" not in line:
+            problems.append(f"第 {i} 行取了 id 却没走 `asId()`：{stripped[:80]}")
+    for token in ("export function asId(", "function normalizeIds("):
+        if token not in text:
+            problems.append(f"转换点不见了：`{token}` —— 规则没有落点")
+    if problems:
+        bad("；".join(problems))
+        print(
+            "      ⇒ 跨边界的 id 一律 `asId(...)`；**库里**的 id 由 `importBank` / `importUserData`\n"
+            "        的 `normalizeIds()` 一处归一（不在每个比较点补 `String()` —— 那是打地鼠）。"
+        )
+        return
+    ok(f"`{rel}`：{n_seg} 处 URL 段 id + {n_q} 处查询串 id 全走 `asId()`；两个转换点都在")
+
+
 def main() -> int:
     print(
-        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11/12/13；"
+        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11/12/13/14；"
         "每批收尾跑一次）==="
     )
     check_gates()
@@ -1362,6 +1416,7 @@ def main() -> int:
     check_copy_manifest()
     check_e2e_scenarios()
     check_no_hardcoded_paths()
+    check_pwa_id_boundaries()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()
