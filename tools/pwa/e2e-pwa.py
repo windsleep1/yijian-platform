@@ -1060,6 +1060,68 @@ async def _list_state_wrong(b: Any, base: str) -> dict[str, Any]:
     return got
 
 
+def _page_subject_order(pack: dict[str, Any]) -> list[dict[str, Any]]:
+    """页面上的**科目顺序** —— 必须**复刻** `practice/page.tsx` 的排序：
+    先「公共课」再「专业课」，各自按 `(sort_no, id)`。
+    ★ 不能想当然用 `pack["subjects"]` 的原始顺序：页面是分两组渲染的。
+    """
+    subs = list(pack["subjects"])
+    key = lambda s: (s.get("sort_no") or 0, s.get("id"))  # noqa: E731
+    pub = sorted([s for s in subs if s.get("category") == "public"], key=key)
+    pro = sorted([s for s in subs if s.get("category") != "public"], key=key)
+    return pub + pro
+
+
+def _chapters_of(pack: dict[str, Any], subject_id: Any) -> list[dict[str, Any]]:
+    """页面上这门科目的**章节顺序**（按 `(sort_no, id)`）—— 与 `listChapters` 的排序一致。"""
+    chs = [c for c in pack["chapters"] if str(c.get("subject_id")) == str(subject_id)]
+    return sorted(chs, key=lambda c: (c.get("sort_no") or 0, c.get("id")))
+
+
+def _small_chapter(pack: dict[str, Any], limit: int) -> tuple[int, int] | None:
+    """找一个「**可判分题数 ≤ limit**」的章节 ⇒ `(科目序号, 章节序号)`（都是页面顺序）。
+
+    ★ 为什么要它（2026-10-07 用户追问后**重新分析**，先前的结论是错的）：
+      `createSession` **不接受**"章节会话 + 指定题集" —— `mode` 只有 `chapter` / `wrong`，
+      且 `question_ids` **只在 `mode='wrong'` 下有意义**（与后端 `SessionCreateIn._check`
+      同口径，属**设计上不支持**，不是漏了）。
+      ⚠️ 但"让会话里**含有**某一道指定的题"**不需要**那个能力：当这一章的**可判分题数
+      ≤ 单次抽题上限**（页面写死 `SESSION_SIZE = 10`）时，**整章都会进会话** ⇒ 指定题自然在里面。
+      实测（200 题小包）：6 个科目里有多章满足（例：经济第 2 章 = 8 题、法规第 1 章 = 5 题）。
+    """
+    gradable = {"single", "multiple", "judge"}
+    for si, s in enumerate(_page_subject_order(pack)):
+        for ci, c in enumerate(_chapters_of(pack, s["id"])):
+            n = sum(
+                1
+                for q in pack["questions"]
+                if str(q.get("chapter_id")) == str(c["id"]) and q.get("type") in gradable
+            )
+            if 1 <= n <= limit:
+                return si, ci
+    return None
+
+
+async def _enter_session_at(b: Any, base: str, si: int, ci: int) -> str:
+    """按**序号**进指定科目的指定章节（序号 = `_page_subject_order` / `_chapters_of` 的顺序）。"""
+    await b.goto_ready(base + "/practice")
+    await b.wait_for(
+        f"""document.querySelectorAll('{_SUBJ}').length > {si}""", timeout=40, label="科目列表"
+    )
+    await b.click(_SUBJ, nth=si)
+    await b.wait_for(
+        f"""document.querySelectorAll('{_CHAP}').length > {ci}""",
+        timeout=40,
+        label=f"第 {si + 1} 门科目的第 {ci + 1} 个有题章节",
+    )
+    await b.click(_CHAP, nth=ci)
+    await b.wait_for(
+        """location.pathname.startsWith('/practice/session/')""", timeout=40, label="进入答题页"
+    )
+    await b.wait_for("""!!document.querySelector('[data-qid]')""", timeout=40, label="答题页就绪")
+    return await b.eval("location.pathname")
+
+
 def _labels_right(q: dict[str, Any]) -> list[str]:
     """小包里这道题的**正确标号** —— 外部真相。
 
@@ -1083,19 +1145,18 @@ def _labels_all(q: dict[str, Any]) -> list[str]:
 async def _pick_and_submit(b: Any, labels: list[str]) -> None:
     """点这些标号 → 点「提交」。
 
-    ⚠️ 「提交」按钮**没有 `data-*`** ⇒ 按文案精确定位（`innerText.trim() === '提交'`
-      且未 disabled）。这与 BL-23（"E2E 断言挂语义锚点、不挂文案"）同一族 ——
-      本场景是**唯一**挂文案的落点，理由与待办见报告。
+    ★ 定位走 **`data-submit`**（2026-10-07 用户裁定加的语义锚点）—— 之前是按文案
+      `innerText.trim() === '提交'` 找的，那属于 BL-23 那一族（挂文案会漂移）。
+      锚点是**两份一起加、保持 `same`** 的惰性属性（与 `data-option` 同款）。
     """
     for lb in labels:
         await b.click(f'[data-option="{lb}"]')
     await b.wait_for(
-        """Array.from(document.querySelectorAll('button'))
-             .some((e) => e.innerText.trim() === '提交' && !e.disabled)""",
+        """(() => { const e = document.querySelector('[data-submit]'); return !!e && !e.disabled; })()""",
         timeout=30,
         label="「提交」可点",
     )
-    await b.click_text("提交")
+    await b.click("[data-submit]")
 
 
 async def _wrong_row(b: Any, qid: str) -> dict[str, Any] | None:
@@ -1122,17 +1183,29 @@ async def run_wrong(
       ⑦ ★ **在库里**断言 `retry_correct == 1` 且 `wrong_count == 1` —— 不在 UI 断言
          （UI 会被缓存 / 内存态盖住：`notes` 场景刚证明过这件事）
 
-    ★ **本场景不覆盖**"章节练习里答对**不该**给 `retry_correct` +1"这条反向判据：
-      需要"章节会话里含一道已在错题本的题**且未作答**"，而题一答错就落到
-      "没做过的在后"的排序尾部 ⇒ 拿不到（要覆盖它得能给会话指定题目集合，属新能力）。
-      宁可说"没查"，也不要写一条**看起来在查、其实查不到**的判据。
+    ★ **⑧ 是"章节练习里答对**不该**给 `retry_correct` +1"这条反向判据** ——
+      2026-10-07 我先判它"拿不到"（题答错后落到"没做过的在后"的尾部），**那个判断是错的**：
+      `createSession` 虽然拒绝"章节 + 指定题集"，但只要挑一个**可判分题数 ≤ 10** 的章节，
+      整章都会进会话 ⇒ 指定题自然在里面（见 `_small_chapter`）。
+      ⇒ **"做不到"和"这个能力没实现"是两件事** —— 前者要先问"换个构造方式行不行"。
     """
     cdp = _load("cdp_browser", CDP_BROWSER)
     t0 = time.time()
     async with cdp.Browser(mobile=True, width=375, height=667) as b:
         import_sec = await _ensure_bank(b, base, small, small_meta, timeout)
+        pack = json.loads(small.read_text(encoding="utf-8"))
         catalog = _catalog(small)
-        qid, path = await _enter_session(b, base)
+        # ★★ 一开始就挑一个「可判分题数 ≤ 10」的章节 —— 这样**这道题本身就落在一个小章里**，
+        #    ⑧ 重进同一个章节时，"整章都进会话"才真的成立。
+        #    ⚠️ 第一版只在 ⑧ 里找小章节，结果找到的是**另一章**（qid 在第一大章里）⇒ 判据前提不成立。
+        pick = _small_chapter(pack, 10)
+        need(
+            pick is not None,
+            "小包里找不到「可判分题数 ≤ 10」的章节 —— ⑧ 的构造前提没了（换更大的小包？）",
+        )
+        si, ci = pick
+        path = await _enter_session_at(b, base, si, ci)
+        qid = await b.eval("""document.querySelector('[data-qid]').getAttribute('data-qid')""")
         need(qid in catalog, f"当前题号 {qid} 不在小包里 —— 库里的题和小包对不上？")
         q = catalog[qid]
         right, all_labels = _labels_right(q), _labels_all(q)
@@ -1233,6 +1306,13 @@ async def run_wrong(
         say("  ✅ ⑥ 错题本出现「已重练 ✓」+「重练答对 1 次」，而「错 1 次」**没变**")
 
         # ---- ⑦ ★ 在**库里**收口（UI 会被缓存盖住）----
+        # ⚠️⚠️ **本条与 ⑥ 断言的是同一事实的两层，它没有被变异证明过独立承重。**
+        #    2026-10-07 试过并**构造不出**"让 ⑥ 过、⑦ 红"的变异：那需要"③ 时列表说 0、
+        #    重练后说 1、**而库一直是 0**" ⇒ 要求列表投影与库状态相关，而那**正是正确实现**。
+        #    ⇒ 它的价值是**抗缓存 / 抗内存态**（`notes` 场景确实发生过"UI 把库里的事实盖住"），
+        #      不是"⑦ 能抓到 ⑥ 抓不到的东西"。
+        #    ★ 留下这段标注的理由（用户 2026-10-07）：不标的话，将来有人会以为"⑦ 是备份"
+        #      而把 ⑥ 删掉 —— 那会把两层同一事实变成一层。与「fork 理由里的收敛条件是待办」同族。
         row1 = await _wrong_row(b, qid)
         need(row1 is not None, "重练之后库里那行不见了 —— 软删语义被破坏")
         need(
@@ -1244,6 +1324,258 @@ async def run_wrong(
             f"★ 库里 `wrong_count` 应仍是 1（重练**不该**动它）：{row1}",
         )
         say("  ✅ ⑦ 库里收口：`retry_correct=1`、`wrong_count=1`（**不是** UI 上的数字）")
+
+        # ---- ⑧ ★ 反向对照：**章节练习**里答对**不算**重练答对 ----
+        # ★ 2026-10-07 用户追问后**重新分析**：我先前的结论是"拿不到"（理由是"题一答错就落到
+        #   '没做过的在后' 的排序尾部 ⇒ 新的章节会话里不会有它"）—— ⚠️ **那个结论是错的**。
+        #   `createSession` 确实**拒绝**"章节会话 + 指定题集"（设计如此，与后端同口径），
+        #   但**不需要**它：这一章的可判分题数 ≤ 10 ⇒ **整章都会进会话** ⇒ qid 一定在里面。
+        await _enter_session_at(b, base, si, ci)
+        cells = await b.eval(
+            """Array.from(document.querySelectorAll('[data-sheet-grid] button'))
+                   .map((e) => e.getAttribute('data-cell-qid'))"""
+        )
+        need(qid in cells, f"这一章（可判分 ≤10）本该整章进会话，但 {qid} 不在：{cells}")
+        await b.click("[data-sheet-grid] button", nth=cells.index(qid))
+        await b.wait_for(
+            f"""(() => {{ const e = document.querySelector('[data-qid]');
+                          return !!e && e.getAttribute('data-qid') === {json.dumps(qid)}; }})()""",
+            timeout=30,
+            label="跳到那一道题",
+        )
+        await _pick_and_submit(b, right)
+        await b.wait_text("答对了", timeout=40)
+        row2 = await _wrong_row(b, qid)
+        need(
+            row2 is not None and row2.get("retry_correct") == 1,
+            f"★ **章节练习**里答对**不该**给 `retry_correct` +1（只有重练答对才算）：{row2}",
+        )
+        need(row2.get("wrong_count") == 1, f"章节练习答对也不该动 `wrong_count`：{row2}")
+        say("  ✅ ⑧ 反向对照：**章节练习**里答对同一道题 ⇒ `retry_correct` 仍是 1（不算重练答对）")
+
+    return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
+
+
+# --------------------------------------------------------------- 场景：loop
+
+_LOOP_NOTE = "loop 场景的笔记：四个态同时打在这一道题上"
+_LOOP_FAKE_QID = "999999999999"
+
+
+def _break_backup(bundle: dict[str, Any], out: Path, fake: str) -> None:
+    """把备份里**四类记录**的题号改成 `fake` —— 构造"**题不在库里、记录还在**"这一态。
+
+    ★ 为什么必须"造"：PWA 里让一道题消失的**唯一**途径是「换题库」，而 `importBank` 调的是
+      `db.ts::wipeAll()` ⇒ **连用户数据一起清空**（界面也明写着"这会清空你的全部数据 / 清空并导入"）。
+      ⇒ **"换包后记录仍在"在 PWA 里不可达**（`question_available=false` 这一态没有写入路径 ——
+        硬约定 F：状态"可达" ⟺ 有任何接口能写入它）。
+      可达的是"记录指向一道**库里没有**的题"，而它就是**题目下架**在本地的等价物
+      ⇒ 正是**约定 T**（我的内容不随平台内容变化）在 PWA 里的落点。
+    ★ 不改 `bank_version`（题库还是那一份）⇒ `importUserData` 的指纹校验照常通过。
+    """
+    pkg = json.loads(json.dumps(bundle))
+    for store in ("wrong", "marks", "favorites", "notes"):
+        for row in pkg.get("data", {}).get(store, []):
+            if "question_id" in row:
+                row["question_id"] = fake
+    out.write_text(json.dumps(pkg, ensure_ascii=False), encoding="utf-8")
+
+
+async def _rows_in_store(b: Any, store: str, qid: str) -> list[dict[str, Any]]:
+    return [r for r in await _idb_all(b, store) if str(r.get("question_id")) == qid]
+
+
+async def run_loop(
+    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
+) -> dict[str, float]:
+    """`loop` 场景：测**交互**（"同时"），不是把 5 个单场景再跑一遍。
+
+    ★ 用户 2026-10-07 点明它测什么 —— 单场景是"一次一个用户态"，这里是**同时**：
+      · 错题 + 收藏 + 标记 + 笔记**同时**打在同一道题上；
+      · **四个列表**都能找到它（错题本 / 收藏 / 标记 / 笔记）；
+      · 重练之后**四个 store** 的状态**同时**对（不是只看 UI —— `notes` 的教训）；
+      · "题不在了、记录仍在"（约定 T）—— 用**可达**的构造（见 `_break_backup`）。
+    """
+    cdp = _load("cdp_browser", CDP_BROWSER)
+    t0 = time.time()
+    dl = Path(tempfile.mkdtemp(prefix="e2e-pwa-loop-"))
+    async with cdp.Browser(mobile=True, width=375, height=667) as b:
+        import_sec = await _ensure_bank(b, base, small, small_meta, timeout)
+        pack = json.loads(small.read_text(encoding="utf-8"))
+        catalog = _catalog(small)
+        need(_LOOP_FAKE_QID not in catalog, f"假题号 {_LOOP_FAKE_QID} 竟然在包里 —— 换一个")
+        pick = _small_chapter(pack, 10)
+        need(pick is not None, "找不到「可判分题数 ≤ 10」的章节 —— 本场景的构造前提没了")
+        si, ci = pick
+        path = await _enter_session_at(b, base, si, ci)
+        qid = await b.eval("""document.querySelector('[data-qid]').getAttribute('data-qid')""")
+        need(qid in catalog, f"当前题号 {qid} 不在小包里")
+        q = catalog[qid]
+        right, all_labels = _labels_right(q), _labels_all(q)
+        wrongs = [lb for lb in all_labels if lb not in set(right)]
+        need(right and wrongs, f"这道题没法判分/没法答错：{q.get('type')} {q.get('answer')}")
+
+        # ---- ① 锚：四类都还没有 ----
+        first_w = await _list_state_wrong(b, base)
+        first_f = await _collection(b, base, "favorite")
+        first_m = await _collection(b, base, "mark")
+        first_n = await _list_state(b, base)
+        need(first_w["items"] == [], f"错题本本该是空的：{first_w['items']}")
+        need(first_f["rows"] == [], f"收藏本该是空的：{first_f['rows']}")
+        need(first_m["rows"] == [], f"标记本该是空的：{first_m['rows']}")
+        need(first_n["rows"] == [], f"笔记本该是空的：{first_n['rows']}")
+        say("  ✅ ① 锚（四个都空）：错题本 0 ｜ 收藏 0 ｜ 标记 0 ｜ 笔记 0")
+
+        # ---- ② 答错 ⇒ 错题本有 ----
+        await b.goto_ready(base + path)
+        await b.wait_for("""!!document.querySelector('[data-qid]')""", timeout=40, label="答题页")
+        await _pick_and_submit(b, [wrongs[0]])
+        await b.wait_text("答错了", timeout=40)
+        row0 = await _wrong_row(b, qid)
+        need(
+            row0 is not None and row0.get("wrong_count") == 1 and row0.get("retry_correct") == 0,
+            f"答错之后库里的错题行不对：{row0}",
+        )
+        say(f"  ✅ ② 答错（点 {wrongs[0]}）⇒ 错题本有它（库里 wrong_count=1 / retry_correct=0）")
+
+        # ---- ③ ★ **同时**在**同一道题**上打上 标记 + 收藏 + 笔记 ----
+        await b.click("[data-flag-mark]")
+        await _wait_flag(b, "mark", "1")
+        await b.click("[data-flag-fav]")
+        await _wait_flag(b, "fav", "1")
+        await _open_panel(b)
+        await b.type_text("[data-note-input]", _LOOP_NOTE)
+        await b.wait_for("""!document.querySelector('[data-note-submit]').disabled""", timeout=20, label="保存可用")
+        await b.click("[data-note-submit]")
+        await b.wait_for(
+            "document.querySelectorAll('[data-note-id]').length === 1", timeout=30, label="笔记 1 条"
+        )
+        st = await _panel_state(b)
+        nid = st["ids"][0]
+        need(
+            await _flag(b, "mark") == "1" and await _flag(b, "fav") == "1" and st["badge"] == "1",
+            f"三个态没**同时**在：mark/fav/badge = {await _flag(b, 'mark')}/"
+            f"{await _flag(b, 'fav')}/{st['badge']}",
+        )
+        say(f"  ✅ ③ **同一道题**上三个态**同时**在：标记 1 ｜ 收藏 1 ｜ 笔记 1（id={nid[:12]}…）")
+
+        # ---- ④ 重练答对 ⇒ retry_correct +1 ----
+        await b.goto_ready(base + f"/practice/wrong/{qid}")
+        await b.wait_for("""!!document.querySelector('[data-retry-this]')""", timeout=40, label="详情页")
+        await b.click(f'[data-retry-this="{qid}"]')
+        await b.wait_for(
+            """location.pathname.startsWith('/practice/session/')""", timeout=40, label="重练会话"
+        )
+        await b.wait_for("""!!document.querySelector('[data-qid]')""", timeout=40, label="重练答题页")
+        await _pick_and_submit(b, right)
+        await b.wait_text("答对了", timeout=40)
+        say("  ✅ ④ 重练答对 ⇒ 页面判「答对了」")
+
+        # ---- ⑤ ★ **四个列表**都能找到它 ----
+        w2 = await _list_state_wrong(b, base)
+        need(w2["items"] == [qid], f"错题本找不到它：{w2['items']}")
+        need(
+            await b.eval(f"""!!document.querySelector('[data-retried="{qid}"]')"""),
+            "错题本里没有「已重练 ✓」",
+        )
+        # 「只看已标记」筛选（与科目筛选正交）—— 它必须仍能筛出这道题
+        await b.click("[data-marked-only]")
+        await b.wait_for(
+            f"""!!document.querySelector('[data-wrong-item="{qid}"]')""",
+            timeout=30,
+            label="只看已标记 ⇒ 仍能找到它",
+        )
+        say("  ✅ ⑤a 错题本：有它 + 「已重练 ✓」+ 「只看已标记」筛选后仍在")
+        f2 = await _collection(b, base, "favorite")
+        m2 = await _collection(b, base, "mark")
+        n2 = await _list_state(b, base)
+        need(f2["rows"] == [qid], f"收藏列表找不到它：{f2['rows']}")
+        need(m2["rows"] == [qid], f"标记列表找不到它：{m2['rows']}")
+        need(n2["rows"] == [nid], f"笔记列表找不到它：{n2['rows']}")
+        say("  ✅ ⑤b 收藏 / 标记 / 笔记 三个列表都找得到它")
+
+        # ---- ⑥ ★ 库里**四个 store** 的状态同时都对 ----
+        r1 = await _wrong_row(b, qid)
+        need(
+            r1 is not None and r1.get("retry_correct") == 1 and r1.get("wrong_count") == 1,
+            f"库里错题行不对：{r1}",
+        )
+        need(len(await _rows_in_store(b, "marks", qid)) == 1, "库里 marks 那行不对")
+        need(len(await _rows_in_store(b, "favorites", qid)) == 1, "库里 favorites 那行不对")
+        notes = await _rows_in_store(b, "notes", qid)
+        need(len(notes) == 1 and not notes[0].get("deleted_at"), f"库里 notes 那行不对：{notes}")
+        say("  ✅ ⑥ 库里四个 store 同时正确：wrong(retry=1/wrong=1) marks 1 favorites 1 notes 1（未删）")
+
+        # ---- ⑦ ★ "题不在了、记录仍在"（**可达**的构造；换题库做不到，见 `_break_backup` 抬头）----
+        await b.goto_ready(base + "/me/backup")
+        await b.send("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(dl)})
+        await b.click("[data-export]")
+        await b.wait_for("""!!document.querySelector('[data-exported]')""", timeout=40, label="导出完成")
+        src: Path | None = None
+        for _ in range(40):
+            hits = list(dl.glob("*.json"))
+            if hits:
+                src = hits[0]
+                break
+            await asyncio.sleep(0.25)
+        need(src is not None, f"没等到导出的备份（{dl}）")
+        broken = dl / "broken.json"
+        _break_backup(json.loads(src.read_text(encoding="utf-8")), broken, _LOOP_FAKE_QID)
+        await b.set_file_input("[data-import-file]", broken)
+        await b.wait_for("""!!document.querySelector('[data-confirm-block]')""", timeout=40, label="确认块")
+        need(
+            not await b.eval("""!!document.querySelector('[data-bank-mismatch]')"""),
+            "题库没换过却提示「题库不匹配」—— 指纹判据坏了",
+        )
+        await b.click("[data-confirm-import]")
+        await b.wait_for("""!!document.querySelector('[data-imported]')""", timeout=timeout, label="恢复完成")
+        w3 = await _list_state_wrong(b, base)
+        need(w3["items"] == [_LOOP_FAKE_QID], f"★ 题不在了，错题本那条却没了：{w3['items']}")
+        need(
+            await b.eval("""!!document.querySelector('[data-question-gone]')"""),
+            "★ 行还在，但没标「题目已下架」",
+        )
+        need(
+            await b.eval(
+                f"""document.querySelector('[data-wrong-item="{_LOOP_FAKE_QID}"]')
+                     .getAttribute('data-question-available') === '0'"""
+            ),
+            "★ 题不在了，`data-question-available` 却是 1",
+        )
+        need(
+            await b.eval(
+                f"""document.querySelector('[data-retry="{_LOOP_FAKE_QID}"]').disabled === true"""
+            ),
+            "★ 题不在了，「重练」按钮却仍可点",
+        )
+        say("  ✅ ⑦a 错题本：行**还在** + 标「题目已下架」+ `question_available=0` + 重练按钮禁用")
+        f3 = await _collection(b, base, "favorite")
+        m3 = await _collection(b, base, "mark")
+        need(f3["rows"] == [_LOOP_FAKE_QID], f"★ 收藏那条没了：{f3['rows']}")
+        need(m3["rows"] == [_LOOP_FAKE_QID], f"★ 标记那条没了：{m3['rows']}")
+        # ★ 收藏 / 标记**共用一套列表 UI**（只按 `kind` 切题源）⇒ 检查一次即可。
+        # ⚠️ **必须在这里查**（人还在收藏页）—— 第一版把这一步放到了 `_list_state` 之后，
+        #    那时人已经在**笔记页**，`[data-collect-row]` 根本不在 DOM 里 ⇒ 假红。
+        #    这正是刚写进 MEMORY 的那条："每一步都要**自己确立前提**，不依赖上一步把状态留在了哪"。
+        need(
+            await b.eval(
+                f"""(() => {{ const e = document.querySelector('[data-collect-row="{_LOOP_FAKE_QID}"]');"""
+                """ return !!e && e.getAttribute('data-question-available') === '0'; })()"""
+            ),
+            "★ 收藏 / 标记 列表里那条没标 `data-question-available=0`",
+        )
+        n3 = await _list_state(b, base)
+        need(len(n3["rows"]) == 1, f"★ 笔记那条没了：{n3['rows']}")
+        need(
+            await b.eval(
+                f"""(() => {{ const e = document.querySelector('[data-note-row="{n3['rows'][0]}"]');"""
+                """ return !!e && e.getAttribute('data-question-available') === '0'; })()"""
+            ),
+            "★ 笔记列表里那条没标 `data-question-available=0`",
+        )
+        say("  ✅ ⑦b 收藏 / 标记 / 笔记 三条**也还在**，且都标了「题目已下架」（约定 T）")
+        say("       ⚠️ 说明：「换**题库**」做不到这一幕 —— `importBank` 调 `wipeAll()` 清**全部** store")
+        say("          （界面也明写「这会清空你的全部数据」）⇒ `question_available=false` 无写入路径。")
 
     return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
 
@@ -1258,6 +1590,7 @@ drivers = {
     "fav": run_fav,
     "notes": run_notes,
     "wrong": run_wrong,
+    "loop": run_loop,
 }
 
 
@@ -1271,8 +1604,8 @@ def main(argv: list[str] | None = None) -> int:
         #    ★ 别靠"记得改"：**不变量 11** 会把三处对账，不一致就红
         #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`
         #       现在**遍历走查器清单**，e2e-web 与本脚本各自三处）。
-        choices=["setup", "marks", "fav", "notes", "wrong"],
-        help="走查场景：setup（导入题库）/ marks / fav（标记、收藏）/ notes（笔记）/ wrong（错题重练闭环）",
+        choices=["setup", "marks", "fav", "notes", "wrong", "loop"],
+        help="走查场景：setup（导入题库）/ marks / fav / notes / wrong（错题重练）/ loop（四态交叉）",
     )
     ap.add_argument("--url", help="已在跑的前端地址（给了就不自己起服务）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自己挑一个空闲端口")

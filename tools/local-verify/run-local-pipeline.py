@@ -740,8 +740,8 @@ def main(argv: list[str] | None = None) -> int:
         #      （`check-invariants.py::check_e2e_scenarios`）。
         #    ⚠️ 漏掉"这里"的症状：`invalid choice: '<场景>'` + **退出码 2、1 秒结束**
         #      —— 看上去像"走查没跑起来"，不像配置错。
-        choices=["setup", "marks", "fav", "notes", "wrong"],
-        help="PWA 走查场景：setup（导入题库）/ marks / fav / notes / wrong（错题重练）",
+        choices=["setup", "marks", "fav", "notes", "wrong", "loop"],
+        help="PWA 走查场景：setup / marks / fav / notes / wrong / loop（四态交叉）",
     )
     args = ap.parse_args(argv)
 
