@@ -533,6 +533,25 @@ class Pipeline:
             timeout=900,
         )
 
+    def e2e_pwa(self) -> int:
+        """个人 PWA 的浏览器走查（`tools/pwa/e2e-pwa.py`）。
+
+        ★ 与 `e2e_web` 的**根本差别**：这条分支**不建库、不起 API、不灌种子、不跑覆盖率** ——
+          PWA 是**零后端**的（数据全在浏览器 IndexedDB 里）。为它起一遍 PG 只是白等，
+          而且会让这条命令**看起来该进 CI**（它其实与 C 端走查一样，只走 `preflight`）。
+        ★ 走查器**自己起 `next dev`**（与 `probe-pwa-offline.py` 同款），管道不代管前端。
+        """
+        cmd = [
+            self.a.python,
+            str(self.repo / "tools" / "pwa" / "e2e-pwa.py"),
+            "--scenario",
+            self.a.e2e_pwa_scenario,
+        ]
+        # 起 next dev（冷启动 ~7s）+ 生成小包 + 走查：给 15 分钟冗余
+        return run(
+            cmd, HERE, self.env, f"e2e-pwa（场景 {self.a.e2e_pwa_scenario}）", timeout=900
+        )
+
     def stop_api_gracefully(self) -> None:
         """放哨兵 → 让 API 自己 cov.save() 落盘。若直接 terminate，数据文件是空的（不是报错）。"""
         if self.api is None:
@@ -705,7 +724,31 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="把走查途中关键画面截到该目录（透传给 `e2e-web.py --shots`）",
     )
+    # ---- 个人 PWA 的走查（`--e2e-pwa`）：它**零后端**，与上面那一组互不影响 ----
+    ap.add_argument(
+        "--e2e-pwa",
+        action="store_true",
+        help="跑个人 PWA 的浏览器走查（**不需要 PG / API**：PWA 是离线的；见 tools/pwa/e2e-pwa.py）",
+    )
+    ap.add_argument(
+        "--e2e-pwa-scenario",
+        default="setup",
+        # ⚠️ 这是 PWA 场景白名单的**第二份**（第一份在 `tools/pwa/e2e-pwa.py` 的 `--scenario`）。
+        #    加场景要改**三处**：① `e2e-pwa.py` 的 `--scenario` choices；② **这里**；
+        #    ③ `e2e-pwa.py` 里的 `drivers` 注册表。
+        #    ★ 别靠"记得改"：**不变量 11** 现在**遍历走查器清单**，C 端与 PWA 各自三处对账
+        #      （`check-invariants.py::check_e2e_scenarios`）。
+        #    ⚠️ 漏掉"这里"的症状：`invalid choice: '<场景>'` + **退出码 2、1 秒结束**
+        #      —— 看上去像"走查没跑起来"，不像配置错。
+        choices=["setup"],
+        help="PWA 走查场景：setup（导入题库 + 对账 + 换题库二次确认）",
+    )
     args = ap.parse_args(argv)
+
+    # ★ 两个走查的**被测对象完全不同**（一个要有后端的 C 端、一个是零后端的 PWA），
+    #   同时给 ⇒ "谁赢"取决于代码顺序 —— 那是**含糊**，不是"都跑"。
+    if args.e2e_web and args.e2e_pwa:
+        raise SystemExit("--e2e-web 与 --e2e-pwa 只能给一个（被测对象不同，同时给没有意义）")
 
     p = Pipeline(args)
     try:
@@ -714,6 +757,18 @@ def main(argv: list[str] | None = None) -> int:
         # 明细与"差几道"见 `tools/preflight.sh` 的输出和 `docs/24` §10。
         if not args.no_preflight:
             preflight(p)
+
+        # ---- ★ PWA 走查：**零后端** ⇒ 不建库、不起 API、不灌种子、不跑覆盖率 ----
+        # 数据全在浏览器 IndexedDB 里（这正是 PWA 的意义）。为它起一遍 PG 只是白等，
+        # 而且会让这条命令**看起来该进 CI**（它其实与 C 端走查一样，只走 preflight）。
+        if args.e2e_pwa:
+            rc = p.e2e_pwa()
+            say(f"e2e-pwa exit={rc} ⇒ 本轮 {'通过' if rc == 0 else '未通过'}")
+            # ⚠️ 与 `--e2e-web` 同款：走查分支**不写管道回执** —— 它换掉的就是
+            #    pytest / 覆盖率那一步，写一份"通过"的回执会让 preflight 把 ⑤⑥ 标成 📋。
+            say("（本分支不写管道回执：pytest / 覆盖率这两道本轮没跑）")
+            return rc
+
         p.start_pg()
         p.provision_db()
         if args.e2e_web:

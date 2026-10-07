@@ -399,8 +399,28 @@ async def run_setup(base: str, small: Path, small_meta: dict[str, Any], other: P
     return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
 
 
+#: ★ 场景注册表（不变量 11 的**第三处**清单）—— 名字 → 协程。
+#: 值统一签名 `(base, bank, bank_meta, other, timeout) -> dict[str, float]`（返回各段耗时），
+#: 于是**加场景不用改调度代码**（用户 2026-10-07："先推广不变量 11，再加 5 个场景"）。
+#: ★ 名字必须是纯小写字母数字 —— 门禁的 `_e2e_names()` 只认那个形状。
+drivers = {
+    "setup": run_setup,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="e2e-pwa", description=__doc__.split("\n")[0])
+    ap.add_argument(
+        "--scenario",
+        default="setup",
+        # ⚠️ 这是场景白名单的**第一处**（另两处：`run-local-pipeline.py` 的
+        #    `--e2e-pwa-scenario`、下面那个 `drivers` 注册表）。
+        #    ★ 别靠"记得改"：**不变量 11** 会把三处对账，不一致就红
+        #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`
+        #       现在**遍历走查器清单**，e2e-web 与本脚本各自三处）。
+        choices=["setup"],
+        help="走查场景：setup（导入题库 + 对账 + 换题库二次确认）",
+    )
     ap.add_argument("--url", help="已在跑的前端地址（给了就不自己起服务）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自己挑一个空闲端口")
     ap.add_argument("--bank", help="直接用这份小包（省去每次生成）")
@@ -435,18 +455,19 @@ def main(argv: list[str] | None = None) -> int:
                 proc, _ = start_pwa(port, find_node(), args.boot_timeout)
                 boot_sec = time.time() - t_boot
 
-            say("=== setup 场景 ===")
-            perf = asyncio.run(run_setup(base, small, small_meta, other, args.import_timeout))
+            say(f"=== {args.scenario} 场景 ===")
+            perf = asyncio.run(
+                drivers[args.scenario](base, small, small_meta, other, args.import_timeout)
+            )
 
         say("")
-        say("==> ✅ setup 场景通过（① 空态锚 · ② 走真 UI 导入 · ③ 对账到 IndexedDB · "
-            "④ 刷新仍在 · ⑤ 取消不删数据 + 同包分支对照）")
+        say(f"==> ✅ {args.scenario} 场景通过")
         say("")
-        say("## 三个数")
-        say(f"  · {small_meta['totals']['questions']} 题导入耗时：{perf['import_sec']:.1f}s")
-        say(f"  · setup 场景总耗时：{perf['scenario_sec']:.1f}s")
-        say("  · 本步未发现新的技术栈坑（若发现，写进这里的报告与 docs）")
-        say(f"    （附：next dev 冷启动 {boot_sec:.1f}s —— 不含在上面的场景耗时里）")
+        say("## 耗时")
+        if "import_sec" in perf:
+            say(f"  · 小包 {small_meta['totals']['questions']} 题导入：{perf['import_sec']:.1f}s")
+        say(f"  · {args.scenario} 场景总耗时：{perf['scenario_sec']:.1f}s")
+        say(f"  · next dev 冷启动：{boot_sec:.1f}s（不含在场景耗时里）")
         return 0
     except Failure as e:
         say("")

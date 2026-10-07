@@ -1190,59 +1190,102 @@ def check_copy_manifest() -> None:
             bad(f"{manifest_rel} 不是最新的：{p.stdout.strip() or p.stderr.strip()}")
 
 
-def check_e2e_scenarios() -> None:
-    print("[11] E2E 场景清单**三处必须一致**（不变量 11）—— 加场景漏一处，会静默或直接跑不起来")
+#: ★ 走查器清单（不变量 11）—— **遍历它**，而不是给每个走查器复制一份检查。
+#: 每项 =（走查器文件, 管道里它那个场景参数的名字, 管道里「需要题库」常量名 or None）。
+#:
+#: ★★ 为什么管道侧要用**参数名当锚点**：管道里现在有**两处** `choices=[...]`
+#:    （`--e2e-scenario` 与 `--e2e-pwa-scenario`）。照旧用 `re.search` 抓"第一处"的话，
+#:    两个走查器**都会拿到 C 端那一份** ⇒ e2e-pwa 被拿去和 C 端清单比 ⇒ **永远红**
+#:    （实测：差集 9 项）。而"永远红"的下场通常不是"查清楚"，是**被顺手放宽掉** ——
+#:    所以这里要真锚点：从参数名往后找，每个走查器读到自己那一份。
+_E2E_WALKERS: list[tuple[str, str, str | None]] = [
+    ("tools/local-verify/e2e-web.py", "--e2e-scenario", "SCENARIOS_NEEDING_QUESTIONS"),
+    # ★ 第 4 处（需题库清单）对 PWA **不存在**：PWA 的题库是"导入小包"，由走查器自己管，
+    #   管道不灌（它零后端）。写 `None` 而不是造一份空清单 —— 空清单会**假装查过了**。
+    ("tools/pwa/e2e-pwa.py", "--e2e-pwa-scenario", None),
+]
 
-    web_rel = "tools/local-verify/e2e-web.py"
-    pipe_rel = "tools/local-verify/run-local-pipeline.py"
-    web = (REPO / web_rel).read_text(encoding="utf-8")
+_E2E_PIPE_REL = "tools/local-verify/run-local-pipeline.py"
+
+
+def _choices_after(text: str, anchor: str) -> set[str]:
+    """从 `anchor` **之后**找第一处 `choices=[...]`，取场景名。读不到返**空集合**。"""
+    i = text.find(anchor)
+    if i < 0:
+        return set()
+    m = _E2E_CHOICES_RE.search(text[i:])
+    return _e2e_names(m.group(1)) if m else set()
+
+
+def check_e2e_scenarios() -> None:
+    print("[11] E2E 场景清单：**每个走查器各自三处一致**（不变量 11）")
+    pipe_rel = _E2E_PIPE_REL
     pipe = (REPO / pipe_rel).read_text(encoding="utf-8")
 
-    m_web = _E2E_CHOICES_RE.search(web)
-    m_pipe = _E2E_CHOICES_RE.search(pipe)
-    m_need = _E2E_NEED_Q_RE.search(pipe)
-    if m_web is None or m_pipe is None or m_need is None:
-        bad("读不到场景清单（三处之一）—— 本检查会**静默变成假绿**，故直接失败")
-        return
-    try:
-        registry = _e2e_registry(web)
-    except ValueError:
-        bad(f"`{web_rel}` 里找不到 `drivers = {{` —— 注册表被改名或删掉了")
-        return
-
-    want = _e2e_names(m_web.group(1))
-    if not want:
-        bad(f"`{web_rel}` 的 `--scenario` choices 解析出了**空集合** —— 判据形状变了")
-        return
-
     problems: list[str] = []
-    diff_pipe = _e2e_names(m_pipe.group(1)) ^ want
-    if diff_pipe:
-        problems.append(
-            f"`{pipe_rel}` 的 `--e2e-scenario` choices 与 `{web_rel}` 不同：{sorted(diff_pipe)}"
-        )
-    diff_reg = registry ^ want
-    if diff_reg:
-        problems.append(f"`drivers` 注册表与 choices 不同：{sorted(diff_reg)}")
-    extra_need = _e2e_names(m_need.group(1)) - want
-    if extra_need:
-        problems.append(f"`SCENARIOS_NEEDING_QUESTIONS` 里有 choices 之外的场景：{sorted(extra_need)}")
+    reports: list[str] = []
+    for walker_rel, pipe_anchor, need_name in _E2E_WALKERS:
+        short = walker_rel.rsplit("/", 1)[-1]
+        walker = (REPO / walker_rel).read_text(encoding="utf-8")
+
+        # ① 走查器自己的 `--scenario` choices
+        want = _choices_after(walker, "--scenario")
+        if not want:
+            problems.append(
+                f"`{walker_rel}` 读不到 `--scenario` 的 choices（判据形状变了 ⇒ 本检查会**假绿**）"
+            )
+            continue
+        # ③ 走查器里的 `drivers` 注册表
+        try:
+            registry = _e2e_registry(walker)
+        except ValueError:
+            problems.append(f"`{walker_rel}` 里找不到 `drivers = {{` —— 注册表被改名或删掉了")
+            continue
+        # ② 管道里那一份
+        got_pipe = _choices_after(pipe, pipe_anchor)
+        if not got_pipe:
+            problems.append(f"`{pipe_rel}` 读不到 `{pipe_anchor}` 的 choices")
+            continue
+
+        if registry ^ want:
+            problems.append(
+                f"`{short}` 的 `drivers` 注册表与 choices 不同：{sorted(registry ^ want)}"
+            )
+        if got_pipe ^ want:
+            problems.append(
+                f"`{pipe_rel}` 的 `{pipe_anchor}` choices 与 `{short}` 不同：{sorted(got_pipe ^ want)}"
+            )
+
+        # ④（可选）「需要题库」清单 —— 只有 C 端有
+        if need_name is None:
+            # ★ 三态纪律：**"没有这一处"要说出来**，否则它看起来像"查过了、都对"
+            note = "；第 4 处（需题库清单）本走查器**没有**（PWA 的题库由走查器导入小包，管道不灌）"
+        else:
+            m_need = _E2E_NEED_Q_RE.search(pipe)
+            if m_need is None:
+                problems.append(f"`{pipe_rel}` 读不到 `{need_name}`")
+                continue
+            extra_need = _e2e_names(m_need.group(1)) - want
+            if extra_need:
+                problems.append(
+                    f"`{need_name}` 里有 choices 之外的场景：{sorted(extra_need)}"
+                )
+            note = f"，其中 {len(_e2e_names(m_need.group(1)))} 个要灌题库"
+        reports.append(f"{short} {len(want)} 个（{'/'.join(sorted(want))}）{note}")
 
     if problems:
         bad("；".join(problems))
         print(
-            "      ⇒ 加一个 E2E 场景要同时改 **3 处**（+ 可选第 4 处）：\n"
-            f"        ① `{web_rel}` 的 `--scenario` choices\n"
-            f"        ② `{pipe_rel}` 的 `--e2e-scenario` choices\n"
-            f"        ③ `{web_rel}` 的 `drivers` 注册表\n"
-            "        ④ `SCENARIOS_NEEDING_QUESTIONS`（只加「需要灌题库」的场景）\n"
+            "      ⇒ 加一个 E2E 场景要同时改**该走查器自己的 3 处**（+ 可选第 4 处）：\n"
+            "        ① 走查器的 `--scenario` choices\n"
+            f"        ② `{pipe_rel}` 里它那个 `--e2e-*-scenario` 的 choices\n"
+            "        ③ 走查器里的 `drivers` 注册表\n"
+            "        ④（只有 C 端有）`SCENARIOS_NEEDING_QUESTIONS`\n"
             "      ★ 漏 ② 的症状：`invalid choice: '<场景>'` + **退出码 2、1 秒结束** ——\n"
             "        看上去像「走查没跑起来」，**不像配置错**（实测踩过两次：p2b1 / p2c3）。"
         )
         return
-
-    need_n = len(_e2e_names(m_need.group(1)))
-    ok(f"{len(want)} 个场景**三处一致**（{'/'.join(sorted(want))}）；其中 {need_n} 个要灌题库")
+    ok("两个走查器各自三处一致 —— " + " ｜ ".join(reports))
 
 
 def main() -> int:
