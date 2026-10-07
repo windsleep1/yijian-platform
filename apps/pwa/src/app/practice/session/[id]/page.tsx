@@ -627,6 +627,7 @@ export default function PracticeSessionPage() {
               {revealed === null ? (
                 <button
                   type="button"
+                  data-submit
                   disabled={!canSubmit}
                   onClick={() => void submit()}
                   className="mt-6 min-h-touch w-full rounded-xl bg-brand text-center font-medium text-white disabled:opacity-45"
