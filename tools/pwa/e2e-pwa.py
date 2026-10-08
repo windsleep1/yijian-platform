@@ -1580,6 +1580,112 @@ async def run_loop(
     return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
 
 
+# ------------------------------------------------------- 场景：loopsession
+
+
+async def run_loopsession(
+    base: str, small: Path, small_meta: dict[str, Any], other: Path, timeout: int
+) -> dict[str, float]:
+    """`loopsession` 场景：**跨会话一致** —— 练习 A 标的题，练习 B 的**同一道题**也显示已标记。
+
+    ★ 判据出处：`docs/33` §6 判据 6；`docs/34` §4.1 把它记成"漏做"，本场景补上。
+      C 端对这条用的是**后端**用例（`apps/api/tests/test_c_end_flags.py::test_mark_is_cross_session…`）；
+      PWA 零后端 ⇒ 只能在**浏览器层**验 —— 本场景就是它的对应物。
+
+    ★★ **判据形状照抄 C 端那条**（这是关键，别改）：**先把两个会话都建好**，
+      在**会话 B** 里断"本来是 0" → 在**会话 A** 里标记 → **回会话 B** 断"变成 1"。
+      ⚠️ 只在 B 里断一次 1 是**不够**的：那时"跨会话真的通了"与"这个实现给所有题都显示已标记"
+        **在单次读上长得一模一样**；只有**同一条路径上的 0 → 1** 才把这两种解释分开
+        （= 用户说的"会话 B 里先断本来是 0，再断变成 1"）。
+
+    ★ **为什么两个会话必含同一题**：挑「可判分题数 ≤ 10」的章节（页面写死 `SESSION_SIZE = 10`）
+      ⇒ **整章都会进会话**（与 `wrong` ⑧ 同一个构造，不是新技巧）；且两个会话都**一题未答**
+      ⇒ 抽题顺序（"没做过的在前" + 按 id）一致 ⇒ 落点是同一道题。落点对不对用
+      `_back_to_session` 断言（它**自己确立前提**，失败了就明确报"前提没了"，不静默通过）。
+
+    ★ 本场景**只验这一件事**（用户 2026-10-07："不要做成综合大场景"）。
+    """
+    cdp = _load("cdp_browser", CDP_BROWSER)
+    t0 = time.time()
+    async with cdp.Browser(mobile=True, width=375, height=667) as b:
+        import_sec = await _ensure_bank(b, base, small, small_meta, timeout)
+        pack = json.loads(small.read_text(encoding="utf-8"))
+        catalog = _catalog(small)
+        pick = _small_chapter(pack, 10)
+        need(pick is not None, "找不到「可判分题数 ≤ 10」的章节 —— 本场景的构造前提没了")
+        si, ci = pick
+
+        # ---- 先建**两个**会话（顺序不能反：锚要在"标记"发生**之前**取到）----
+        path_a = await _enter_session_at(b, base, si, ci)
+        qid = await b.eval("""document.querySelector('[data-qid]').getAttribute('data-qid')""")
+        need(qid in catalog, f"当前题号 {qid} 不在小包里 —— 库里的题和小包对不上？")
+        path_b = await _enter_session_at(b, base, si, ci)
+        need(
+            path_b != path_a,
+            f"两次进入同一章节拿到的是**同一个** session（{path_a}）—— 那不叫跨会话，判据失效",
+        )
+        # ★ 会话 B 的落点必须**就是** qid —— 否则"两个会话含同一题"这个前提不成立。
+        await _back_to_session(b, base, path_b, qid)
+        sid_a, sid_b = path_a.rsplit("/", 1)[-1][:8], path_b.rsplit("/", 1)[-1][:8]
+        say(f"  · 两个会话已就位：A={sid_a}… ｜ B={sid_b}…（同一章、都含同一道题 {qid}）")
+
+        # ---- ① ★ 可证伪锚（**在会话 B 里**、"标记"之前）：本来是 0 ----
+        need(
+            await _flag(b, "mark") == "0",
+            f"会话 B：题目 {qid} 的「标记」按钮**本来**不是 0 —— 锚不成立，"
+            "后面那条「变成 1」就不说明问题",
+        )
+        need(
+            await _rows_in_store(b, "marks", qid) == [],
+            f"会话 B：库里本来就有 {qid} 的标记行 —— 锚不成立",
+        )
+        say(f"  ✅ ① 锚（会话 B，变化之前）：题目 {qid} 的标记 = 0（按钮 + 库都是）")
+
+        # ---- ② 在**会话 A** 里标记 ⇒ 1 ----
+        await _back_to_session(b, base, path_a, qid)
+        was = await _flag(b, "mark")
+        need(was == "0", f"会话 A：标记按钮本来不是 0（{was!r}）")
+        await b.click("[data-flag-mark]")
+        await _wait_flag(b, "mark", "1")
+        need(
+            len(await _rows_in_store(b, "marks", qid)) == 1,
+            "点了标记，按钮翻了 1，但**库里没有那一行**",
+        )
+        say(f"  ✅ ② 在**会话 A** 里标记 {qid} ⇒ 按钮 1、库里 1 行")
+
+        # ---- ③ ★★ 核心判据：**回会话 B**，同一道题也是 1 ----
+        await _back_to_session(b, base, path_b, qid)
+        need(
+            await _flag(b, "mark") == "1",
+            f"★ **跨会话不一致**：会话 A 标记的题（{qid}），在会话 B 里显示未标记 —— "
+            "标记很可能被存成了**会话级**的（`practice_items.marked` 那一族），而不是题目级",
+        )
+        need(
+            len(await _rows_in_store(b, "marks", qid)) == 1,
+            "会话 B：按钮说已标记，但**库里那行不在**（UI 与库两层不一致）",
+        )
+        say(f"  ✅ ③ ★ 跨会话一致：会话 A 标的 {qid}，在**另一个会话**（B={sid_b}…）里也是已标记")
+
+        # ---- ④ 反向：在**会话 B** 取消 ⇒ 0 ----
+        await b.click("[data-flag-mark]")
+        await _wait_flag(b, "mark", "0")
+        need(
+            await _rows_in_store(b, "marks", qid) == [],
+            "在会话 B 里取消了标记，**库里那行还在**",
+        )
+        say("  ✅ ④ 反向（在会话 B 取消）：按钮 0、库里的行也没了")
+
+        # ---- ⑤ 反方向同样跨会话：回**会话 A**，也是 0 ----
+        await _back_to_session(b, base, path_a, qid)
+        need(
+            await _flag(b, "mark") == "0",
+            "★ 在会话 B 取消了标记，回到会话 A 却**仍显示已标记** —— 反方向也不跨会话",
+        )
+        say(f"  ✅ ⑤ 反向也跨会话：会话 B 的取消，在会话 A（{sid_a}…）里同样看得到（0）")
+
+    return {"import_sec": import_sec, "scenario_sec": time.time() - t0}
+
+
 #: ★ 场景注册表（不变量 11 的**第三处**清单）—— 名字 → 协程。
 #: 值统一签名 `(base, bank, bank_meta, other, timeout) -> dict[str, float]`（返回各段耗时），
 #: 于是**加场景不用改调度代码**（用户 2026-10-07："先推广不变量 11，再加 5 个场景"）。
@@ -1591,6 +1697,7 @@ drivers = {
     "notes": run_notes,
     "wrong": run_wrong,
     "loop": run_loop,
+    "loopsession": run_loopsession,
 }
 
 
@@ -1604,8 +1711,11 @@ def main(argv: list[str] | None = None) -> int:
         #    ★ 别靠"记得改"：**不变量 11** 会把三处对账，不一致就红
         #      （`tools/local-verify/check-invariants.py::check_e2e_scenarios`
         #       现在**遍历走查器清单**，e2e-web 与本脚本各自三处）。
-        choices=["setup", "marks", "fav", "notes", "wrong", "loop"],
-        help="走查场景：setup（导入题库）/ marks / fav / notes / wrong（错题重练）/ loop（四态交叉）",
+        choices=["setup", "marks", "fav", "notes", "wrong", "loop", "loopsession"],
+        help=(
+            "走查场景：setup（导入题库）/ marks / fav / notes / wrong（错题重练）/ "
+            "loop（四态交叉）/ loopsession（跨会话一致）"
+        ),
     )
     ap.add_argument("--url", help="已在跑的前端地址（给了就不自己起服务）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自己挑一个空闲端口")
