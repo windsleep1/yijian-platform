@@ -19,6 +19,10 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 
     python tools/local-verify/mem-update.py --status       # 只报数（当前字节 / 余量 / 批状态）
 
+    # ★ 指针审计（元规则 2026-10-01）：主文件里每条 `→ detail` 指针的**锚**必须在 detail 里
+    #   能逐字（归一格式符号后）grep 到。三态：✅通过 / ❌空指针 / ⚠️缺锚，有后两者即非 0。
+    python tools/local-verify/mem-update.py --check-pointers
+
     # ★ 逐对打印**字节差**（"别估、量"的可观测形式）
     # ★★ **约束 8：有 --add 的批必须先跑这一步**（它会写下回执）；没量过就不许写盘。
     python tools/local-verify/mem-update.py --measure \
@@ -91,6 +95,14 @@ Q 规则已经写得很清楚，**但连续两批都滑成"先加后减"**（202
 - **`--sink-inplace "<理由>"` 不做任何验证**（工具无法判断"压缩后内容还在不在"）：它只是一个
   **留痕的声明** —— 所以**必须写理由**（空理由被拒），脚本会**大声打印**出来，
   让人一眼看见"这批减法没走 detail"。
+- ★ **`--check-pointers` 只认"锚"，不认"内容对不对"**：它回答的是"**这条指针指的地方在不在**"，
+  不是"那里的内容是否完整/正确"。锚有三种来源（强→弱）：`（→ detail: 短语）` ｜ 行内 `坑 N`
+  （**detail 与坑文档两边都查** —— 主文件抬头写着「坑 → 坑文档」）｜ 行内**代码样 token**
+  （`A-Za-z0-9_./:<>()=+-`，≥6 字，**任一**命中即可）。
+  ★ **不存在"从行文里自动抽中文短语"这一档**：实测 `每一步独立确立…` 在 detail 里其实有
+  （写成 `每一步**都要**独立确立…`）⇒ 逐字比**假红**；而短词又到处都中 ⇒ **假绿**。
+  ⇒ 想被检查，就把锚**写出来**；**没有锚 = 报「缺锚」**（本检查对它什么都没说，
+  而"没说什么"与"没问题"在输出上长得一样 —— 不能假装查过了）。
 - ★ `--self-test`：**证明上面这些判据自己会响**（正例 + 反例 + 边界各一条）。
   > 依据：硬约定 J —— **判据本身也要能被证伪**；不能构造出"它应该报相反结果"的场景，它就不是判据。
 
@@ -108,9 +120,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import re
 import shutil
 import sys
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -127,7 +142,33 @@ DUP_MIN_LEN = (
 )
 
 
+REPO = Path(__file__).resolve().parents[2]
 DETAIL = MEM.parent / "MEMORY-detail.md"
+#: 主文件抬头写着「**坑** → `apps/admin/docs/B端联调坑.md`」（与「案例 → detail」并列）
+#: ⇒ 「坑 N」这种锚要**两边都查**，只查 detail 会把一条**有落着**的指针误判成空的（实测 `坑 99`）。
+PITFALL_DOC = REPO / "apps" / "admin" / "docs" / "B端联调坑.md"
+
+#: `--check-pointers` 用：主文件里"指向 detail"的指针。
+CHECK_POINTER_RE = re.compile(r"[→⇒]\s*detail")
+#: ★ 锚的三种来源（**强 → 弱**）。判据要能机械回答"这条指针指向的内容在不在 detail 里"，
+#:   而**从行文里自动抽中文短语是不可靠的**（实测：`每一步独立确立…` 在 detail 里其实有，
+#:   只是写成 `每一步**都要**独立确立…` ⇒ 逐字比会**假红**；而短词又到处都中 ⇒ **假绿**）。
+#:   ⇒ 只认这三种**显式**锚；一个都没有 ⇒ 报「缺锚」（不能假装查过了）。
+CHECK_ANCHOR_RE = re.compile(r"[→⇒]\s*detail\s*[:：]\s*(\S.*)")
+#: 显式锚的**收尾**：从右括号 / 书名号处截断（锚写在 `（→ detail: 短语）` 里）。
+CHECK_ANCHOR_END_RE = re.compile(r"[）」』)]")
+CHECK_PITFALL_RE = re.compile(r"坑\s*(\d+)")
+#: ⚠️ 2026-10-08 实测踩到：最初写成 `` `([^`]{6,})` `` ⇒ 它会**横跨**两个反引号之间的**散文**
+#:   （`[^`]` 允许中文/空格）⇒ L68 抽出来的是 `；⚠️补丁锚点按CRLF⇒detail。…` 这种**假锚**，
+#:   于是两条**有落着**的指针被报成空指针（假红）。⇒ 只认**代码样 token**（无空白、无中文）。
+CHECK_CODE_RE = re.compile(r"`([A-Za-z0-9_./:<>()=+-]{6,})`")
+#: ★ **最小归一**：只去**格式符号**（强调 / 行内代码 / 空白），**不做同义替换 / 不抽词**。
+#:   去格式是必要的（否则 `**兜底要出声**` 与 `兜底要出声` 会被当成两回事）；
+#:   再多做一步就变成"判定工具自己把要判的东西归一掉"（硬约定：判字节一致要用字节级）。
+CHECK_NORM_RE = re.compile(r"[*`\s\u00a0]")
+#: 显式锚 / 缺锚以外的锚至少要这么长（太短的代码片段在所有文档里都能命中 ⇒ 等于没查）。
+CHECK_ANCHOR_MIN = 6
+
 #: ★ **单段** `--sink` 删掉 ≥ 这么多字节 ⇒ 那是「删掉了一段内容」（≈ 一条规则 / 一段判据
 #:   的量级），不是「换个说法」⇒ 必须用 `--sink-to` 声明它去了 detail 的哪里
 #:   （或用 `--sink-inplace "<理由>"` 明确声明这批不是下沉）。
@@ -192,6 +233,107 @@ def add_after_line(text: str, anchor: str) -> int:
 
 def _detail_body() -> str:
     return DETAIL.read_text(encoding="utf-8") if DETAIL.exists() else ""
+
+
+def _norm(s: str) -> str:
+    """**最小归一**：只去格式符号（见 `CHECK_NORM_RE` 的注释）。"""
+    return CHECK_NORM_RE.sub("", s)
+
+
+def _anchor_of(line: str, ptr_start: int) -> tuple[str, list[str]] | tuple[None, None]:
+    """从指针所在行解析出**锚候选**（按特异性从高到低）；解析不到 ⇒ `(None, None)`。
+
+    顺序（强 → 弱）：`显式锚` → `坑号` → `代码标识符`。
+    `代码标识符` 返回**全部**候选（不是最长的那个）：最长的不一定是最相关的
+    （实测 L74 最长是 `check-invariants.sh`，而 detail 里落着的其实是 `REQUIRED_GATES`）
+    ⇒ 判据取"**任一**候选命中"，并把命中的那个打印出来（可审计）。
+    """
+    m = CHECK_ANCHOR_RE.match(line[ptr_start:])
+    if m:
+        anchor = CHECK_ANCHOR_END_RE.split(m.group(1), 1)[0].strip(" 「」『』\"'")
+        if len(anchor) >= 2:
+            return "显式锚", [anchor]
+    m = CHECK_PITFALL_RE.search(line[:ptr_start])
+    if m:
+        return "坑号", [f"坑 {m.group(1)}"]
+    codes = sorted({c for c in CHECK_CODE_RE.findall(line) if len(c) >= CHECK_ANCHOR_MIN}, key=len, reverse=True)
+    if codes:
+        return "代码标识符", codes
+    return None, None
+
+
+def check_pointers(
+    mem_text: str | None = None,
+    detail_text: str | None = None,
+    pitfall_text: str | None = None,
+) -> int:
+    """指针审计：**「凡是写 `→ detail` 的，detail 里就要能 grep 到」**（元规则 2026-10-01）。
+
+    为什么单列一条：**指针指向空处时不会报错** —— 主文件那一行读起来一样完整，
+    只有真去 detail 找才发现那儿没有内容。同族：`--sink-to` 只回答"我声明的那个短语在不在"。
+
+    三态（**缺一即失败**）：
+      ✅ 通过 ｜ ❌ **空指针**（有锚，锚在 detail 里查无）｜ ⚠️ **缺锚**（无法机械检查）
+    ★ 为什么"缺锚"也要算失败：**不能假装查过了** —— 无锚的指针本检查对它**什么都没说**，
+      而"没说什么"与"没问题"在输出上长得一样。
+
+    ★ 锚的来源是**先显式后推断**（见 `_anchor_of`）：从行文里自动抽中文短语**不可靠** ——
+      实测 `每一步独立确立…` 其实在 detail 里（写成 `每一步**都要**独立确立…`）⇒ 逐字比会**假红**；
+      而短词又到处都中 ⇒ **假绿**。而"会误报的检查只能做诊断、不能做门禁"。
+      ⇒ 想被检查，就把锚**写出来**（`（→ detail: 短语）`）。
+    """
+    mem = MEM.read_text(encoding="utf-8") if mem_text is None else mem_text
+    det = _detail_body() if detail_text is None else detail_text
+    pit = PITFALL_DOC.read_text(encoding="utf-8") if pitfall_text is None else pitfall_text
+    det_n, pit_n = _norm(det), _norm(pit)
+
+    rows: list[tuple[int, str, str, str]] = []  # (line_no, status, kind, anchor)
+    for ln, line in enumerate(mem.splitlines(), 1):
+        for m in CHECK_POINTER_RE.finditer(line):
+            kind, cands = _anchor_of(line, m.start())
+            if kind is None or cands is None:
+                rows.append((ln, "缺锚", "—", "—"))
+                continue
+            hit = _anchor_hits(kind, cands, det_n, pit_n, pit)
+            shown = hit if (kind == "代码标识符" and hit) else cands[0]
+            rows.append((ln, "通过" if hit else "空指针", kind, str(shown)))
+
+    bad = [r for r in rows if r[1] != "通过"]
+    ok_n = len(rows) - len(bad)
+    say(f"=== 指针审计（`→ detail` 共 {len(rows)} 条）===")
+    for ln, status, kind, anchor in rows:
+        mark = {"通过": "✅", "空指针": "❌", "缺锚": "⚠️"}[status]
+        say(f"  {mark} L{ln:<4} [{kind:<5}] {anchor[:44]}")
+    say("")
+    empty = [r for r in rows if r[1] == "空指针"]
+    miss = [r for r in rows if r[1] == "缺锚"]
+    say(f"  通过 {ok_n} ｜ ❌ 空指针 {len(empty)} ｜ ⚠️ 缺锚 {len(miss)}")
+    if empty:
+        say(f"  ⇒ 空指针的处置是**补 detail**（不是删掉指针）：{[r[0] for r in empty]}")
+    if miss:
+        say(
+            f"  ⇒ 缺锚的处置是**给指针补锚**：`（→ detail: <detail 里逐字存在的短语>）`。"
+            f"行号：{[r[0] for r in miss]}"
+        )
+    return 0 if not bad else 1
+
+
+def _anchor_hits(kind: str, cands: list[str], det_n: str, pit_n: str, pit_raw: str) -> str:
+    """锚在不在它该在的地方。返回**命中的那个锚**（`""` = 一个都没命中）。
+
+    ★ `坑号` 要**两边都查**（主文件抬头：坑 → 坑文档）：实测 `坑 99` 差一步就被误判成空的。
+    ★ `代码标识符` 取"**任一**候选命中"（见 `_anchor_of` 的注释）。
+    """
+    if kind == "坑号":
+        key = _norm(cands[0])
+        n = cands[0].split()[-1]
+        if key in det_n or key in pit_n or re.search(rf"^#+ *{n}[.、]", pit_raw, re.M):
+            return cands[0]
+        return ""
+    for c in cands:
+        if _norm(c) in det_n:
+            return c
+    return ""
 
 
 def verify_sink_destinations(
@@ -531,6 +673,46 @@ def self_test() -> int:
         print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
         bad += 0 if ok else 1
 
+    # ---------- `--check-pointers`：指针必须**能被机械检查** --------------
+    # 用户 2026-10-08：「塞一条假指针（描述写 xxyyzz123，detail 里没有）⇒ 必须红」。
+    # ★ 全部**喂文本**（不读真 MEMORY.md）⇒ 自检不依赖真实文件内容，换个仓库也照样跑。
+    def _ptr_rc(mem: str, detail: str = "", pit: str = "") -> int:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            return check_pointers(mem_text=mem, detail_text=detail, pitfall_text=pit)
+
+    pointer_cases: list[tuple[str, bool, bool]] = [
+        (
+            "25) 指针审计：显式锚在 detail 里查无 ⇒ 红（空指针）",
+            _ptr_rc("x（→ detail: xxyyzz123）。\n", "无关内容\n") != 0,
+            True,
+        ),
+        (
+            "26) 指针审计：**没有锚** ⇒ 红（无锚 = 本检查对它什么都没说，不能假装查过了）",
+            _ptr_rc("- 某规则（→ detail）。\n", "无关内容\n") != 0,
+            True,
+        ),
+        (
+            "27) 指针审计**对照**：锚确实存在 ⇒ 绿（证明不是「凡指针就红」）",
+            _ptr_rc("- 某规则（→ detail: 越界三判据）。\n", "这里是 越界三判据 的完整版\n") == 0,
+            True,
+        ),
+        (
+            "28) 指针审计：坑号**两边都查**（坑文档里有 `## N.` 就算有落着）",
+            _ptr_rc("- 某规则（坑 99 → detail）。\n", "无关\n", "## 99. 某个坑\n") == 0,
+            True,
+        ),
+        (
+            "29) 指针审计：坑号指向不存在的坑 ⇒ 红（成对：坑号也要能被证伪）",
+            _ptr_rc("- 某规则（坑 99999 → detail）。\n", "无关\n", "## 99. 某个坑\n") != 0,
+            True,
+        ),
+    ]
+    for name, got, want in pointer_cases:
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}（got={got}）")
+        bad += 0 if ok else 1
+
     print(f"[mem-update --self-test] {'ALL PASSED' if bad == 0 else f'{bad} CHECK(S) FAILED'}")
     return 0 if bad == 0 else 1
 
@@ -660,11 +842,19 @@ def main() -> int:
         help="预演：一次报出**每个**锚点匹配几次（不写文件）—— 锚点写错时不必一轮一轮试",
     )
     ap.add_argument("--self-test", action="store_true", help="证明判据自己会响（不碰 MEMORY.md）")
+    ap.add_argument(
+        "--check-pointers",
+        action="store_true",
+        help="审计主文件里每条 `→ detail` 指针（三态：通过 / 空指针 / 缺锚；有后两者即非 0）",
+    )
     ap.add_argument("--force-end", action="store_true", help="放弃本批（保留当前内容，删状态）")
     args = ap.parse_args()
 
     if args.self_test:
         return self_test()
+
+    if args.check_pointers:
+        return check_pointers()
 
     if not MEM.exists():
         say(f"✗ 找不到 {MEM}")
