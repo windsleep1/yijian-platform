@@ -228,7 +228,7 @@ yijian-platform/
 │   │       └─ api/v1/                # health / auth / users / practice / subjects
 │   │                                 #   / admin_users / admin_rbac / admin_audit / admin_chapters
 │   │                                 #   / admin_questions / admin_imports / admin_exams / admin_stats
-│   │                                 #   （13 个模块，共 67 个接口）
+│   │                                 #   （13 个模块，共 77 个接口）
 │   ├─ admin/                         # 管理后台（Next.js 14，Batch 3–7）
 │       ├─ .eslintrc.cjs              # ESLint 配置：@typescript-eslint 基础集 + react-hooks
 │       │                             #   （规则暂全为 warn，第二步提为 error）
