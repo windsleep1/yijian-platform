@@ -132,13 +132,15 @@ def main() -> int:
 
             bid, d = upload_validate(client, H, "wrong-100.csv", wrong)
             errs = d["error_report"]["errors"]
+            # ★ `newline="\n"` 必须有：这是 **`docs/samples/` 里的仓库文件**（被 git 跟踪），
+            #   文本模式在 Windows 会写成 CRLF ⇒ 工作区变脏（`git ls-files --eol` 会报 `w/crlf`）。
             (SAMPLES / "batch5-error-report.json").write_text(
                 json.dumps(
                     {"_note": "Batch 5 验收标准 ① 的错误报告样例；对应文件 batch5-wrong-file.csv",
                      "_request": f"POST /api/v1/admin/imports/{bid}/validate",
                      "batch_id": str(bid), "response": {
                          "code": 0, "message": "校验完成，未写入任何题目", "data": d}},
-                    ensure_ascii=False, indent=2), encoding="utf-8")
+                    ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
 
             print(f"校验结果 total={d['total_rows']} success={d['success_rows']} "
                   f"failed={d['failed_rows']} total_errors={d['error_report']['total_errors']}")

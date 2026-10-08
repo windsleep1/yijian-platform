@@ -240,7 +240,8 @@ def main() -> int:
             print(f"{i}. {name}")
         return 0
 
-    original = SERVICE.read_text(encoding="utf-8")
+    original_bytes = SERVICE.read_bytes()  # ★ 字节级：**行尾也算内容**（下面 3 处复核用它）
+    original = SERVICE.read_text(encoding="utf-8")  # 文本级：锚点匹配用（universal newlines 会把 CRLF 归一）
     backup = TMP / "mutate-review-question_service.py.bak"
     shutil.copy2(SERVICE, backup)  # ← 文件备份还原（不用 git checkout --）
     say(f"已备份 {SERVICE.name} → {backup.name}")
@@ -298,10 +299,14 @@ def main() -> int:
                 results.append((name, "未应用"))
                 continue
             mutated = original.replace(old, new, 1)
-            SERVICE.write_text(mutated, encoding="utf-8")
+            # ★ `newline=""` 必须有：文本模式在 Windows 会把 `\n` 翻成 `\r\n` ⇒ 把**仓库文件**写脏
+            #   （2026-10-07 实测：这个文件正是 `git ls-files --eol` 里 12 个 `w/crlf` 之一）。
+            SERVICE.write_text(mutated, encoding="utf-8", newline="")
 
             # K2：读回文件，确认变异真的写进去了（否则"没打上去"会被读成"存活"）
-            if SERVICE.read_text(encoding="utf-8") == original:
+            # ★★ 用**字节**比：文本级 `read_text` 会把 CRLF 归一成 LF ⇒ 看不出行尾差异
+            #    （"判定工具不能自己把要判的东西归一掉"）。
+            if SERVICE.read_bytes() == original_bytes:
                 say("  文件内容未变 → 记为**未应用**")
                 results.append((name, "未应用"))
                 continue
@@ -314,8 +319,8 @@ def main() -> int:
                 stop_api(api)
                 # 每轮结束立刻还原，缩小"仓库处于变异态"的窗口
                 shutil.copy2(backup, SERVICE)
-                if SERVICE.read_text(encoding="utf-8") != original:
-                    raise SystemExit(f"还原失败：{SERVICE.name} 没回到原样，请手动处理！")
+                if SERVICE.read_bytes() != original_bytes:
+                    raise SystemExit(f"还原失败：{SERVICE.name} 没回到原样（**字节级**比较），请手动处理！")
 
             if problem:
                 # ⚠️ 这一轮**根本没跑** → 不能读成"存活"（那是把"没打上去"当成"打不动"）
@@ -332,7 +337,7 @@ def main() -> int:
         )
         say("PG 已停")
 
-    restored = SERVICE.read_text(encoding="utf-8") == original
+    restored = SERVICE.read_bytes() == original_bytes  # ★ 字节级（行尾差异也算"没还原"）
     say("")
     say("================ 结果 ================")
     for name, verdict in results:
