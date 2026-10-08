@@ -741,7 +741,10 @@ def main(argv: list[str] | None = None) -> int:
         #    ⚠️ 漏掉"这里"的症状：`invalid choice: '<场景>'` + **退出码 2、1 秒结束**
         #      —— 看上去像"走查没跑起来"，不像配置错。
         choices=["setup", "marks", "fav", "notes", "wrong", "loop", "loopsession"],
-        help="PWA 走查场景：setup / marks / fav / notes / wrong / loop（四态交叉）",
+        help=(
+            "PWA 走查场景：setup（导入题库）/ marks / fav / notes / wrong（错题重练）/ "
+            "loop（四态交叉）/ loopsession（跨会话一致）"
+        ),
     )
     args = ap.parse_args(argv)
 
