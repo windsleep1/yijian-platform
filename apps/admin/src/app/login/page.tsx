@@ -131,15 +131,10 @@ function LoginForm() {
           </Button>
         </form>
 
-        <div className="mt-4 rounded-md border border-dashed bg-card/60 p-3 text-xs leading-relaxed text-muted-foreground">
-          <p className="font-medium text-foreground">本地联调默认超管</p>
-          <p className="yj-json mt-1">13800000000 / Admin@123456</p>
-          <p className="mt-1">
-            该账号由 <code className="yj-json">python -m app.cli seed-admin</code> 创建 （docker
-            compose 启动时自动执行，本地验收脚本
-            <code className="yj-json"> tools/local-verify/run-smoke.ps1</code> 也会执行）。
-          </p>
-        </div>
+        {/* ★ 2026-10-08 删掉这里原有一段「本地联调默认超管」的提示（手机号 / 默认密码 / seed-admin 说明）：
+            ① 公开部署的登录页上不该出现**凭据**与**内部工具说明**（同 BL-24：说明属于代码注释，不属于渲染出来的 DOM）；
+            ② 那串密码**不随环境变** ⇒ 在真凭据之外又多了一处"会过期的假信息"（真凭据只在部署环境变量里）。
+            本地联调要用账号 → 看 `apps/admin/README.md`。 */}
       </div>
     </div>
   );

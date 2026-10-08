@@ -47,7 +47,7 @@ flowchart TB
     end
 
     subgraph be["Render · 容器"]
-        API["apps/api<br/>FastAPI · 77 接口 / 13 模块<br/>57 项不变量门禁 · 466 用例"]
+        API["apps/api<br/>FastAPI · 77 接口 / 13 模块<br/>60 项不变量门禁 · 466 用例"]
         CORE["packages/api-core<br/>认证链路**唯一**实现"]
     end
 
@@ -508,7 +508,7 @@ apps/api        17623 行 → p95=83  p99=97   超过 88 列 2.9%  超过 100 �
 （index / 工作区 / CI）统一。加之前核对过：**index 里 208 个文本文件本来就全是 LF**，
 所以这个文件没有产生任何 renormalize 差异（`git add --renormalize .` 后 `git status` 无新增）。
 
-### 覆盖率：三个进程各采一份再合并，门槛 85%
+### 覆盖率：三个进程各采一份再合并，门槛 94.40（**棘轮**，正文是权威）
 
 用例是**通过 HTTP** 打到独立 uvicorn 进程的（`tests/conftest.py` 里就是个普通
 `httpx.Client`，base_url 来自 `AI_BASE`）。所以在 pytest 进程里跑 `pytest --cov=app`

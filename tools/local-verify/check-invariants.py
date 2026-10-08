@@ -1398,9 +1398,176 @@ def check_pwa_id_boundaries() -> None:
     ok(f"`{rel}`：{n_seg} 处 URL 段 id + {n_q} 处查询串 id 全走 `asId()`；两个转换点都在")
 
 
+# ------------------------------------------------------------------ 15
+#: 允许「逐字节相同」的截图 —— **必须登记理由**（判据：那两张**语义上就该是同一屏**）。
+_SHOT_DUP_ALLOW: dict[frozenset[str], str] = {
+    frozenset(
+        {
+            "apps/admin/docs/screenshots/01-login.png",
+            "apps/admin/docs/screenshots/14-401-redirect-login.png",
+        }
+    ): "那一镜的断言就是「未登录访问后台 ⇒ 跳到登录页」⇒ 画面必然是登录页本身",
+}
+MIN_SHOT_COUNT = 80
+
+
+def check_shot_uniqueness() -> None:
+    print("[15] 截图不许逐字节相同（除非登记了「语义上就该相同」）—— 不变量 15")
+    import hashlib
+
+    by_hash: dict[str, list[str]] = {}
+    n = 0
+    for sub in ("apps/admin/docs/screenshots", "apps/web/docs/screenshots"):
+        root = REPO / sub
+        if not root.is_dir():
+            bad(f"找不到截图目录 {sub}")
+            return
+        for png in sorted(root.rglob("*.png")):
+            rel = str(png.relative_to(REPO)).replace("\\", "/")
+            by_hash.setdefault(hashlib.md5(png.read_bytes()).hexdigest(), []).append(rel)
+            n += 1
+    if n < MIN_SHOT_COUNT:
+        bad(f"只扫到 {n} 张截图（< {MIN_SHOT_COUNT}）—— **量错了对象**，不算通过")
+        return
+    dup_groups = [sorted(v) for v in by_hash.values() if len(v) > 1]
+    unregistered = [g for g in dup_groups if frozenset(g) not in _SHOT_DUP_ALLOW]
+    stale = [
+        sorted(pair) for pair in _SHOT_DUP_ALLOW if not any(frozenset(g) == pair for g in dup_groups)
+    ]
+    if unregistered or stale:
+        for g in unregistered:
+            bad("截图出现**未登记的逐字节重复**：" + " / ".join(g))
+        for g in stale:
+            bad("白名单里的登记**已不再重复**（陈旧，请删）⇒ " + " / ".join(g))
+        print("      ⇒ 判据：重复要么是**真·同一屏**（登记进 `_SHOT_DUP_ALLOW` 并写理由），要么修掉；")
+        print("        白名单本身也要能被证伪 —— 登记了却已不重复 ⇒ 同样红（防'陈旧豁免'）。")
+        return
+    ok(f"{n} 张截图；{len(dup_groups)} 组重复**都已登记理由**，{len(_SHOT_DUP_ALLOW)} 条登记也都对得上")
+
+
+# ------------------------------------------------------------------ 16
+def _routes_count() -> int:
+    root = REPO / "apps/api/app/api/v1"
+    pat = re.compile(r"^@router\.(?:get|post|put|patch|delete)", re.M)
+    return sum(
+        len(pat.findall(p.read_text(encoding="utf-8")))
+        for p in sorted(root.glob("*.py"))
+        if p.name != "__init__.py"
+    )
+
+
+def _router_modules_count() -> int:
+    root = REPO / "apps/api/app/api/v1"
+    return len([p for p in root.glob("*.py") if p.name != "__init__.py"])
+
+
+def _test_modules_count() -> int:
+    return len(list((REPO / "apps/api/tests").glob("test_*.py")))
+
+
+def _pitfall_count() -> int:
+    t = (REPO / "apps/admin/docs/B端联调坑.md").read_text(encoding="utf-8")
+    return len(re.findall(r"^## \d+\.", t, re.M))
+
+
+#: README 的**关键计数** → 权威源。★ 判据：README 属「当前状态类」，它写的数必须等于**现算**的数。
+#: ⚠️ 正则**必须带「共」这类限定**：README 里还有"每批交付"的历史数字
+#:   （如「Batch 4 … 后端 7 个接口」）—— 把它们也算进来就是**假红**。
+#: ★ 「后端用例数」的权威源在**管道回执**里、不在仓库 ⇒ 只查 README **内部自洽**（如实标注，不假装查了权威源）。
+_README_NUM_RULES: list = [
+    ("后端接口数", re.compile(r"共\s*\**\s*(\d+)\s*个接口"), _routes_count),
+    ("路由模块数", re.compile(r"(\d+)\s*个?模块"), _router_modules_count),
+    ("测试模块数", re.compile(r"(\d+)\s*个测试模块"), _test_modules_count),
+    ("坑条数", re.compile(r"(\d+)\s*条实战坑"), _pitfall_count),
+    ("后端用例数", re.compile(r"(\d+)\s*passed"), None),
+]
+
+
+def check_readme_counts() -> None:
+    print("[16] README 的关键计数必须与权威源一致 —— 不变量 16（README 属「当前状态类」）")
+    readme = read("README.md")
+    if readme is None:
+        return
+    problems: list[str] = []
+    notes: list[str] = []
+    for name, pat, src in _README_NUM_RULES:
+        hits = sorted({int(x) for x in pat.findall(readme)})
+        if not hits:
+            problems.append(f"{name}：README 里**一处都读不到**（写法变了 ⇒ 本检查会**假绿**）")
+            continue
+        if src is None:
+            if len(hits) != 1:
+                problems.append(f"{name}：README **内部就不自洽** {hits}（权威源不在仓库，只查这一层）")
+            else:
+                notes.append(f"{name}={hits[0]}（只查自洽）")
+            continue
+        want = src()
+        wrong = [h for h in hits if h != want]
+        if wrong:
+            problems.append(f"{name}：README 写 {hits}，**实测 {want}**")
+        else:
+            notes.append(f"{name}={want}")
+    if problems:
+        bad("README 数字对不上权威源：" + "；".join(problems))
+        print("      ⇒ 修 README（它属**当前状态类**），或把权威源改对。")
+        return
+    ok("README 关键计数与权威源逐项一致：" + " ｜ ".join(notes))
+
+
+# ------------------------------------------------------------------ 17
+#: 前端**渲染出来的**文本里不许出现的东西（判据照 BL-24：说明属于代码注释，不属于 DOM）。
+#: ★★ **边界（实测过误报，别把范围放宽）**：`seed-admin` **单独**出现**不算** ——
+#:   `AssignRolesDialog` 的 tooltip 里有一句「该角色只能通过**运维命令行**（seed-admin）授予」，
+#:   那是**给管理员看的操作说明**（解释"为什么这里不能提权"），既非内部排期、也非凭据 ⇒ **判为允许**。
+#:   ⇒ 只抓「**带仓库路径 / dev-only 措辞 / 凭据形态**」的那种。
+_JSX_FORBIDDEN = (
+    (re.compile(r"BL-\d+"), "内部待办编号 BL-xx"),
+    (re.compile(r"P2[a-z]-?\d"), "内部批次号 P2x-x"),
+    (re.compile(r"本批\s*[（(]"), "「本批（…）」式排期说明"),
+    (
+        re.compile(
+            r"tools/local-verify|run-smoke\.ps1|run-local-pipeline\.py"
+            r"|python -m app\.cli|docker compose 启动时"
+        ),
+        "内部脚本 / 仓库路径",
+    ),
+    (re.compile(r"本地(联调|验收|走查)"), "「本地联调 / 验收」式开发说明"),
+    (re.compile(r"默认超管"), "默认账号提示"),
+    (re.compile(r"1[3-9]\d{9}\s*/\s*\S+"), "「手机号 / 密码」形式的凭据"),
+)
+MIN_JSX_SCAN_FILES = 20
+
+
+def check_jsx_internal_notes() -> None:
+    print("[17] 渲染出来的 JSX 文本里不许出现内部说明 / 凭据 —— 不变量 17")
+    hits: list[str] = []
+    scanned = 0
+    for app in sorted(p for p in (REPO / "apps").iterdir() if p.is_dir()):
+        src = app / "src"
+        if not src.is_dir():
+            continue
+        for tsx in sorted(src.rglob("*.tsx")):
+            rel = str(tsx.relative_to(REPO)).replace("\\", "/")
+            scanned += 1
+            # ★ 必须先剥注释：BL-24 的裁决正是"说明属于**代码注释**" ⇒ 注释里**允许**出现这些词。
+            body = _strip_js_comments(tsx.read_text(encoding="utf-8"))
+            for pat, why in _JSX_FORBIDDEN:
+                for m in pat.finditer(body):
+                    hits.append(f"{rel}：{why}（{m.group(0)!r}）")
+    if scanned < MIN_JSX_SCAN_FILES:
+        bad(f"只扫到 {scanned} 个 .tsx（< {MIN_JSX_SCAN_FILES}）—— **量错了对象**，不算通过")
+        return
+    if hits:
+        bad("渲染文本里出现内部说明 / 凭据：\n        " + "\n        ".join(hits[:12]))
+        print("      ⇒ 判据（BL-24）：说明写进**代码注释 / `docs/`**，不写进 DOM；")
+        print("        凭据只走**部署环境变量**，不写进仓库 —— 写了就是又一串'会过期的假信息'。")
+        return
+    ok(f"{scanned} 个 .tsx（admin / web / pwa 全覆盖）的渲染文本里：内部编号 / 默认凭据 **0 处**")
+
+
 def main() -> int:
     print(
-        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11/12/13/14；"
+        "=== 不变量自检（`docs/24` §8 + `docs/25` 第 6 条 + 本批 7/8/9/10/11/12/13/14/15/16/17；"
         "每批收尾跑一次）==="
     )
     check_gates()
@@ -1417,6 +1584,9 @@ def main() -> int:
     check_e2e_scenarios()
     check_no_hardcoded_paths()
     check_pwa_id_boundaries()
+    check_shot_uniqueness()
+    check_readme_counts()
+    check_jsx_internal_notes()
     passed = sum(1 for good, _ in _results if good)
     failed = [label for good, label in _results if not good]
     print()
